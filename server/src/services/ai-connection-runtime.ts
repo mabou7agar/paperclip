@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { managedAiHomeEnvironment } from "@paperclipai/adapter-utils/managed-ai-session-fingerprint";
+export { managedAiSessionFingerprintConfig } from "@paperclipai/adapter-utils/managed-ai-session-fingerprint";
 import { HttpError, unprocessable } from "../errors.js";
 import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import os from "node:os";
@@ -174,39 +176,6 @@ done`,
     if (parent === directory) break;
     directory = parent;
   }
-}
-
-function managedAiHomeEnvironment(home: string): Record<string, string> {
-  const providerHome = path.join(home, "provider");
-  return {
-    HOME: home,
-    XDG_CONFIG_HOME: path.join(home, "config"),
-    XDG_DATA_HOME: path.join(home, "data"),
-    CODEX_HOME: providerHome,
-    GROK_HOME: providerHome,
-    CLAUDE_CONFIG_DIR: providerHome,
-    HERMES_HOME: providerHome,
-  };
-}
-
-/** Only the server-created credential home is volatile; retain all other config. */
-export function managedAiSessionFingerprintConfig(
-  config: Record<string, unknown>,
-  managedHome: string | undefined,
-): Record<string, unknown> {
-  if (!managedHome) return config;
-  const env = { ...(config.env as Record<string, unknown> | undefined) };
-  const stable = managedAiHomeEnvironment("<managed-ai-home>");
-  for (const [key, value] of Object.entries(managedAiHomeEnvironment(managedHome))) {
-    if (env[key] === value) env[key] = stable[key];
-  }
-  const managed = config.managedAiConnection as Record<string, unknown> | undefined;
-  if (managed?.sessionIdentity) {
-    for (const key of ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY", "OPENROUTER_API_KEY", "XAI_API_KEY", "GROK_API_KEY", "OPENCODE_AUTH_JSON", "OPENCODE_CONFIG_CONTENT"]) {
-      if (env[key]) env[key] = "<managed-ai-credential>";
-    }
-  }
-  return { ...config, env, ...(managed?.sessionIdentity ? { managedAiConnection: { ...managed, identity: managed.sessionIdentity } } : {}) };
 }
 
 export async function prepareManagedAiRuntime(

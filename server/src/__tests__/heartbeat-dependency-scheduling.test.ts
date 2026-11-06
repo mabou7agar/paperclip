@@ -172,6 +172,76 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     await tempDb?.cleanup();
   });
 
+  async function seedDispositionRecoveryHold(kind = "deliberate_wait_without_target") {
+    const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID(), actionId = randomUUID();
+    const blockedAt = new Date("2026-11-06T11:00:00Z");
+    await db.insert(companies).values({ id: companyId, name: "Recovery guard", issuePrefix: `R${companyId.slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false, defaultResponsibleUserId: "responsible-user" });
+    await db.insert(agents).values({ id: agentId, companyId, name: "Worker", role: "engineer", status: "active",
+      adapterType: "codex_local", adapterConfig: {}, runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } }, permissions: {} });
+    await db.insert(issues).values({ id: issueId, companyId, title: "Waiting for operator repair", status: "blocked",
+      assigneeAgentId: agentId, responsibleUserId: "responsible-user", blockedTransitionAt: blockedAt });
+    await db.insert(issueRecoveryActions).values({ id: actionId, companyId, sourceIssueId: issueId,
+      kind, cause: kind === "stranded_assigned_issue" ? "provider_quota" : "deliberate_wait_without_target", ownerType: "board",
+      fingerprint: "exhausted-episode", nextAction: "Restore API access and explicitly retry.",
+      evidence: { terminalReason: "unchanged_source_state_exhausted" }, wakePolicy: { type: "board_escalation" } });
+    return { companyId, agentId, issueId, actionId, blockedAt };
+  }
+
+  it.each(["deliberate_wait_without_target", "stranded_assigned_issue"])("holds repeated dependency wakes for %s until the board resolves it", async (kind) => {
+    const { companyId, agentId, issueId, actionId, blockedAt } = await seedDispositionRecoveryHold(kind);
+    mockAdapterExecute.mockImplementation(async () => {
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null, summary: "Recovered.", provider: "test", model: "test-model" };
+    });
+    const wake = () => heartbeat.wakeup(agentId, { source: "automation", triggerDetail: "system",
+      reason: "issue_blockers_resolved", requestedByActorType: "system", requestedByActorId: "test-recovery",
+      payload: { issueId }, contextSnapshot: { issueId, wakeReason: "issue_blockers_resolved" } });
+    for (let i = 0; i < 20; i++) expect(await wake()).toBeNull();
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId))).toHaveLength(0);
+    const waits = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, companyId));
+    expect(waits).toHaveLength(1);
+    expect(waits[0]).toMatchObject({ reason: "issue_recovery_requires_board", status: "skipped", coalescedCount: 19 });
+    expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]).toMatchObject({ status: "blocked", blockedTransitionAt: blockedAt });
+    await db.update(issueRecoveryActions).set({ status: "resolved", resolvedAt: new Date(), outcome: "handed_back" }).where(eq(issueRecoveryActions.id, actionId));
+    expect(await wake()).not.toBeNull();
+    expect(await waitForCondition(async () => mockAdapterExecute.mock.calls.length === 1)).toBe(true);
+    await heartbeat.drainActiveRunExecutions();
+  }, 30_000);
+
+  it("rechecks the disposition hold before a previously queued dependency run starts", async () => {
+    const { companyId, agentId, issueId, actionId } = await seedDispositionRecoveryHold();
+    await db.update(issueRecoveryActions).set({ status: "resolved" }).where(eq(issueRecoveryActions.id, actionId));
+    const busyIssueId = randomUUID();
+    await db.insert(issues).values({ id: busyIssueId, companyId, title: "Occupy the worker", status: "todo",
+      assigneeAgentId: agentId, responsibleUserId: "responsible-user" });
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    mockAdapterExecute.mockImplementation(async () => {
+      await gate;
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, busyIssueId));
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null, summary: "Finished.", provider: "test", model: "test-model" };
+    });
+    try {
+      expect(await heartbeat.wakeup(agentId, { source: "assignment", reason: "issue_assigned", payload: { issueId: busyIssueId },
+        contextSnapshot: { issueId: busyIssueId, wakeReason: "issue_assigned" } })).not.toBeNull();
+      expect(await waitForCondition(async () => mockAdapterExecute.mock.calls.length === 1)).toBe(true);
+      const queued = await heartbeat.wakeup(agentId, { source: "automation", reason: "issue_blockers_resolved", payload: { issueId },
+        contextSnapshot: { issueId, wakeReason: "issue_blockers_resolved" } });
+      expect(queued?.status).toBe("queued");
+      await db.update(issueRecoveryActions).set({ status: "active" }).where(eq(issueRecoveryActions.id, actionId));
+      release();
+      expect(await waitForCondition(async () => {
+        const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, queued!.id));
+        return run?.status === "cancelled";
+      })).toBe(true);
+      const [cancelled] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, queued!.id));
+      expect(cancelled?.errorCode).toBe("issue_recovery_requires_board");
+      expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+    } finally { release(); await heartbeat.drainActiveRunExecutions(); }
+  }, 30_000);
+
   it("delivers a revised native child completion after the running parent blocks", async () => {
     const companyId = randomUUID();
     const agentId = randomUUID();

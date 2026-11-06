@@ -88,6 +88,8 @@ import {
 } from "@paperclipai/adapter-utils/server-utils";
 import { shellQuote } from "@paperclipai/adapter-utils/ssh";
 import { createEphemeralSessionEnvironmentStore } from "./ephemeral-session-environment.js";
+import { managedAiSessionFingerprintConfig } from "../managed-ai-session-fingerprint.js";
+import { prepareManagedClaudeSessionStorage } from "../managed-claude-session-storage.js";
 import {
   createAcpRuntime,
   createAgentRegistry,
@@ -2037,6 +2039,15 @@ async function buildRuntime(input: {
     if (!scratchKeys.has(key) || value !== scratch.dir) resolvedAdapterEnv[key] = value;
   }
   if (authToken) env.PAPERCLIP_API_KEY = authToken;
+  const managedSessionIdentity = acpxAgent === "claude"
+    ? asString(parseObject(config.managedAiConnection).sessionIdentity, "")
+    : "";
+  const canonicalManagedConfig = managedSessionIdentity
+    ? managedAiSessionFingerprintConfig({ ...config, env: resolvedAdapterEnv }, asString(envConfig.HOME, "") || undefined)
+    : null;
+  if (acpxAgent === "claude" && managedSessionIdentity && !executionTargetIsRemote) {
+    await prepareManagedClaudeSessionStorage({ stateDir, sessionIdentity: managedSessionIdentity, env });
+  }
   // For the claude agent, set model via ANTHROPIC_MODEL at startup rather than
   // via session/set_config_option — the ACP server's set_config_option handler
   // validates the value against its internal available-models list and rejects
@@ -2262,7 +2273,9 @@ async function buildRuntime(input: {
     // that sources the latest env. secretManifestHash alone misses plain-value
     // edits and same-version secret rotations. Per-wake runtime vars never enter
     // resolvedAdapterEnv, so they don't churn the fingerprint every heartbeat.
-    adapterEnvHash: shortHash(resolvedAdapterEnv),
+    adapterEnvHash: shortHash(canonicalManagedConfig
+      ? { env: canonicalManagedConfig.env, sessionIdentity: managedSessionIdentity }
+      : resolvedAdapterEnv),
   };
   const fingerprint = buildSessionFingerprint(fingerprintIdentity);
   const taskKey = asString(input.ctx.runtime.taskKey, "") || wakeTaskId || workspaceId || "default";
@@ -4297,7 +4310,10 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         if (cached && (ctx.context.refreshTools === true
           || asString(previousParams.mcpFingerprint, "") !== shortHash(prepared.mcpIdentity)
           // MCP bearer credentials are run-scoped, even for an unchanged catalog.
-          || prepared.mcpServers.length > 0)) {
+          || prepared.mcpServers.length > 0
+          // A managed login gets a disposable home/current credentials per run.
+          // Resume its saved conversation with a fresh process and environment.
+          || (prepared.acpxAgent === "claude" && Boolean(parseObject(ctx.config.managedAiConnection).sessionIdentity)))) {
           await hostStore.discard(prepared.sessionKey);
           cached = undefined;
         }

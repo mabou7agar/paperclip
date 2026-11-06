@@ -2041,6 +2041,44 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(fp(sameEnvNewWake)).toBe(fp(first));
   });
 
+  it("reuses managed AI sessions across disposable homes but isolates account and credential epochs", async () => {
+    const root = await makeTempRoot();
+    const base = { agent: "claude", agentCommand: "node ./fake-acp.js", cwd: root, stateDir: path.join(root, "state") };
+    const configFor = (home: string, sessionIdentity = "grant:user:secret:1", token = "fixture-token") => ({
+      ...base,
+      managedAiConnection: { sessionIdentity, identity: `${sessionIdentity}:token-generation` },
+      env: {
+        HOME: home, XDG_CONFIG_HOME: path.join(home, "config"), XDG_DATA_HOME: path.join(home, "data"),
+        CLAUDE_CONFIG_DIR: path.join(home, "provider"), CODEX_HOME: path.join(home, "provider"),
+        GROK_HOME: path.join(home, "provider"), HERMES_HOME: path.join(home, "provider"),
+        CLAUDE_CODE_OAUTH_TOKEN: token,
+      },
+    });
+    const first = await runExecutor(configFor(path.join(root, "home-1")), { context: { taskId: "issue-1" } });
+    await fs.writeFile(path.join(root, "home-1", "provider", "projects", "fixture-session.jsonl"), "native transcript", "utf8");
+    await fs.writeFile(path.join(root, "home-1", "provider", ".credentials.json"), "private fixture", "utf8");
+    await fs.rm(path.join(root, "home-1"), { recursive: true, force: true });
+    const resumed = await runExecutor(configFor(path.join(root, "home-2"), undefined, "refreshed-fixture-token"), {
+      context: { taskId: "issue-1" }, runtime: { sessionParams: first.result.sessionParams },
+    });
+    expect(resumed.result.sessionParams?.configFingerprint).toBe(first.result.sessionParams?.configFingerprint);
+    expect(resumed.sessionInputs[0]?.resumeSessionId).toBe(first.result.sessionId);
+    const env = (resumed.sessionInputs[0]?.sessionOptions as { env: Record<string, string> }).env;
+    expect(env.CLAUDE_CONFIG_DIR).toBe(path.join(root, "home-2", "provider"));
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe("refreshed-fixture-token");
+    expect(await fs.readFile(path.join(env.CLAUDE_CONFIG_DIR, "projects", "fixture-session.jsonl"), "utf8")).toBe("native transcript");
+    expect(await pathExists(path.join(env.CLAUDE_CONFIG_DIR, ".credentials.json"))).toBe(false);
+    for (const [index, identity] of ["grant:user:secret:2", "other-grant:user:secret:1"].entries()) {
+      const home = path.join(root, `changed-home-${index}`);
+      const changed = await runExecutor(configFor(home, identity), {
+        context: { taskId: "issue-1" }, runtime: { sessionParams: first.result.sessionParams },
+      });
+      expect(changed.result.sessionParams?.configFingerprint).not.toBe(first.result.sessionParams?.configFingerprint);
+      expect(changed.sessionInputs[0]?.resumeSessionId).toBeFalsy();
+      expect(await pathExists(path.join(home, "provider", "projects", "fixture-session.jsonl"))).toBe(false);
+    }
+  });
+
   it("keeps rotated run scratch paths out of session identity while retaining user temp overrides", async () => {
     const root = await makeTempRoot();
     const config = { agentCommand: "node ./fake-acp.js", stateDir: path.join(root, "state") };

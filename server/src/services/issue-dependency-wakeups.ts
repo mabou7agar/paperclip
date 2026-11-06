@@ -1,9 +1,30 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, or, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import type { Db } from "@paperclipai/db";
-import { agentWakeupRequests } from "@paperclipai/db";
+import { agentWakeupRequests, issueRecoveryActions } from "@paperclipai/db";
 
 export const ISSUE_BLOCKERS_RESOLVED_WAKE_REASON = "issue_blockers_resolved";
+
+/** Resolved task blockers do not clear an exhausted or board-escalated repair. */
+export async function findIssueDependencyRecoveryHold(
+  db: Pick<Db, "select">,
+  companyId: string,
+  issueId: string,
+) {
+  const [hold] = await db.select({ id: issueRecoveryActions.id })
+    .from(issueRecoveryActions)
+    .where(and(
+      eq(issueRecoveryActions.companyId, companyId),
+      eq(issueRecoveryActions.sourceIssueId, issueId),
+      or(
+        eq(issueRecoveryActions.kind, "deliberate_wait_without_target"),
+        sql`${issueRecoveryActions.wakePolicy}->>'type' = 'board_escalation'`,
+      ),
+      eq(issueRecoveryActions.ownerType, "board"),
+      inArray(issueRecoveryActions.status, ["active", "escalated"]),
+    )).limit(1);
+  return hold ?? null;
+}
 
 // A wake counts as "already delivered or in flight for the current ready state"
 // for these statuses. The level-triggered state key uses this full set so that

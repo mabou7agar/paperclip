@@ -126,7 +126,7 @@ import {
   isThrottleCandidateIssueRewake,
 } from "../issue-rewake-throttle.js";
 import { logActivity } from "../activity-log.js";
-import { ISSUE_BLOCKERS_RESOLVED_WAKE_REASON } from "../issue-dependency-wakeups.js";
+import { ISSUE_BLOCKERS_RESOLVED_WAKE_REASON, findIssueDependencyRecoveryHold } from "../issue-dependency-wakeups.js";
 import {
   ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
   isVerifiedIssueTreeControlInteractionWake,
@@ -1014,6 +1014,22 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     }
 
     const issueId = readNonEmptyString(context.issueId);
+    if (issueId && context.wakeReason === ISSUE_BLOCKERS_RESOLVED_WAKE_REASON &&
+        await findIssueDependencyRecoveryHold(db, run.companyId, issueId)) {
+      const now = new Date();
+      const reason = "Dependency wake is held until the board resolves the recovery action";
+      // Claim runs under the start lock; cancel without recursively claiming again.
+      const cancelled = await setRunStatus(run.id, "cancelled", {
+        finishedAt: now, error: reason, errorCode: "issue_recovery_requires_board",
+      });
+      if (cancelled) {
+        await setWakeupStatus(run.wakeupRequestId, "skipped", { finishedAt: now, error: reason });
+        await releaseIssueExecutionAndPromote(cancelled, {
+          suppressImmediateRecovery: true, deferredPostCommitEffects,
+        });
+      }
+      return null;
+    }
     if (issueId && activeRunExecutions.size > 0) {
       // Native finalization publishes success before workspace synchronization,
       // provider suspension, and lease release finish. A queued comment must
@@ -2913,6 +2929,25 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               requestedByActorId: opts.requestedByActorId ?? null,
               idempotencyKey: opts.idempotencyKey ?? null,
               finishedAt: new Date(),
+            });
+            return { kind: "skipped" as const };
+          }
+
+          const dependencyRecoveryHold = reason === ISSUE_BLOCKERS_RESOLVED_WAKE_REASON
+            ? await findIssueDependencyRecoveryHold(tx, issue.companyId, issue.id)
+            : null;
+          if (dependencyRecoveryHold) {
+            await recordExecutionWait(tx as unknown as Db, {
+              issueId: issue.id,
+              coalesce: coalesceExecutionWait,
+              condition: { reason: "issue_recovery_requires_board", recoveryActionId: dependencyRecoveryHold.id },
+              request: {
+                ...durableReceiptFields, companyId: agent.companyId, agentId, source, triggerDetail,
+                reason: "issue_recovery_requires_board", payload: { ...payload, issueId, requestedReason: reason },
+                requestedByActorType: opts.requestedByActorType ?? null,
+                requestedByActorId: opts.requestedByActorId ?? null,
+                idempotencyKey: opts.idempotencyKey ?? null,
+              },
             });
             return { kind: "skipped" as const };
           }

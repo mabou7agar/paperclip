@@ -1,0 +1,42 @@
+---
+title: "Claude session reuse and bounded recovery"
+description: "Retain native Claude context across managed launches and stop exhausted repair loops."
+---
+
+Managed AI connections use disposable credential homes on each run. These paths
+are launch details, not conversation identity. The server and legacy Claude ACP engine
+share one normalizer; grant, responsible user, secret identity and credential
+epoch still isolate conversations. Routine token refresh does not reset context.
+Changing an account, explicitly reconnecting it, or changing ordinary adapter
+configuration still invalidates compatibility.
+
+For local managed Claude launches, only the provider's `projects` transcript
+directory is retained beneath the agent's ACP state directory, partitioned by a
+hash of its managed connection session identity. Each disposable provider home
+links that directory before launch. Cleanup removes the home and credentials,
+while native session transcripts survive. Existing directories and foreign
+links are never overwritten. Explicit operator directories and remote sandbox
+storage retain their existing behavior. A fresh process receives current run
+credentials when resuming a retained conversation.
+
+Dependency readiness does not clear an exhausted disposition repair owned by
+the board. Automatic `issue_blockers_resolved` wakes are held before a heartbeat
+run is created. Replaceable system wakes coalesce into one diagnostic receipt;
+queued runs recheck the hold before starting. The issue remains blocked, and the
+board recovery action remains authoritative. Resolve that action using the
+existing recovery workflow before retrying. Ordinary human interaction and
+explicit recovery actions retain their existing admission rules.
+
+If the browser URL is protected by an external login gateway, configure
+`PAPERCLIP_API_URL` to a trusted address reachable by the agent runtime.
+`PAPERCLIP_PUBLIC_URL` remains the browser/auth URL. Internal requests still
+require Paperclip authentication; an HTML login redirect must not be treated as
+a successful agent API response. Remote runtimes need an address reachable from
+their execution environment rather than that environment's loopback address.
+
+Regression validation uses fake ACP providers and an isolated database. It
+checks native-session resume across home cleanup, account/epoch isolation,
+current credentials, repeated dependency wakes, explicit release, and the queued
+run race without making inference requests. A live cache-hit ratio must still be
+observed after the provider allowance resets; session reuse cannot guarantee a
+provider cache hit when its cache expires or the prompt prefix changes.
