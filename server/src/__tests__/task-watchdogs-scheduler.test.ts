@@ -23,6 +23,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { taskWatchdogService } from "../services/task-watchdogs.ts";
+import { monitoringService } from "../services/monitoring.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -165,6 +166,17 @@ describeEmbeddedPostgres("task watchdog scheduler", () => {
     });
     return { service, wakes };
   }
+
+  it("reports a stopped subtree once without creating a watchdog task or waking an agent", async () => {
+    const companyId = await seedCompany(), sourceId = await seedIssue(companyId, { status: "done" }), agentId = await seedAgent(companyId);
+    await seedWatchdog(companyId, sourceId, agentId);
+    await monitoringService(db).savePolicy(companyId, { mode: "alert_only" }, "owner");
+    const { service, wakes } = createService();
+    for (let i = 0; i < 4; i++) await service.reconcileTaskWatchdogs({ companyId });
+    expect(wakes).toHaveLength(0);
+    expect(await monitoringService(db).alerts(companyId)).toHaveLength(1);
+    expect(await db.select().from(issues).where(eq(issues.companyId, companyId))).toHaveLength(1);
+  });
 
   it("creates one reusable watchdog issue and wakes the watchdog on the initial stopped state", async () => {
     const companyId = await seedCompany();

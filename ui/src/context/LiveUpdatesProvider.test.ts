@@ -1647,6 +1647,12 @@ describe("task subtree notification context", () => {
 
 describe("activity toast attribution", () => {
   const build = __liveUpdatesTestUtils.buildActivityToast;
+  it("links monitoring alerts to their source and deduplicates by incident rather than run", () => {
+    const toast = build(new QueryClient(), "company", { action: "monitoring.alert", entityType: "issue", entityId: "task-1",
+      details: { kind: "no_execution_path", alertId: "incident-1" } }, { userId: "owner", agentId: null });
+    expect(toast).toMatchObject({ title: "Task needs attention", tone: "warn", dedupeKey: "monitoring:incident-1", action: { href: "/issues/task-1" } });
+    expect(toast?.body).toContain("real change");
+  });
   it("delivers a usage alert once per run and refreshes only that company's report", () => {
     const client = new QueryClient();
     const invalidate = vi.spyOn(client, "invalidateQueries");

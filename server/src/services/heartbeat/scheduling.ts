@@ -1,3 +1,4 @@
+import { monitoringService } from "../monitoring.js";
 import {
   issues,
   issueComments,
@@ -936,6 +937,13 @@ export function createHeartbeatScheduling(
     let skipped = 0;
 
     for (const due of dueMonitors) {
+      // Provider renewal is a bounded execution continuation, not polling.
+      if (parseObject(parseObject(due.executionPolicy).monitor).serviceName !== PROVIDER_QUOTA_MONITOR_SERVICE_NAME &&
+        await monitoringService(db).observe({ companyId: due.companyId, issueId: due.id, kind: "monitor_due",
+          fingerprint: JSON.stringify([due.assigneeAgentId, due.monitorNextCheckAt?.toISOString(), due.monitorNotes]) })) {
+        skipped += 1;
+        continue;
+      }
       const claimed = await db.transaction(async (tx) => {
         const [updated] = await tx
           .update(issues)

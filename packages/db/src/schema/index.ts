@@ -249,3 +249,4 @@ export * from "./fast_responses.js";
 export { companyPhaseRouting } from "./company_phase_routing.js";
 
 export { companyUsageHealth } from "./company_usage_health.js";
+export { companyMonitoringPolicies } from "./company_monitoring_policies.js";

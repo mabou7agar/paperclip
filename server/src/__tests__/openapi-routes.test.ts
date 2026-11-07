@@ -28,6 +28,7 @@ const apiPrefixes: Record<string, string> = {
   "fast-responses.ts": "/api",
   "phase-routing.ts": "/api",
   "usage-health.ts": "/api",
+  "monitoring.ts": "/api",
   "attention.ts": "/api",
   "approvals.ts": "/api",
   "assets.ts": "/api",

@@ -1,0 +1,33 @@
+---
+title: Event-driven monitoring
+description: Report stalled work once without repeatedly starting agents.
+---
+
+Company monitoring defaults to `automatic` for compatibility. Set `mode` to
+`alert_only` through `PUT /api/v1/companies/{companyId}/monitoring` to stop
+observation-driven recovery turns. Only company administrators can change it.
+`GET` on the same path returns the policy and the latest 100 durable alerts.
+The Bruno Monitoring collection contains both requests.
+
+In alert-only mode, missing dispositions, stranded execution paths, scheduled
+task checks and stopped-subtree watchdogs create a company-scoped Audit alert
+and a live board notification. An unchanged cause/state has a deterministic
+alert identity, so concurrent checks, scheduler sweeps and server restarts do
+not create more alerts or provider turns. Monitoring does not reopen, reassign
+or mark tasks complete. Existing source, planning and review context remains.
+
+Dependency completion and workspace finalization are real execution events:
+their normal once-per-ready-state continuation remains enabled. A periodic
+readiness backstop only alerts in this mode. Manual owner messages, normal
+assignments, Tech Lead review, approvals and bounded provider quota renewal
+retain their existing authorization and scheduling rules. Already queued,
+unstarted monitoring turns are cancelled at the dispatch boundary.
+
+Pausing a monitoring agent preserves its history and prevents its own timer
+from running. Disable that agent's periodic heartbeat before intentionally
+resuming it if it should remain available only on demand. The server performs
+deterministic reconciliation; no LLM is used to poll unchanged incidents.
+
+Alerts are historical records, not proof that an incident remains unresolved.
+Open the source task for current state. A changed cause/state may create a new
+alert. Existing companies retain automatic behavior until explicitly switched.

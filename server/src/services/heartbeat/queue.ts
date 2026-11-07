@@ -1,3 +1,4 @@
+import { monitoringService } from "../monitoring.js";
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
 import { normalizeAgentNameKey } from "./retries.js";
 import { publishActiveDotComment } from "../dot-assignment-follow-up.js";
@@ -940,6 +941,18 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     deferredPostCommitEffects?: WakeQueuePostCommitEffect[],
   ) {
     if (run.status !== "queued") return run;
+    const monitoringContext = parseObject(run.contextSnapshot);
+    if (!run.startedAt && await monitoringService(db).holdWake({ companyId: run.companyId,
+      issueId: run.issueId ?? readNonEmptyString(monitoringContext.issueId), source: run.invocationSource,
+      reason: readNonEmptyString(monitoringContext.wakeReason) ?? run.scheduledRetryReason, context: monitoringContext })) {
+      const now = new Date();
+      const cancelled = await setRunStatus(run.id, "cancelled", { finishedAt: now, errorCode: "monitoring_alert_only", error: "Monitoring is report-only" });
+      if (cancelled) {
+        await setWakeupStatus(run.wakeupRequestId, "skipped", { finishedAt: now, error: "Monitoring is report-only" });
+        await releaseIssueExecutionAndPromote(cancelled, { suppressImmediateRecovery: true, deferredPostCommitEffects });
+      }
+      return null;
+    }
     // Claim is the first execution boundary. startedAt survives same-run
     // retries; restart recovery may also enter executeRun already running.
     // Neither may reinterpret an admitted, already-started message as new work.
@@ -2163,6 +2176,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
 
     let agent = await getAgent(agentId);
     if (!agent) throw notFound("Agent not found");
+    if (await monitoringService(db).holdWake({ companyId: agent.companyId, issueId, source, reason,
+      context: { ...payload, ...enrichedContextSnapshot } })) return null;
     // Mentions only annotate comments. Ignore legacy callers before creating
     // a run or deferred request; assignment and review have their own wakes.
     if (reason === "issue_comment_mentioned" || enrichedContextSnapshot.wakeReason === "issue_comment_mentioned") return null;

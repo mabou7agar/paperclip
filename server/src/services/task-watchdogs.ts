@@ -1,3 +1,4 @@
+import { monitoringService } from "./monitoring.js";
 import { createHash } from "node:crypto";
 import { and, asc, eq, gte, inArray, isNull, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -1450,6 +1451,11 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     const classification = classifyTaskWatchdogSubtree(input);
     if (classification.state !== "stopped") {
       return { state: classification.state, reason: classification.reason, classification };
+    }
+
+    if (await monitoringService(db).observe({ companyId: sourceIssue.companyId, issueId: sourceIssue.id,
+      kind: "stopped_subtree", fingerprint: classification.stopFingerprint })) {
+      return { state: "skipped" as const, reason: "alert_only_monitoring", classification };
     }
 
     const existingWatchdogIssueId = watchdog.watchdogIssueId ?? (await findTaskWatchdogIssue(

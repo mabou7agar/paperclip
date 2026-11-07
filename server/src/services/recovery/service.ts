@@ -1,4 +1,5 @@
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
+import { monitoringService } from "../monitoring.js";
 import { isAiAuthenticationBlocked } from "../ai-auth-failure.js";
 import { hasCommittedNativePlanWait } from "../native-runtime/native-plan-wait.js";
 import { isNativeWorkspaceExportRepairCause } from "@paperclipai/shared";
@@ -1916,6 +1917,11 @@ export function recoveryService(
      */
     outcome?: { retryExhausted?: boolean };
   }) {
+    const sourceIssue = await db.select().from(issues).where(eq(issues.id, input.issueId)).limit(1).then(rows => rows[0]);
+    if (sourceIssue && await monitoringService(db).observe({
+      companyId: sourceIssue.companyId, issueId: sourceIssue.id, kind: "no_execution_path",
+      fingerprint: JSON.stringify([sourceIssue.status, sourceIssue.assigneeAgentId, input.reason]),
+    })) return null;
     if (input.retryOfRunId) {
       const [predecessor] = await db
         .select()
@@ -2042,6 +2048,10 @@ export function recoveryService(
     issue: typeof issues.$inferSelect,
     agentId: string,
   ) {
+    if (await monitoringService(db).observe({
+      companyId: issue.companyId, issueId: issue.id, kind: "no_execution_path",
+      fingerprint: JSON.stringify(["assigned_todo_liveness_dispatch", issue.status, agentId]),
+    })) return null;
     return deps.enqueueWakeup(agentId, {
       source: "assignment",
       triggerDetail: "system",
@@ -2174,6 +2184,16 @@ export function recoveryService(
         creatorAgent.companyId !== candidate.companyId ||
         !(await isAgentInvokable(creatorAgent))
       ) {
+        skipped += 1;
+        continue;
+      }
+
+      if (await monitoringService(db).observe({
+        companyId: candidate.companyId,
+        issueId: candidate.id,
+        kind: "no_execution_path",
+        fingerprint: JSON.stringify(["unassigned_blocker", candidate.status, creatorAgent.id]),
+      })) {
         skipped += 1;
         continue;
       }
@@ -3814,6 +3834,7 @@ export function recoveryService(
     const state = await collectDispositionRepairSourceState(db, {
       issue: current,
     });
+    const observedStateFingerprint = state.fingerprint;
     if (episode) {
       if (!latestRun) return "skipped";
       const decision = await decidePersistedLegacyContinuation(current, latestRun.id, state, episode);
@@ -3828,6 +3849,9 @@ export function recoveryService(
       );
       return "covered";
     }
+
+    if (await monitoringService(db).observe({ companyId: current.companyId, issueId: current.id,
+      kind: "missing_disposition", fingerprint: observedStateFingerprint })) return "skipped";
 
     const ownerAgentId = current.assigneeAgentId;
     const ownerAgent = ownerAgentId ? await getAgent(ownerAgentId) : null;
@@ -5780,6 +5804,13 @@ export function recoveryService(
           result.pauseHoldSkipped += 1;
           continue;
         }
+
+        // A reconciliation pass observes readiness; it is not another blocker
+        // completion event. Real route/finalization events keep their wake path.
+        if (source !== "workspace.finalize" && await monitoringService(db).observe({
+          companyId, issueId: candidate.id, kind: "dependency_ready",
+          fingerprint: JSON.stringify([...readiness.blockerIssueIds].sort()),
+        })) { result.existingWakeSkipped += 1; continue; }
 
         try {
           const wake = await deps.enqueueWakeup(agentId, {

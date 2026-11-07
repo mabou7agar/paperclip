@@ -26,6 +26,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { monitoringService } from "../services/monitoring.js";
 import { heartbeatService } from "../services/heartbeat.ts";
 import { normalizeIssueExecutionPolicy, parseIssueExecutionState } from "../services/issue-execution-policy.ts";
 
@@ -394,6 +395,7 @@ describeEmbeddedPostgres("issue monitor scheduler", () => {
       issueStatus: "in_review",
       monitor: { serviceName: PROVIDER_QUOTA_MONITOR_SERVICE_NAME, externalRef: sourceRunId },
     });
+    await monitoringService(db).savePolicy(companyId, { mode: "alert_only" }, "owner");
     const participantAgentId = randomUUID();
     await db.insert(agents).values({
       id: participantAgentId,

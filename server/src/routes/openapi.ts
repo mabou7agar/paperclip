@@ -1,3 +1,4 @@
+import { monitoringPolicySchema } from "@paperclipai/shared";
 import { quotaRecoveryRequestSchema, usageHealthPolicySchema, usageHealthQuerySchema } from "@paperclipai/shared";
 import { updateFastResponseSchema } from "@paperclipai/shared";
 import { slackRegistrationSchema, slackSetupActionSchema, slackInstallAuthorizationSchema, slackRegistrationStateSchema, slackAppConfigurationSchema, slackAvatarStateSchema, slackAccountStateSchema } from "@paperclipai/shared";
@@ -1373,6 +1374,8 @@ const browserUseOperations = [
 const BOARD_ONLY_OPERATIONS = new Set([
   "GET /api/v1/companies/{companyId}/phase-routing",
   "PUT /api/v1/companies/{companyId}/phase-routing",
+  "GET /api/v1/companies/{companyId}/monitoring",
+  "PUT /api/v1/companies/{companyId}/monitoring",
   "GET /api/v1/companies/{companyId}/usage-health",
   "PUT /api/v1/companies/{companyId}/usage-health/policy",
   "POST /api/v1/companies/{companyId}/ai-connections/{connectionId}/quota-restored",
@@ -12322,3 +12325,6 @@ registerCurrentRoute({method:"get",path:"/api/v1/companies/{companyId}/usage-hea
 registerCurrentRoute({method:"put",path:"/api/v1/companies/{companyId}/usage-health/policy",tags:["costs"],summary:"Configure company usage alerts and per-agent threshold overrides without pausing work",body:usageHealthPolicySchema,responses:{200:r.ok(),400:r.badRequest,401:r.unauthorized,403:r.forbidden,404:r.notFound}});
 
 registerCurrentRoute({method:"post",path:"/api/v1/companies/{companyId}/ai-connections/{connectionId}/quota-restored",tags:["ai-connections"],summary:"Acknowledge owner-confirmed account quota recovery without changing old receipts or starting work",body:quotaRecoveryRequestSchema,responses:{200:r.ok(),400:r.badRequest,401:r.unauthorized,403:r.forbidden,404:r.notFound}});
+
+registerCurrentRoute({method:"get",path:"/api/v1/companies/{companyId}/monitoring",tags:["companies"],summary:"Read the company monitoring policy and durable report-only alerts",responses:{200:r.ok(),401:r.unauthorized,403:r.forbidden,404:r.notFound}});
+registerCurrentRoute({method:"put",path:"/api/v1/companies/{companyId}/monitoring",tags:["companies"],summary:"Choose automatic recovery or report-only company monitoring",body:monitoringPolicySchema,responses:{200:r.ok(),400:r.badRequest,401:r.unauthorized,403:r.forbidden,404:r.notFound}});
