@@ -13,6 +13,7 @@ import {
   toggleAllGitHubRepositoriesSchema,
   createAiConnectionSchema,
   updateDecisionModelSchema,
+  phaseRoutingSchema,
   aiConnectionPoolConfigSchema,
   aiConnectionLoginIntentSchema,
   localAiConnectionSchema,
@@ -1369,6 +1370,8 @@ const browserUseOperations = [
 ] as const;
 
 const BOARD_ONLY_OPERATIONS = new Set([
+  "GET /api/v1/companies/{companyId}/phase-routing",
+  "PUT /api/v1/companies/{companyId}/phase-routing",
   "GET /api/companies/{companyId}/fast-response",
   "PUT /api/companies/{companyId}/fast-response",
   "GET /api/companies/{companyId}/fast-response/models",
@@ -10927,6 +10930,18 @@ for (const [method, suffix, summary] of [
   ["get", "/history", "List fast response accounting and publication outcomes"],
 ] as const) registerCurrentRoute({ method, path: `/api/companies/{companyId}/fast-response${suffix}`, tags: ["fast-responses"], summary,
   ...(method === "put" ? { body: updateFastResponseSchema } : {}), responses: { 200: r.ok(), 400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 422: r.unprocessable } });
+
+for (const [method, summary] of [
+  ["get", "Read company planning and implementation model defaults"],
+  ["put", "Update company model defaults as a connection manager"],
+] as const) registerCurrentRoute({
+  method, path: "/api/v1/companies/{companyId}/phase-routing", tags: ["phase-routing"], summary,
+  ...(method === "put" ? { body: phaseRoutingSchema } : {}),
+  responses: {
+    200: r.ok(z.object({ policy: method === "get" ? phaseRoutingSchema.nullable() : phaseRoutingSchema })),
+    400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 422: r.unprocessable,
+  },
+});
 
 registerCurrentRoute({
   method: "get", path: "/api/companies/{companyId}/decision-model", tags: ["decision-models"],

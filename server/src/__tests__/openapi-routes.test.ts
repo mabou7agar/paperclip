@@ -26,6 +26,7 @@ const apiPrefixes: Record<string, string> = {
   "ai-connections.ts": "/api",
   "decision-models.ts": "/api",
   "fast-responses.ts": "/api",
+  "phase-routing.ts": "/api",
   "attention.ts": "/api",
   "approvals.ts": "/api",
   "assets.ts": "/api",
@@ -295,6 +296,22 @@ function loadSpecRoutes() {
 }
 
 describe("openapi routes", () => {
+  it("documents board-only versioned model routing with arbitrary fallback chains", () => {
+    const { spec } = loadSpecRoutes();
+    const routes = spec.paths["/api/v1/companies/{companyId}/phase-routing"];
+    for (const method of ["get", "put"]) {
+      expect(routes[method].security).toEqual([{ BoardSessionAuth: [] }, { BoardApiKeyAuth: [] }]);
+      expect(routes[method]["x-paperclip-authorization"]).toEqual({ actor: "board" });
+      expect(routes[method].responses["403"]).toBeDefined();
+    }
+    const body = routes.put.requestBody.content["application/json"].schema;
+    expect(body.additionalProperties).toBe(false);
+    for (const phase of ["planning", "implementation"]) {
+      expect(body.properties[phase].type).toBe("array");
+      expect(body.properties[phase].items.properties.model.type).toBe("string");
+      expect(body.properties[phase].maxItems).toBeUndefined();
+    }
+  });
   it("documents only writable agent update fields and lifecycle status requests", () => {
     const document = buildOpenApiSpec() as any;
     const properties = document.paths["/api/agents/{id}"].patch.requestBody.content["application/json"].schema.properties;

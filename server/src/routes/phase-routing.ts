@@ -13,15 +13,14 @@ export function phaseRoutingRoutes(db: Db) {
   const router = Router();
   const service = phaseRoutingService(db);
   const companies = companyService(db);
-  const path = "/v1/companies/:companyId/phase-routing";
-  router.get(path, async (req, res) => {
+  router.get("/v1/companies/:companyId/phase-routing", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertBoard(req);
     assertCompanyAccess(req, companyId);
     if (!await companies.getById(companyId)) throw notFound("Company not found");
     res.json({ policy: await service.getCompanyDefaults(companyId) });
   });
-  router.put(path, validate(phaseRoutingSchema), async (req, res) => {
+  router.put("/v1/companies/:companyId/phase-routing", validate(phaseRoutingSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
     assertBoard(req);
     assertCompanyAccess(req, companyId);
