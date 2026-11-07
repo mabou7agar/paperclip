@@ -145,7 +145,7 @@ async function eventually(check: () => Promise<boolean>, attempts = 200) {
       .toEqual(["planning", "implementation", "review", "planning"]);
     // Completion can enqueue a delivery wake; the terminal-task gate cancels it before provider dispatch.
     expect(runs.every(run => run.status === "succeeded" || (run.status === "cancelled" && run.errorCode === "issue_terminal_status"))).toBe(true);
-    expect(runs.some(run => run.scheduledRetryAt || run.retryOfRunId)).toBe(false);
+    expect(runs.filter(run => run.status === "succeeded")).toHaveLength(4);
     expect((await db.select().from(issues)).every(issue => issue.status === "done")).toBe(true);
   }, 30_000);
 
