@@ -1,0 +1,37 @@
+meta {
+  name: Save company model defaults
+  type: http
+  seq: 2
+}
+
+put {
+  url: {{baseUrl}}/api/v1/companies/{{companyId}}/phase-routing
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{boardToken}}
+}
+
+body:json {
+  {
+    "enabled": true,
+    "planning": [
+      { "id": "claude", "adapterType": "claude_local", "model": "{{claudeModel}}", "binding": { "mode": "responsible_user", "provider": "anthropic", "method": "subscription" } },
+      { "id": "codex", "adapterType": "codex_local", "model": "{{codexModel}}", "binding": { "mode": "shared", "provider": "openai", "method": "subscription", "connectionId": "{{codexConnectionId}}", "grantId": "{{codexGrantId}}" } }
+    ],
+    "implementation": [
+      { "id": "codex", "adapterType": "codex_local", "model": "{{codexModel}}", "binding": { "mode": "shared", "provider": "openai", "method": "subscription", "connectionId": "{{codexConnectionId}}", "grantId": "{{codexGrantId}}" } }
+    ],
+    "unknownResetCooldownSeconds": 3600
+  }
+}
+
+tests {
+  test("saves the complete ordered policy", function () {
+    expect(res.getStatus()).to.equal(200);
+    expect(res.getBody().policy.planning).to.have.length(2);
+    expect(res.getBody().policy.implementation).to.have.length(1);
+  });
+}

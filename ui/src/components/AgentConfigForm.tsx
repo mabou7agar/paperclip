@@ -1,6 +1,9 @@
 import { useConnectionModels } from "./ai-connections/useConnectionModels";
 import { aiRoutingHarness } from "@paperclipai/shared";
 import { AiConnectionField } from "./ai-connections/AiConnectionField";
+import { AgentPhaseRoutingField } from "./ai-connections/PhaseRoutingField";
+import { phaseRoutingSchema } from "@paperclipai/shared";
+import type { PhaseRouting } from "@paperclipai/shared";
 import { aiConnectionBindingSchema, aiRuntimeConnectionBindingSchema } from "@paperclipai/shared";
 import { testAgentSetup } from "@/lib/test-agent-setup";
 import { setupEfforts } from "../lib/agent-setup-fields";
@@ -1688,7 +1691,21 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
           {!isDotRunner && !isCreate && selectedCompanyId && <AiConnectionField companyId={selectedCompanyId} agentId={props.agent.id} agentName={props.agent.name} adapterType={aiRoutingHarness(adapterType, eff("adapterConfig", "provider", config.provider), eff("adapterConfig", "acpxAgent", config.acpxAgent))}
             routerAdapterType={adapterType} value={aiRuntimeConnectionBindingSchema.safeParse((overlay.runtime.runtimeConfig as Record<string, unknown> | undefined)?.aiConnection ?? runtimeConfig.aiConnection).data}
             model={String(eff("adapterConfig", "model", config.model) ?? "")} environmentId={currentDefaultEnvironmentId || undefined} legacy
-            onChange={binding => mark("runtime", "runtimeConfig", { ...runtimeConfig, aiConnection: binding })} />}
+            onChange={binding => mark("runtime", "runtimeConfig", { ...runtimeConfig, ...(overlay.runtime.runtimeConfig as Record<string, unknown> | undefined), aiConnection: binding })} />}
+
+          {!isCreate && selectedCompanyId && <AgentPhaseRoutingField companyId={selectedCompanyId} agentId={props.agent.id} agentName={props.agent.name}
+            adapterType={adapterType} model={String(eff("adapterConfig", "model", config.model) ?? "")}
+            binding={aiRuntimeConnectionBindingSchema.safeParse((overlay.runtime.runtimeConfig as Record<string, unknown> | undefined)?.aiConnection ?? runtimeConfig.aiConnection).data}
+            environmentId={currentDefaultEnvironmentId || undefined}
+            value={(overlay.runtime.runtimeConfig !== undefined
+              ? (overlay.runtime.runtimeConfig as Record<string, unknown>).phaseRouting as PhaseRouting | undefined
+              : phaseRoutingSchema.safeParse(runtimeConfig.phaseRouting).data)}
+            onInherit={() => {
+              const nextRuntime = { ...runtimeConfig, ...(overlay.runtime.runtimeConfig as Record<string, unknown> | undefined) };
+              delete nextRuntime.phaseRouting;
+              mark("runtime", "runtimeConfig", nextRuntime);
+            }}
+            onChange={phaseRouting => mark("runtime", "runtimeConfig", { ...runtimeConfig, ...(overlay.runtime.runtimeConfig as Record<string, unknown> | undefined), phaseRouting })} />}
 
           {showInlineAdapterTestEnvironmentFeedback && !props.compactTestFeedback && (testActionError || testEnvironment.error) && (
             <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">

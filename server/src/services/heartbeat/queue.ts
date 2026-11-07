@@ -152,6 +152,8 @@ import {
 import { isHeartbeatWakeOnDemandEnabled } from "../heartbeat-policy.js";
 import { isUuidLike } from "@paperclipai/shared";
 import { retryChatControlAdmission } from "../chat-control-admission-retry.js";
+import { phaseRoutingService, phaseRouteDispatchSchema, PHASE_QUOTA_FALLBACK_RETRY_REASON } from "../phase-routing.js";
+import { executionPhaseForWorkMode } from "@paperclipai/shared";
 
 import type { HeartbeatServiceOptions } from "../heartbeat.js";
 import type { createHeartbeatRunState } from "./run-state.js";
@@ -1138,18 +1140,39 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     }
 
     const claimedAt = new Date();
+    const routeIssueContext = issueId ? await getIssueExecutionContext(run.companyId, issueId) : null;
     const responsibleUserId = await resolveResponsibleUserIdForRun({
       run,
       contextSnapshot: context,
-      issueContext: issueId
-        ? await getIssueExecutionContext(run.companyId, issueId)
-        : null,
+      issueContext: routeIssueContext,
       routineEnvContext: {
         routineId: null,
         env: null,
         responsibleUserId: null,
       },
     });
+    // Freeze the effective harness at claim, before provisioning/session lookup.
+    // Same-run restart recovery retains the original immutable dispatch.
+    const savedDispatch = parseObject(parseObject(run.runnerProfileJson).adapterDispatch);
+    const [retrySource] = run.scheduledRetryReason === PHASE_QUOTA_FALLBACK_RETRY_REASON && run.retryOfRunId
+      ? await db.select({ profile: heartbeatRuns.runnerProfileJson }).from(heartbeatRuns).where(and(
+          eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.agentId, run.agentId), eq(heartbeatRuns.id, run.retryOfRunId),
+        )).limit(1)
+      : [];
+    const sourceRoute = phaseRouteDispatchSchema.safeParse(parseObject(parseObject(retrySource?.profile).adapterDispatch).phaseRoute).data;
+    const phaseRoute = run.runtimeMode === "legacy" && !run.startedAt
+      ? await phaseRoutingService(db).resolve({
+          companyId: run.companyId, agentId: agent.id, userId: responsibleUserId,
+          adapterType: agent.adapterType, runtimeConfig: agent.runtimeConfig,
+          workMode: routeIssueContext?.workMode, isConversation: isConversation(routeIssueContext),
+          afterProfileId: sourceRoute?.phase === executionPhaseForWorkMode(routeIssueContext?.workMode) ? sourceRoute.profile?.id : undefined,
+        })
+      : null;
+    const adapterDispatch = run.startedAt && savedDispatch.adapterType
+      ? savedDispatch
+      : phaseRoute
+        ? { adapterType: phaseRoute.profile?.adapterType ?? agent.adapterType, agentAdapterType: agent.adapterType, phaseRoute }
+        : { adapterType: agent.adapterType };
     // All ordinary and comment claims use the same company-scoped issue
     // lock. A batch may claim several runs before executeRun tracks any owner.
     async function lockIssueExecutionClaim(tx: Db) {
@@ -1378,7 +1401,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                   .update(heartbeatRuns)
                   .set({
                     status: "running",
-                    runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch: { adapterType: agent.adapterType } })}::jsonb`,
+                    runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch })}::jsonb`,
                     ...legacyControllerClaim(run.runtimeMode),
                     responsibleUserId,
                     startedAt: lockedRun.startedAt ?? claimedAt,
@@ -1477,7 +1500,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                 .update(heartbeatRuns)
                 .set({
                   status: "running",
-                  runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch: { adapterType: agent.adapterType } })}::jsonb`,
+                  runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch })}::jsonb`,
                     ...legacyControllerClaim(run.runtimeMode),
                   responsibleUserId,
                   startedAt: lockedRun.startedAt ?? claimedAt,
@@ -1544,7 +1567,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       : await withChatControlRecoveryGate(run, "claim", async (tx) => {
           const claimValues = {
             status: "running",
-            runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch: { adapterType: agent.adapterType } })}::jsonb`,
+            runnerProfileJson: sql`(case when jsonb_typeof(${heartbeatRuns.runnerProfileJson}) = 'object' then ${heartbeatRuns.runnerProfileJson} else '{}'::jsonb end) || ${JSON.stringify({ adapterDispatch })}::jsonb`,
             ...legacyControllerClaim(run.runtimeMode),
             responsibleUserId,
             startedAt: run.startedAt ?? claimedAt,

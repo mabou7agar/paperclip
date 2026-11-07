@@ -4,6 +4,7 @@ import { createAgentLifecycle } from "../services/agent-lifecycle.js";
 
 import { agentIdentityService } from "../services/agent-identity.js";
 import { aiConnectionRouterService, poolMemberRuntimeConfig } from "../services/ai-connection-router.js";
+import { phaseRoutingService } from "../services/phase-routing.js";
 import { connectionIntentService } from "../services/connection-intents.js";
 import { isCloudManagedInstance } from "../services/cloud-instance.js";
 import { dotRunnerBroker } from "../services/dot-runner-broker.js";
@@ -4288,6 +4289,10 @@ export function agentRoutes(
       adapterConfig: desiredSkillAssignment.adapterConfig,
     });
     const normalizedRuntimeConfig = await normalizeCreatedAgentRuntimeConfig(req, companyId, hireInput.adapterType, normalizedAdapterConfig, hireInput.runtimeConfig);
+    if (normalizedRuntimeConfig.phaseRouting !== undefined) await phaseRoutingService(db).validateConfiguration({
+      companyId, agentId: hiredAgentId, userId: responsibleUserForAiRequest(req), isBoard: req.actor.type === "board",
+      adapterType: hireInput.adapterType, policy: normalizedRuntimeConfig.phaseRouting,
+    });
     const normalizedHireInput = {
       ...hireInput,
       adapterConfig: normalizedAdapterConfig,
@@ -4595,6 +4600,10 @@ export function agentRoutes(
       adapterConfig: desiredSkillAssignment.adapterConfig,
     });
     const normalizedRuntimeConfig = await normalizeCreatedAgentRuntimeConfig(req, companyId, createInput.adapterType, normalizedAdapterConfig, createInput.runtimeConfig);
+    if (normalizedRuntimeConfig.phaseRouting !== undefined) await phaseRoutingService(db).validateConfiguration({
+      companyId, agentId, userId: responsibleUserForAiRequest(req), isBoard: req.actor.type === "board",
+      adapterType: createInput.adapterType, policy: normalizedRuntimeConfig.phaseRouting,
+    });
     await assertAgentEnvironmentSelection(companyId, createInput.adapterType, createInput.defaultEnvironmentId);
     await assertAgentDefaultEnvironmentSelection(companyId, createInput.defaultEnvironmentId, {
       allowedDrivers: allowedEnvironmentDriversForAgent(createInput.adapterType),
@@ -5319,6 +5328,14 @@ export function agentRoutes(
       const aiConfig = (patchData.adapterConfig ?? existing.adapterConfig) as Record<string, unknown>;
       if (nextAiBinding.mode !== "router" && !isAiConnectionCompatible(nextAiBinding, requestedAdapterType, aiConfig.model, aiConfig.provider, aiConfig.acpxAgent)) throw unprocessable("Select an AI connection compatible with the new harness and model");
       if (changed || (nextAiBinding.mode === "router" && requestedAdapterType !== existing.adapterType)) await validateManagedAgentBinding(req, existing.companyId, existing.id, requestedAdapterType, aiConfig, nextAiBinding, (patchData.defaultEnvironmentId !== undefined ? patchData.defaultEnvironmentId : existing.defaultEnvironmentId) as string | null, true);
+    }
+    const nextPhaseRouting = (requestedRuntimeConfig ?? existing.runtimeConfig).phaseRouting;
+    if (JSON.stringify(nextPhaseRouting) !== JSON.stringify(existing.runtimeConfig.phaseRouting) ||
+        (nextPhaseRouting !== undefined && requestedAdapterType !== existing.adapterType)) {
+      await phaseRoutingService(db).validateConfiguration({
+        companyId: existing.companyId, agentId: existing.id, userId: responsibleUserForAiRequest(req), isBoard: req.actor.type === "board",
+        adapterType: requestedAdapterType, policy: nextPhaseRouting,
+      });
     }
     if (requestedRuntimeConfig) patchData.runtimeConfig = requestedRuntimeConfig;
     if (touchesAdapterConfiguration || Object.prototype.hasOwnProperty.call(patchData, "defaultEnvironmentId")) {

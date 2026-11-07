@@ -52,6 +52,7 @@ export function AiConnectionField({
   readOnly = false,
   preferAdvanced = false,
   routerAdapterType,
+  allowPools = true,
 }: {
   companyId: string;
   agentId?: string;
@@ -65,6 +66,7 @@ export function AiConnectionField({
   readOnly?: boolean;
   preferAdvanced?: boolean;
   routerAdapterType?: string;
+  allowPools?: boolean;
 }) {
   const provider = aiProviderForAdapter(adapterType);
   const returnFocus = useRef<HTMLElement | null>(null);
@@ -112,7 +114,7 @@ export function AiConnectionField({
   const method: AiAuthMethod = (value && value.mode !== "router" && value.mode !== "responsible_user" ? value.method : undefined)
     ?? accounts.data?.connections.find((account) => account.provider === provider && account.isDefault)?.method
     ?? (provider === "openrouter" || provider === "google" ? "api_key" : "subscription");
-  const compatiblePools = agentId ? accounts.data?.pools?.filter(pool => pool.enabled && pool.members.some(member => isAiConnectionCompatible(member.binding, routerAdapterType ?? adapterType, member.profile.model, member.profile.provider, member.profile.acpxAgent))) ?? [] : [];
+  const compatiblePools = allowPools && agentId ? accounts.data?.pools?.filter(pool => pool.enabled && pool.members.some(member => isAiConnectionCompatible(member.binding, routerAdapterType ?? adapterType, member.profile.model, member.profile.provider, member.profile.acpxAgent))) ?? [] : [];
   if (!provider) return null;
   if (legacy && !value && !adopting)
     return (

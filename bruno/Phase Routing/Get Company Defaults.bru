@@ -1,0 +1,22 @@
+meta {
+  name: Get company model defaults
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/api/v1/companies/{{companyId}}/phase-routing
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{boardToken}}
+}
+
+tests {
+  test("returns defaults", function () {
+    expect(res.getStatus()).to.equal(200);
+    expect(res.getBody()).to.have.property("policy");
+  });
+}

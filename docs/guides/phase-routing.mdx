@@ -1,0 +1,75 @@
+---
+title: "Planning models and quota fallbacks"
+description: "Company model defaults with per-agent overrides and ordered quota fallbacks."
+---
+
+Company settings contain **Default planning and implementation models**. Enable
+the policy, choose a model and connection for each phase, and add or reorder any
+number of fallback levels. Each level has its own optional reasoning effort.
+The initial template uses Claude then Codex for planning, and Codex for
+implementation. Model ids and connections remain editable; no connection or
+paid API account is created automatically.
+
+Agents inherit company defaults. In an agent's Harness / Runtime settings,
+uncheck **Use company model and fallback defaults** to edit its own policy or
+disable phase routing for that agent. Re-enable inheritance to remove the
+override. Company defaults require accounts installed for the whole company;
+an override can use an account installed for that agent.
+
+The task's `workMode` selects the phase: `planning` uses the planning chain and
+`standard` uses implementation. Plan acceptance still uses the existing approval
+workflow. Ask, chat, other work modes, and agents using other harnesses retain
+their regular configuration. This extension supports the existing Claude,
+Codex and OpenCode adapters. Select OpenCode and a connected OpenRouter account
+to use a supported GLM model from its model catalog.
+
+## Quota safety and session reuse
+
+Only the adapter's typed `provider_quota` outcome triggers a quota fallback.
+Authentication errors require configuration; ordinary failures retain their
+existing recovery policy. A company-scoped cooldown uses immutable account
+attribution from completed run receipts, including receipts written before this
+feature. A provider reset time is respected; if absent, the configurable
+cooldown defaults to one hour. Reading these receipts does not call a model or
+probe an exhausted subscription.
+
+The selected adapter and account are recorded when the server claims the run.
+Recovery keeps that selection. New fallback runs retain the same task, agent,
+workspace and authorization gates. Provider-native session ids are isolated by
+phase, harness, model, and resolved account. Later wakes reuse the same selected
+profile's session; moving between providers uses the existing task handoff and
+plan documents rather than passing incompatible native conversation ids.
+
+One automatic chain has at most `number of configured levels - 1` fallback
+attempts. Existing retry accounting, Stop, budget, task ownership and pause
+gates still apply. When all accounts are cooling down, provider work is skipped
+and at most one reset wait is scheduled by the phase routing path. Run lifecycle
+events show the selected profile and skipped accounts.
+
+Phase profiles share task/workspace/instruction and permission settings.
+Custom harness commands, extra CLI arguments, provider state directories, and
+authentication environment variables are deliberately excluded from profile
+switches. Connect accounts using the existing managed connection controls.
+Operators requiring custom harness commands should keep that agent's phase
+routing disabled.
+
+## API
+
+- `GET /api/v1/companies/:companyId/phase-routing` returns `{ policy }` (`null`
+  until configured).
+- `PUT /api/v1/companies/:companyId/phase-routing` validates and replaces the
+  company policy. It requires board access and connection-management permission.
+- Per-agent policies use the existing compatible agent update API's optional
+  `runtimeConfig.phaseRouting` field. Omit the field from the complete runtime
+  configuration to inherit. An explicit disabled policy opts out. Existing
+  `runtimeConfig.aiConnection` and other runtime settings must be retained.
+
+The Bruno collection in `/bruno/Phase Routing` includes read/save examples.
+Use a board API token. Credentials and tokens do not belong in policy JSON.
+
+## Maintained fork
+
+The implementation lives on a branch above the pinned upstream release. Keep
+`upstream` pointing to `paperclipai/paperclip` and `origin` pointing to the
+maintained fork. Integrate upstream updates through a review branch and rerun
+session, scheduling, company-scoping and quota tests before deployment.

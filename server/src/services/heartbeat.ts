@@ -1,4 +1,6 @@
 import { selectHeartbeatEnvironment } from "./heartbeat/environment-selection.js";
+import { phaseRouteDispatchSchema, phaseRouteAdapterConfig, phaseRouteTaskKey } from "./phase-routing.js";
+import { executionPhaseForWorkMode } from "@paperclipai/shared";
 import { prepareHeartbeatWorkspace } from "./heartbeat/workspace-preparation.js";
 import { executeHeartbeatRuntime, NativeSessionResumeScheduledError, NativeWorkspaceFinalizeScheduledError } from "./heartbeat/runtime-execution.js";
 import { selectHeartbeatRuntime } from "./heartbeat/runtime-selection.js";
@@ -2137,8 +2139,42 @@ export function heartbeatService(
       // The claimed adapter identity is immutable recovery evidence. Do not
       // execute a newly selected adapter under a previous adapter's claim.
       const selectedAdapter = claimedAdapterType(run);
-      if (selectedAdapter && selectedAdapter !== agent.adapterType) {
+      const adapterDispatch = parseObject(parseObject(run.runnerProfileJson).adapterDispatch);
+      const phaseRoute = adapterDispatch.phaseRoute ? phaseRouteDispatchSchema.parse(adapterDispatch.phaseRoute) : null;
+      const claimedAgentAdapter = phaseRoute ? readNonEmptyString(adapterDispatch.agentAdapterType) : selectedAdapter;
+      if (claimedAgentAdapter && claimedAgentAdapter !== agent.adapterType) {
         throw new Error("Agent adapter changed during startup; start a new turn with the updated agent.");
+      }
+      if (phaseRoute && !phaseRoute.profile) {
+        if (!phaseRoute.retryAt) throw new ConfigurationIncompleteFailure(
+          phaseRoute.notes.join("; ") || "Configure the phase routing connection",
+          { configurationIncomplete: { reason: "ai_connection_unavailable", actionUrl: `/agents/${agent.id}/runtime` } },
+        );
+        const now = new Date();
+        const reason = "All connections for this phase are on quota cooldown";
+        const cancelled = await setRunStatusIfRunning(run.id, "cancelled", {
+          finishedAt: now, error: reason, errorCode: "phase_quota_cooldown",
+          resultJson: { retryAt: phaseRoute.retryAt,
+            executionRecovery: { kind: "ai_connection_wait", providerWorkStarted: false },
+            cancellation: { source: "control_plane", expected: true, initiator: { type: "system" }, reason, recordedAt: now.toISOString() },
+          },
+        });
+        if (cancelled.updated) {
+          await setWakeupStatus(run.wakeupRequestId, "cancelled", { finishedAt: now, error: reason });
+          await appendRunEvent(cancelled.run ?? run, { eventType: "lifecycle", stream: "system", level: "info", message: reason, payload: { phase: phaseRoute.phase, retryAt: phaseRoute.retryAt, notes: phaseRoute.notes } });
+          const retry = await scheduleBoundedRetryForRun(cancelled.run ?? run, agent, {
+            retryReason: AI_CONNECTION_POOL_WAIT_RETRY_REASON, wakeReason: "phase_quota_reset",
+            maxAttempts: 1, delayMs: Math.max(1_000, Date.parse(phaseRoute.retryAt) - now.getTime()),
+          });
+          if (retry.outcome !== "scheduled") await releaseIssueExecutionAndPromote(cancelled.run ?? run, { suppressImmediateRecovery: true });
+          await finalizeAgentStatus(agent.id, "cancelled");
+        }
+        return;
+      }
+      if (phaseRoute?.profile) {
+        agent = { ...agent, adapterType: phaseRoute.profile.adapterType,
+          adapterConfig: phaseRouteAdapterConfig(parseObject(agent.adapterConfig), phaseRoute.profile),
+          runtimeConfig: { ...agent.runtimeConfig, aiConnection: phaseRoute.profile.binding } };
       }
 
       const dispatchIssueId = readNonEmptyString(parseObject(run.contextSnapshot).issueId);
@@ -2231,12 +2267,26 @@ export function heartbeatService(
           );
         }
       }
-      const taskKey = deriveTaskKeyWithHeartbeatFallback(context, null);
+      if (phaseRoute) {
+        // Only the server-owned claim may select a profile. Resume overrides in
+        // wake payloads can contain another provider's native session id.
+        delete context.resumeSessionParams;
+        delete context.resumeSessionDisplayId;
+      }
+      const originalTaskKey = deriveTaskKeyWithHeartbeatFallback(context, null);
+      const taskKey = phaseRoute ? phaseRouteTaskKey(originalTaskKey, phaseRoute) : originalTaskKey;
       const sessionCodec = getAdapterSessionCodec(agent.adapterType);
       const issueId = readNonEmptyString(context.issueId);
       let issueContext = issueId
         ? await getIssueExecutionContext(agent.companyId, issueId)
         : null;
+      if (phaseRoute && (isConversation(issueContext) || executionPhaseForWorkMode(issueContext?.workMode) !== phaseRoute.phase)) {
+        throw new Error("Task phase changed during startup; start a new turn with the updated phase.");
+      }
+      if (phaseRoute?.profile) await appendRunEvent(run, {
+        eventType: "lifecycle", stream: "system", level: "info", message: `Using ${phaseRoute.phase} profile ${phaseRoute.profile.id}`,
+        payload: { phase: phaseRoute.phase, profileId: phaseRoute.profile.id, adapterType: agent.adapterType, model: phaseRoute.profile.model, connectionId: phaseRoute.connectionId, notes: phaseRoute.notes },
+      });
       const issueDependencyReadiness = issueId
         ? await issuesSvc
             .listDependencyReadiness(agent.companyId, [issueId])
@@ -2576,6 +2626,10 @@ export function heartbeatService(
         context.executionPolicy = retainedTrust.executionPolicy;
       }
       let config = parseObject(agent.adapterConfig);
+      if (phaseRoute?.profile && issueAssigneeOverrides) issueAssigneeOverrides = {
+        ...issueAssigneeOverrides,
+        adapterConfig: phaseRouteAdapterConfig(issueAssigneeOverrides.adapterConfig ?? {}, phaseRoute.profile),
+      };
       const taskSession = taskKey
         ? await getTaskSession(
             agent.companyId,

@@ -1,0 +1,28 @@
+export const phaseRoutingMessages = {
+  en: {
+    enabled: "Separate planning and implementation models",
+    description: "Profiles run in order. A quota limit cools down that account and allows a bounded fallback. Each phase keeps its own provider session. Ask and chat turns use the agent’s regular model. Connect an OpenRouter account to use GLM through OpenCode.",
+    planning: "Planning", implementation: "Implementation", primary: "Primary", fallback: "Fallback {{number}}",
+    harness: "Harness", model: "Model", remove: "Remove", addFallback: "Add quota fallback",
+    connectFirst: "Choose an AI connection above before enabling phase routing.",
+    modelLoadError: "Could not load model suggestions. Enter a supported model id or try again.",
+    effort: "Reasoning effort", modelDefault: "Model default", moveUp: "Move up",
+    unknownCooldown: "Cooldown when the provider gives no reset time (seconds)",
+    inherit: "Use company model and fallback defaults", companyDisabled: "Company phase routing is disabled. This agent uses its regular model.",
+    inheritedSummary: "Planning: {{planning}}. Implementation: {{implementation}}.", defaultsLoadError: "Could not load company model defaults.",
+    companyTitle: "Default planning and implementation models", loading: "Loading model defaults…", cancel: "Cancel", saving: "Saving…", saveDefaults: "Save model defaults",
+  },
+  ar: {
+    enabled: "استخدام نماذج مختلفة للتخطيط والتنفيذ",
+    description: "تُستخدم الإعدادات بالترتيب. عند بلوغ حد الاستخدام، يُوقف الحساب مؤقتاً ويُسمح بانتقال محدود إلى البديل. تحتفظ كل مرحلة بجلسة مستقلة لكل مزود. تستخدم الأسئلة والمحادثات نموذج الوكيل المعتاد. اربط حساب OpenRouter لاستخدام GLM عبر OpenCode.",
+    planning: "التخطيط", implementation: "التنفيذ", primary: "الأساسي", fallback: "البديل {{number}}",
+    harness: "أداة التشغيل", model: "النموذج", remove: "إزالة", addFallback: "إضافة بديل عند بلوغ الحد",
+    connectFirst: "اختر اتصال ذكاء اصطناعي أعلاه قبل تفعيل توجيه المراحل.",
+    modelLoadError: "تعذر تحميل اقتراحات النماذج. أدخل معرّف نموذج مدعوم أو حاول مرة أخرى.",
+    effort: "مستوى التفكير", modelDefault: "الإعداد الافتراضي للنموذج", moveUp: "نقل لأعلى",
+    unknownCooldown: "مدة الانتظار إذا لم يحدد المزود وقت تجدد الحد (بالثواني)",
+    inherit: "استخدام إعدادات النماذج والبدائل الافتراضية للشركة", companyDisabled: "توجيه المراحل معطّل للشركة. يستخدم هذا الوكيل نموذجه المعتاد.",
+    inheritedSummary: "التخطيط: {{planning}}. التنفيذ: {{implementation}}.", defaultsLoadError: "تعذر تحميل إعدادات النماذج الافتراضية للشركة.",
+    companyTitle: "نماذج التخطيط والتنفيذ الافتراضية", loading: "جارٍ تحميل إعدادات النماذج…", cancel: "إلغاء", saving: "جارٍ الحفظ…", saveDefaults: "حفظ إعدادات النماذج",
+  },
+};

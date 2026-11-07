@@ -59,6 +59,15 @@ function makeOverlay(patch?: Partial<AgentConfigOverlay>): AgentConfigOverlay {
 }
 
 describe("buildAgentUpdatePatch", () => {
+  it("keeps heartbeat edits while removing a routing override to inherit company defaults", () => {
+    const agent = makeAgent();
+    agent.runtimeConfig.phaseRouting = { enabled: false };
+    const patch = buildAgentUpdatePatch(agent, makeOverlay({
+      heartbeat: { intervalSec: 600 },
+      runtime: { runtimeConfig: { heartbeat: agent.runtimeConfig.heartbeat } },
+    }));
+    expect(patch.runtimeConfig).toEqual({ heartbeat: { enabled: true, intervalSec: 600 } });
+  });
   it("merges the agent-scoped provider trace debug setting into runtime config", () => {
     const patch = buildAgentUpdatePatch(
       makeAgent(),

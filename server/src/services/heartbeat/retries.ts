@@ -1,4 +1,5 @@
 import { deriveTaskKeyWithHeartbeatFallback } from "./run-state.js";
+import { PHASE_QUOTA_FALLBACK_RETRY_REASON } from "../phase-routing.js";
 import {
   WORKSPACE_VALIDATION_FAILURE_CODE,
   isWorkspaceValidationFailedRun,
@@ -549,6 +550,7 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
         : baseSchedule;
 
     const requiresIssueGate =
+      retryReason === PHASE_QUOTA_FALLBACK_RETRY_REASON ||
       isTransientWorkspaceGitScanCode(run.errorCode) ||
       hasConversationContinuationPolicy(run.resultJson) ||
       (retryReason === AI_CONNECTION_BUSY_RETRY_REASON || retryReason === AI_CONNECTION_POOL_WAIT_RETRY_REASON) ||
@@ -966,7 +968,7 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
 
         const scheduledRunId = randomUUID();
         if (contextSnapshot.explicitUserContinuation) {
-          const continuation = issueId && retryReason === "transient_failure" ? await admitExplicitContinuationRetry({
+          const continuation = issueId && (retryReason === "transient_failure" || retryReason === PHASE_QUOTA_FALLBACK_RETRY_REASON) ? await admitExplicitContinuationRetry({
             db: tx as unknown as Db, companyId: run.companyId, issueId, agentId: run.agentId,
             parentRunId: run.id, successorRunId: scheduledRunId, now,
           }) : null;

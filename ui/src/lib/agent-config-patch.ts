@@ -17,6 +17,7 @@ export function omitUndefinedEntries(value: Record<string, unknown>) {
 
 export function buildAgentUpdatePatch(agent: Agent, overlay: AgentConfigOverlay) {
   const patch: Record<string, unknown> = {};
+  const { runtimeConfig: runtimeOverride, ...runtimeFields } = overlay.runtime;
 
   if (Object.keys(overlay.identity).length > 0) {
     Object.assign(patch, overlay.identity);
@@ -50,18 +51,18 @@ export function buildAgentUpdatePatch(agent: Agent, overlay: AgentConfigOverlay)
   if (
     Object.keys(overlay.heartbeat).length > 0
     || Object.keys(overlay.debug).length > 0
+    || runtimeOverride !== undefined
   ) {
     const existingRc = (agent.runtimeConfig ?? {}) as Record<string, unknown>;
-    const nextRuntimeConfig: Record<string, unknown> = (patch.runtimeConfig as Record<string, unknown> | undefined)
-      ?? { ...existingRc };
+    const nextRuntimeConfig = { ...((runtimeOverride as Record<string, unknown> | undefined) ?? existingRc) };
 
     if (Object.keys(overlay.heartbeat).length > 0) {
-      const existingHb = (existingRc.heartbeat ?? {}) as Record<string, unknown>;
+      const existingHb = (nextRuntimeConfig.heartbeat ?? {}) as Record<string, unknown>;
       nextRuntimeConfig.heartbeat = { ...existingHb, ...overlay.heartbeat };
     }
 
     if (Object.keys(overlay.debug).length > 0) {
-      const existingDebug = (existingRc.debug ?? {}) as Record<string, unknown>;
+      const existingDebug = (nextRuntimeConfig.debug ?? {}) as Record<string, unknown>;
       const nextDebug = omitUndefinedEntries({ ...existingDebug, ...overlay.debug });
       if (Object.keys(nextDebug).length === 0) {
         delete nextRuntimeConfig.debug;
@@ -73,9 +74,7 @@ export function buildAgentUpdatePatch(agent: Agent, overlay: AgentConfigOverlay)
     patch.runtimeConfig = nextRuntimeConfig;
   }
 
-  if (Object.keys(overlay.runtime).length > 0) {
-    Object.assign(patch, overlay.runtime);
-  }
+  Object.assign(patch, runtimeFields);
 
   return patch;
 }

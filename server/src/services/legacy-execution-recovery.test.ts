@@ -21,9 +21,9 @@ it.each(["workspace_git_scan_timeout", "workspace_git_scan_saturated"])("does no
   expect(legacyExecutionNeedsReconciliation({ ...run, errorCode: "setup_failed" })).toBe(true);
 });
 
-it("permits subscription waits only with explicit evidence that provider work never started", () => {
+it.each(["ai_connection_busy", "ai_connection_pool_exhausted", "phase_quota_cooldown"])("permits %s waits only with explicit evidence that provider work never started", (errorCode) => {
   const waiting = {
-    runtimeMode: "legacy", status: "cancelled", errorCode: "ai_connection_busy", scheduledRetryAttempt: 12,
+    runtimeMode: "legacy", status: "cancelled", errorCode, scheduledRetryAttempt: 12,
     resultJson: { executionRecovery: { kind: "ai_connection_wait", providerWorkStarted: false } },
   };
   expect(legacyExecutionNeedsReconciliation(waiting)).toBe(false);
