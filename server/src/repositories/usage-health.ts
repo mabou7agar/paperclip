@@ -68,7 +68,9 @@ export function usageHealthRepository(db: Db) {
             coalesce(r.usage_json->>'model','unknown') model,
             coalesce(r.runner_profile_json->'adapterDispatch'->'phaseRoute'->>'phase','unknown') phase,
             r.status,coalesce(r.started_at,r.created_at) "occurredAt",
-            (r.session_id_before is not null and r.session_id_before=r.session_id_after) "sessionReused",
+            (coalesce(r.usage_json->'taskSessionReused'='true'::jsonb,false)
+              or coalesce(r.usage_json->'sessionReused'='true'::jsonb,false)
+              or (r.session_id_before is not null and r.session_id_before=r.session_id_after)) "sessionReused",
             (r.usage_json->'accountingProviderWorkStarted'='false'::jsonb or r.error_code in
               ('phase_quota_cooldown','phase_route_unavailable','issue_dependencies_blocked','issue_terminal_status','issue_assignee_changed','issue_reassigned')) "expectedNoUsage",
             ${number(sql`r.usage_json->'inputTokens'`)} "inputTokens",

@@ -136,8 +136,8 @@ const support = await getEmbeddedPostgresTestSupport();
         status: "succeeded",
         startedAt: now,
         finishedAt: now,
-        sessionIdBefore: "same",
-        sessionIdAfter: "same",
+        sessionIdBefore: "previous-sdk-id",
+        sessionIdAfter: "rotated-sdk-id",
         usageJson: {
           provider: "anthropic",
           model: "claude-test",
@@ -145,6 +145,7 @@ const support = await getEmbeddedPostgresTestSupport();
           cachedInputTokens: 200000,
           outputTokens: 10000,
           billingType: "subscription_included",
+          taskSessionReused: true,
         },
         resultJson: { usage: { cachedWriteTokens: 40000 } },
         contextSnapshot: {
@@ -228,6 +229,8 @@ const support = await getEmbeddedPostgresTestSupport();
         new Date(Date.now() + 60_000),
         true,
       );
+      // Claude can preserve its logical conversation while rotating SDK IDs.
+      expect((await repo.observations(companyId, from, new Date(Date.now() + 60_000), undefined, runId))[0]?.sessionReused).toBe(true);
       expect(report.totals).toMatchObject({
         runs: 504,
         measuredRuns: 3,
