@@ -155,7 +155,7 @@ async function eventually(check: () => Promise<boolean>, attempts = 200) {
     await db.insert(issues).values({ id: otherTask, companyId, title: "Other review", status: "todo", workMode: "standard", assigneeAgentId: agentId, responsibleUserId: "user" });
     await phaseRoutingSettingsRepository(db).save(companyId, phaseRoutingSchema.parse({ ...policy, review: [claude], taskOverrides: { [issueId]: { review: [claude, codex] } } }));
     await db.update(agents).set({ runtimeConfig: { executionResponsibility: "review", heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } } }).where(eq(agents.id, agentId));
-    await db.insert(heartbeatRuns).values({ companyId, agentId, scopeKind: "issue", issueId, invocationSource: "assignment", status: "failed", finishedAt: new Date(), errorCode: "provider_quota", resultJson: { retryNotBefore: new Date(Date.now() + 3_600_000).toISOString() }, contextSnapshot: { issueId, aiConnection: { connectionId: claudeId } } });
+    await db.insert(heartbeatRuns).values({ companyId, agentId, scopeKind: "issue", issueId, invocationSource: "assignment", status: "failed", finishedAt: new Date(), errorCode: "acpx_turn_failed", resultJson: { terminalSessionFailure: {category:"limit",title:"API Error: Request rejected (429) · api key quota exhausted"}, retryNotBefore: new Date(Date.now() + 3_600_000).toISOString() }, contextSnapshot: { issueId, aiConnection: { connectionId: claudeId, provider:"anthropic" } } });
     mocks.execute.mockImplementation(async ctx => {
       expect(ctx.agent.adapterType).toBe("codex_local");
       expect(ctx.context.issueId).toBe(issueId);

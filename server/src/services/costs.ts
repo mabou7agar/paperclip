@@ -1,3 +1,4 @@
+import { usageHealthService } from "./usage-health.js";
 import { receiptFingerprint } from "./receipt-fingerprint.js";
 import { agentAvatarUrl, resolveAgentAppearance, createCostEventSchema, createServiceCostEventSchema, normalizeCents, isUuidLike, type MoneyInput, type CostByUserReport } from "@paperclipai/shared";
 import { and, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, ne, sql } from "drizzle-orm";
@@ -159,6 +160,9 @@ export async function createCostEventInTransaction(db: Db, companyId: string, da
     runId: event.heartbeatRunId, action: "cost.reported", entityType: "cost_event", entityId: event.id,
     details: { costCents: event.costCents, costCentsExact: values.costCents, model: event.model, costStatus: event.costStatus },
   }, publications);
+  if (event.usageKind !== "agent" || !event.heartbeatRunId)
+    publications.push(...await usageHealthService(db).captureObservation(companyId, event.id,
+      event.usageKind === "agent" ? "agent_cost" : event.usageKind));
   return { ...event, costCentsExact: values.costCents };
 }
 

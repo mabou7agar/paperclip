@@ -3358,13 +3358,13 @@ export function summarizeAcpxTurnUsage(input: {
   const cachedReadTokens = Math.max(0, Math.floor(asNumber(breakdown?.cachedReadTokens, 0)));
   const cachedWriteTokens = Math.max(0, Math.floor(asNumber(breakdown?.cachedWriteTokens, 0)));
   const hasTokens = inputTokens > 0 || outputTokens > 0 || cachedReadTokens > 0 || cachedWriteTokens > 0;
-  // Cache-write tokens are prompt tokens the provider billed to create cache
-  // entries; UsageSummary has no dedicated field, so count them as input.
+  // Cache writes remain a subset of input; retain their split when reported.
   const usage: UsageSummary | null = hasTokens
     ? {
         inputTokens: inputTokens + cachedWriteTokens,
         outputTokens,
         cachedInputTokens: cachedReadTokens,
+        ...(typeof breakdown?.cachedWriteTokens === "number" ? { cacheWriteTokens: cachedWriteTokens } : {}),
       }
     : null;
   const usageDetail = breakdown
@@ -3455,6 +3455,14 @@ function classifyError(
     ...(stackPreview ? { stackPreview } : {}),
     ...(phase ? { phase } : {}),
   };
+  // Repeating the same native resume cannot repair its persistent storage.
+  // Keep the conversation intact and require repair before another attempt.
+  if (errorName === "SessionResumeRequiredError") {
+    return {
+      errorCode: "acpx_session_resume_required",
+      errorMeta: { category: "session", ...baseMeta, retryable: false, recoveryAction: "repair_existing_session" },
+    };
+  }
   // A host-generated handshake-guard error is classified by its type, never
   // by message text, and runs before the message-driven heuristics below. A
   // startup timeout or a duplex control-channel loss must report its own

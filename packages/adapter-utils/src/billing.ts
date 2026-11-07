@@ -39,3 +39,19 @@ export function resolveManagedOpenAiBilling(routing: unknown) {
     billingType: "api" as const,
   };
 }
+
+/** Managed Claude endpoints are API usage even with bearer or no-key auth.
+ * A compatible protocol does not establish the gateway's actual tariff. */
+export function resolveManagedClaudeBilling(routing: unknown) {
+  if (!routing || typeof routing !== "object") return undefined;
+  const kind = (routing as { kind?: unknown }).kind;
+  return { provider: "anthropic", biller: kind === "bedrock" ? "aws_bedrock" : kind === "openrouter" ? "openrouter" : "unknown", billingType: "api" as const };
+}
+
+/** Authoritative managed-account method outranks credential environment heuristics. */
+export function resolveManagedAiBillingIdentity(connection: { provider: string; method: string }, routing?: unknown) {
+  const routed = connection.provider === "openai" ? resolveManagedOpenAiBilling(routing)
+    : connection.provider === "anthropic" ? resolveManagedClaudeBilling(routing) : undefined;
+  return { provider: connection.provider, biller: routed?.biller ?? connection.provider,
+    billingType: connection.method === "subscription" ? "subscription_included" as const : "metered_api" as const };
+}

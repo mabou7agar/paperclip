@@ -1,3 +1,4 @@
+import { resolveManagedClaudeBilling } from "@paperclipai/adapter-utils";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -166,6 +167,8 @@ export function resolveClaudeAcpBillingIdentity(
   ctx: Pick<AdapterExecutionContext, "config"> &
     Partial<Pick<AdapterExecutionContext, "executionTarget" | "executionTransport">>,
 ): { provider: string; biller: string; billingType: AdapterBillingType } {
+  const managed = resolveManagedClaudeBilling(ctx.config.managedAiRouting);
+  if (managed) return managed;
   const envConfig = parseObject(parseObject(ctx.config).env);
   const target = readAdapterExecutionTarget({
     executionTarget: ctx.executionTarget,
@@ -331,7 +334,10 @@ export function classifyClaudeTerminalSessionFailure(
   // claude-agent-acp uses this exact quota_exhausted fallback when no provider
   // title is available. It does not match the CLI's usage-limit wording.
   const isQuotaFallback = failure.title === "The Claude account has no available quota.";
-  if (!isQuotaFallback && !isClaudeProviderQuotaError(surface)) return null;
+  // Typed provider limit + an actual HTTP 429 is quota/rate evidence in any
+  // locale. Context/turn/budget limits without 429 keep their existing path.
+  const isProvider429 = /(?:HTTP(?:\/\d(?:\.\d)?)?\s*429\b|(?:status(?:\s+code)?|rejected)\s*[:=(]?\s*429\b)/i.test(surface.errorMessage);
+  if (!isQuotaFallback && !isProvider429 && !isClaudeProviderQuotaError(surface)) return null;
   const retryNotBefore = extractClaudeRetryNotBefore(surface, now)?.toISOString();
   return {
     errorCode: "provider_quota",

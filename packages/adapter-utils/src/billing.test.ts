@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { inferOpenAiCompatibleBiller, resolveManagedOpenAiBilling } from "./billing.js";
+import { inferOpenAiCompatibleBiller, resolveManagedOpenAiBilling, resolveManagedClaudeBilling, resolveManagedAiBillingIdentity } from "./billing.js";
 
 describe("inferOpenAiCompatibleBiller", () => {
   it("returns openrouter when OPENROUTER_API_KEY is present", () => {
@@ -43,5 +43,18 @@ describe("managed Responses routing", () => {
   });
   it("leaves ordinary direct API and subscription detection unchanged", () => {
     expect(resolveManagedOpenAiBilling(undefined)).toBeUndefined();
+  });
+});
+
+
+describe("managed Claude billing", () => {
+  it.each([["gateway", "bearer", "unknown"], ["local", "none", "unknown"], ["openrouter", "bearer", "openrouter"], ["bedrock", "bearer", "aws_bedrock"]])("classifies %s/%s as an API rather than a subscription", (kind, auth, biller) => {
+    expect(resolveManagedClaudeBilling({kind,auth})).toEqual({provider:"anthropic",biller,billingType:"api"});
+    expect(resolveManagedAiBillingIdentity({provider:"anthropic",method:"api_key"},{kind,auth})).toEqual({provider:"anthropic",biller,billingType:"metered_api"});
+  });
+  it("retains ordinary subscription and direct API attribution", () => {
+    expect(resolveManagedClaudeBilling(undefined)).toBeUndefined();
+    expect(resolveManagedAiBillingIdentity({provider:"anthropic",method:"subscription"})).toEqual({provider:"anthropic",biller:"anthropic",billingType:"subscription_included"});
+    expect(resolveManagedAiBillingIdentity({provider:"openai",method:"api_key"})).toEqual({provider:"openai",biller:"openai",billingType:"metered_api"});
   });
 });

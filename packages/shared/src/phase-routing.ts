@@ -61,3 +61,5 @@ export function executionPhaseForResponsibility(input: {
 export function executionPhaseForWorkMode(workMode: unknown): ExecutionPhase | null {
   return workMode === "planning" ? "planning" : workMode === "standard" ? "implementation" : null;
 }
+
+export const quotaRecoveryRequestSchema = z.object({reason:z.string().trim().min(1).max(500)}).strict();

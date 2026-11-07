@@ -200,3 +200,14 @@ it.each([
 ])("does not treat a tool or workspace request failure as a login rejection: %s", (title) => {
   expect(classifyClaudeTerminalSessionFailure({ category: "request", title }, now)).toBeNull();
 });
+
+
+it("classifies a localized typed HTTP 429 without inventing a renewal date", async () => {
+  const title = "API Error: Request rejected (429) · api key 5小时限额已用完";
+  expect(classifyClaudeTerminalSessionFailure({category:"limit",title},now)).toEqual({errorCode:"provider_quota",errorFamily:"provider_quota"});
+  expect(classifyClaudeTerminalSessionFailure({category:"limit",title:"Context budget is 429 tokens"},now)).toBeNull();
+  expect(classifyClaudeTerminalSessionFailure({category:"request",title},now)).toBeNull();
+  const {result}=await executeFailure(title);
+  expect(result).toMatchObject({errorCode:"provider_quota",errorFamily:"provider_quota",resultJson:{errorFamily:"provider_quota"}});
+  expect(result.retryNotBefore).toBeUndefined();
+});

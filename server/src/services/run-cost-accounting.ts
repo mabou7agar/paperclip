@@ -1,3 +1,4 @@
+import { usageHealthService } from "./usage-health.js";
 import { usdToUnits, unitsToCents } from "@paperclipai/shared";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { accountingRuntimeBaselines, budgetReservations, agentRuntimeState, agents, costEvents, heartbeatRuns, nativeRunFinalizations, issues, projects, type Db } from "@paperclipai/db";
@@ -144,6 +145,7 @@ export async function accountRunCost(db: Db, runId: string, hooks: BudgetService
       updatedAt: new Date(),
     }).where(eq(agentRuntimeState.agentId, run.agentId));
     await tx.update(heartbeatRuns).set({ costAccountingPending: false, costAccountedAt: new Date(), accountingProjectionVersion: "v2", accountingLastError: null, accountingLastAttemptAt: new Date() }).where(eq(heartbeatRuns.id, run.id));
+    publications.push(...await usageHealthService(tx).captureObservation(identity.companyId,runId));
     return true;
   });
   for (const file of recoveredFiles) {

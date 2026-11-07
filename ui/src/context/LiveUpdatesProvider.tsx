@@ -1,3 +1,4 @@
+import { i18n } from "@/i18n";
 import { resolveAgentAppearance } from "@paperclipai/shared";
 import { getPageVisibility, usePageVisibility } from "../lib/page-visibility";
 import {
@@ -923,6 +924,11 @@ function buildActivityToast(
   const entityId = readString(payload.entityId);
   const action = readString(payload.action);
   const details = readRecord(payload.details);
+  if (action === "usage.health_alert" && typeof details?.rule === "string" && typeof details?.runId === "string") {
+    void queryClient.invalidateQueries({queryKey:["usage-health",companyId]});
+    return {title:i18n.t("usageHealth:alertTitle"),body:i18n.t(`usageHealth:rules.${details.rule}`),tone:"warn",
+      dedupeKey:`usage-health:${details.runId}`,action:{label:i18n.t("usageHealth:open"),href:"/activity/costs?tab=usage-health"}};
+  }
   const actorId = readString(payload.actorId);
   const actorType = readString(payload.actorType);
 

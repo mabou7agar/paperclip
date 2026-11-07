@@ -41,6 +41,7 @@ vi.mock("../api/budgets", () => ({
   },
 }));
 
+vi.mock("../api/usage-health", () => ({ usageHealthApi: { report: vi.fn().mockResolvedValue(null) } }));
 vi.mock("../api/costs", () => ({ costsApi: costsApiMocks }));
 vi.mock("../api/decision-models", () => ({ decisionModelsApi: { history: decisionHistoryMock } }));
 
@@ -477,7 +478,7 @@ describe("Shared Costs surfaces", () => {
       expect(setBreadcrumbsMock).toHaveBeenCalledWith([{ label: "Costs" }]);
     }
     expect([...container.querySelectorAll('[role="tab"]')].map((tab) => tab.textContent)).toEqual(
-      streamlined ? ["Overview", "Providers", "Billers", "Finance", "Decisions", "Fast responses"] : ["Overview", "Budgets", "Providers", "Billers", "Finance", "Decisions", "Fast responses"],
+      streamlined ? ["Overview", "Usage health", "Providers", "Billers", "Finance", "Decisions", "Fast responses"] : ["Overview", "Usage health", "Budgets", "Providers", "Billers", "Finance", "Decisions", "Fast responses"],
     );
   });
 

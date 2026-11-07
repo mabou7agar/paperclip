@@ -1,3 +1,4 @@
+import { quotaRecoveryRequestSchema, usageHealthPolicySchema, usageHealthQuerySchema } from "@paperclipai/shared";
 import { updateFastResponseSchema } from "@paperclipai/shared";
 import { slackRegistrationSchema, slackSetupActionSchema, slackInstallAuthorizationSchema, slackRegistrationStateSchema, slackAppConfigurationSchema, slackAvatarStateSchema, slackAccountStateSchema } from "@paperclipai/shared";
 import { experimentalApiMetadata } from "./experimental-api-metadata.js";
@@ -12313,3 +12314,8 @@ for (const [method, path, summary] of [
     404: r.notFound, 409: r.conflict, 422: r.unprocessable,
   },
 });
+
+registerCurrentRoute({method:"get",path:"/api/v1/companies/{companyId}/usage-health",tags:["costs"],summary:"Report token usage and report-only health flags across agents and service requests",query:usageHealthQuerySchema,responses:{200:r.ok(),400:r.badRequest,401:r.unauthorized,403:r.forbidden,404:r.notFound}});
+registerCurrentRoute({method:"put",path:"/api/v1/companies/{companyId}/usage-health/policy",tags:["costs"],summary:"Configure company usage alerts and per-agent threshold overrides without pausing work",body:usageHealthPolicySchema,responses:{200:r.ok(),400:r.badRequest,401:r.unauthorized,403:r.forbidden,404:r.notFound}});
+
+registerCurrentRoute({method:"post",path:"/api/v1/companies/{companyId}/ai-connections/{connectionId}/quota-restored",tags:["ai-connections"],summary:"Acknowledge owner-confirmed account quota recovery without changing old receipts or starting work",body:quotaRecoveryRequestSchema,responses:{200:r.ok(),400:r.badRequest,401:r.unauthorized,403:r.forbidden,404:r.notFound}});

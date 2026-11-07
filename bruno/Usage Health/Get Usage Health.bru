@@ -1,0 +1,21 @@
+meta {
+  name: Get Usage Health
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{baseUrl}}/api/v1/companies/{{companyId}}/usage-health?from={{from}}&to={{to}}
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{boardToken}}
+}
+
+tests {
+  test("request succeeds", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}

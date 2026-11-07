@@ -2,13 +2,14 @@ import i18n, { type InitOptions, type TOptions } from "i18next";
 import { initReactI18next, useTranslation as useReactI18nextTranslation } from "react-i18next";
 
 import { DEFAULT_LOCALE, i18nextResources, supportedLocales } from "./locales";
+import { usageHealthMessages } from "./usage-health";
 import { phaseRoutingMessages } from "./phase-routing";
 
 const i18nextOptions: InitOptions = {
   resources: {
     ...i18nextResources,
-    en: { ...i18nextResources.en, phaseRouting: phaseRoutingMessages.en },
-    ar: { ...i18nextResources.ar, phaseRouting: phaseRoutingMessages.ar },
+    en: { ...i18nextResources.en, phaseRouting: phaseRoutingMessages.en, usageHealth: usageHealthMessages.en },
+    ar: { ...i18nextResources.ar, phaseRouting: phaseRoutingMessages.ar, usageHealth: usageHealthMessages.ar },
   },
   lng: DEFAULT_LOCALE,
   fallbackLng: DEFAULT_LOCALE,

@@ -1,3 +1,5 @@
+import { quotaRecoveryRequestSchema } from "@paperclipai/shared";
+import { providerQuotaRecoveryService } from "../services/provider-quota-recovery.js";
 import { validateAiApiKey } from "../services/ai-api-key-test.js";
 export { validateAiApiKey } from "../services/ai-api-key-test.js";
 import { supportsLocalAiLogin } from "../services/local-ai-login-policy.js";
@@ -286,6 +288,22 @@ export function aiConnectionRoutes(db: Db, options: Parameters<typeof supportsLo
       );
     },
   );
+  router.post(
+    "/v1/companies/:companyId/ai-connections/:connectionId/quota-restored",
+    validate(quotaRecoveryRequestSchema),
+    async (req, res) => {
+      const companyId = req.params.companyId as string;
+      assertBoard(req);
+      assertCompanyAccess(req, companyId);
+      if (!(await canManageAiConnections(db, req, companyId)))
+        throw forbidden("Connection management permission is required");
+      res.json(await providerQuotaRecoveryService(db).acknowledge({
+        companyId, userId: getActorInfo(req).actorId,
+        connectionId: req.params.connectionId as string, reason: req.body.reason,
+      }));
+    },
+  );
+
   router.post(
     "/companies/:companyId/ai-connections",
     validate(createAiConnectionSchema),

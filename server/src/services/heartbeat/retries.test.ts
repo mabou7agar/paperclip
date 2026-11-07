@@ -63,6 +63,17 @@ function deferral() {
 }
 
 describe("heartbeat retry module callbacks", () => {
+  it("does not retry an unrepaired native session", async () => {
+    const database = guardedDatabase();
+    const deps = callbacks();
+    const run = { ...unitRun(), errorCode: "acpx_session_resume_required" };
+    const result = await extracted.createHeartbeatRetries(database.db, deps).scheduleBoundedRetryForRun(
+      run, { adapterType: "codex_local" } as Agent,
+    );
+    expect(result).toMatchObject({ outcome: "not_scheduled", issueId: "issue" });
+    expect(database.access).not.toHaveBeenCalled();
+    expect(deps.appendRunEvent).not.toHaveBeenCalled();
+  });
   it("preserves legacy helper and error-class identity", () => {
     expect(legacy.computeBoundedTransientHeartbeatRetrySchedule).toBe(extracted.computeBoundedTransientHeartbeatRetrySchedule);
     expect(legacy.computeWorkspaceBusyRetryDelayMs).toBe(extracted.computeWorkspaceBusyRetryDelayMs);

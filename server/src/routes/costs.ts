@@ -1,3 +1,4 @@
+import { usageHealthRoutes } from "./usage-health.js";
 import { importProviderDailyCosts } from "../services/provider-billing-import.js";
 import { subscriptionPriceSchema, mergeSubscriptionsSchema } from "@paperclipai/shared";
 import { subscriptionService } from "../services/subscriptions.js";
@@ -95,6 +96,8 @@ export function costRoutes(
   async function subscriptionActor(req: Parameters<typeof assertCompanyAccess>[0], companyId: string) {
     return { ...costReaderActor(req, companyId), canManage: await canManageAiConnections(db, req, companyId) };
   }
+
+  router.use(usageHealthRoutes(db));
 
   router.get("/companies/:companyId/costs/data-quality", async (req, res) => {
     const companyId = req.params.companyId as string;

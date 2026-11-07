@@ -401,6 +401,11 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
         || parseObject(parseObject(parseObject(run.runnerProfileJson).nativeExecutionInput).provider).kind === "openai_dot") {
       return { outcome: "not_scheduled" as const, reason: "Dot external execution must be reconciled before a new assignment; Paperclip cannot confirm its external stop.", issueId: readNonEmptyString(run.contextSnapshot?.issueId) };
     }
+    if (run.errorCode === "acpx_session_resume_required") {
+      return { outcome: "not_scheduled" as const,
+        reason: "Repair the existing native session before resuming this task.",
+        issueId: readNonEmptyString(run.contextSnapshot?.issueId) };
+    }
     if (run.errorCode === "provider_tool_definition_invalid") {
       return { outcome: "not_scheduled" as const,
         reason: "Repair the invalid tool definitions before starting a new attempt.",

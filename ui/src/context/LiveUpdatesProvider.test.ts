@@ -1647,6 +1647,20 @@ describe("task subtree notification context", () => {
 
 describe("activity toast attribution", () => {
   const build = __liveUpdatesTestUtils.buildActivityToast;
+  it("delivers a usage alert once per run and refreshes only that company's report", () => {
+    const client = new QueryClient();
+    const invalidate = vi.spyOn(client, "invalidateQueries");
+    const actor = { userId: "owner", agentId: null };
+    const alert = (rule: string) => build(client, "company", {
+      action: "usage.health_alert", entityType: "heartbeat_run", entityId: "run-1",
+      details: { rule, runId: "run-1" },
+    }, actor);
+    expect(alert("large_input")).toMatchObject({ title: "Unusual token usage", body: "Large input total",
+      tone: "warn", dedupeKey: "usage-health:run-1", action: { href: "/activity/costs?tab=usage-health" } });
+    expect(alert("repeated_runs")?.dedupeKey).toBe("usage-health:run-1");
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["usage-health", "company"] });
+    client.clear();
+  });
   const payload = { action: "issue.created", entityType: "issue", entityId: "task-1", actorType: "user", actorId: "user-1", actorName: "Alex Example", actorImage: "/alex.png" };
   it.each(["issue.created", "issue.updated", "issue.comment_added"])("hides the viewer's own %s", (action) => {
     expect(build(new QueryClient(), "company", { ...payload, action }, { userId: "user-1", agentId: null })).toBeNull();

@@ -113,7 +113,9 @@ describe.skipIf(!support.supported)("heartbeat run completion boundary", () => {
 
   it("persists usage, accounting, final logs, presentation and the next task session", async () => {
     const f = await fixture();
+    f.input.adapterResult.usage!.cacheWriteTokens = 10;
     await f.completion.completeRun(f.input);
+    expect((await read(f.run.id)).usageJson).toMatchObject({ inputTokens: 20, cacheWriteTokens: 10 });
     expect(await read(f.run.id)).toMatchObject({ status: "succeeded", sessionIdAfter: "provider-session", logBytes: 123, logSha256: "log-hash", logCompressed: true, stdoutExcerpt: "answer", costAccountingPending: false, costAccountedAt: expect.any(Date), usageJson: { inputTokens: 20, cachedInputTokens: 5, outputTokens: 8, usageSource: "per_run", configFreshness: { version: 1 } }, resultJson: { presentationDecision: { commentAction: "none" } } });
     expect(await db.select().from(costEvents).where(eq(costEvents.heartbeatRunId, f.run.id))).toHaveLength(1);
     expect((await f.deps.getTaskSession(f.agent.companyId, f.agent.id, f.agent.adapterType, "completion-task"))?.sessionDisplayId).toBe("provider-session");

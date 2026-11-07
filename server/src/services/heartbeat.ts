@@ -3365,14 +3365,14 @@ export function heartbeatService(
       let compatibleConfigMetadata: EffectiveRunSessionConfigMetadata[] = [];
       if (managedAiRuntime && aiBinding && taskSession &&
         readConfigFingerprintFromSessionParams(taskSession.sessionParamsJson)?.fingerprint !== sessionConfigMetadata.fingerprint) {
-        const revisions = requestedAiBinding?.mode === "router"
+        const revisions = requestedAiBinding?.mode === "router" || phaseRoute
           ? await db.select().from(agentConfigRevisions).where(and(eq(agentConfigRevisions.companyId, agent.companyId), eq(agentConfigRevisions.agentId, agent.id))).orderBy(desc(agentConfigRevisions.createdAt), desc(agentConfigRevisions.id)).limit(21)
           : [];
         const candidates = aiConnectionSessionCompatibilityInputs({
           effectiveAdapterConfig: runtimeConfig, agentRuntimeConfig: agent.runtimeConfig,
           agentConfigRevision: sessionConfigMetadataInput.agentConfigRevision,
           issueOverrides: issueAssigneeOverrides, originalIssueOverrides: originalAiIssueOverrides,
-          binding: aiBinding, router: requestedAiBinding?.mode === "router",
+          binding: aiBinding, router: requestedAiBinding?.mode === "router", phaseRouted: Boolean(phaseRoute),
           storedIdentity: taskSession.sessionParamsJson?.paperclipAiCredentialIdentity,
           sessionIdentity: managedAiRuntime.sessionIdentity, credentialIdentity: managedAiRuntime.identity, revisions,
         });

@@ -79,3 +79,20 @@ describe("AI pool session adoption", () => {
     expect(aiConnectionSessionCompatibilityInputs({ ...input, storedIdentity: "grant:bob:0" })).toEqual([]);
   });
 });
+
+
+describe("phase routing session continuity", () => {
+  it("preserves an unchanged implementation through a planning-chain-only revision", async () => {
+    const first=revision("revision-1",null,binding);
+    const beforeRuntime={aiConnection:binding,phaseRouting:{planning:["claude","astra"],implementation:["sol"]}};
+    const afterRuntime={...beforeRuntime,phaseRouting:{planning:["claude","astra","api"],implementation:["sol"]}};
+    const edit={...revision("revision-2",binding,binding),beforeConfig:{...first.afterConfig,runtimeConfig:beforeRuntime},afterConfig:{...first.afterConfig,runtimeConfig:afterRuntime}};
+    const previous={agentRuntimeConfig:beforeRuntime,agentConfigRevision:aiConnectionRevisionMetadata(first)};
+    const next={agentRuntimeConfig:afterRuntime,agentConfigRevision:aiConnectionRevisionMetadata(edit)};
+    expect((await decision(previous,next,{router:false,phaseRouted:true,revisions:[edit,first]})).reset).toBe(false);
+    expect((await decision(previous,{...next,effectiveAdapterConfig:{...config,model:"another-model"}},{router:false,phaseRouted:true,revisions:[edit,first]})).reset).toBe(true);
+    const unsafe={...edit,afterConfig:{...edit.afterConfig,adapterConfig:{...config,dangerouslyBypassApprovalsAndSandbox:true}}};
+    expect((await decision(previous,next,{router:false,phaseRouted:true,revisions:[unsafe,first]})).reset).toBe(true);
+    expect((await decision(previous,next,{router:false,phaseRouted:false,revisions:[edit,first]})).reset).toBe(true);
+  });
+});

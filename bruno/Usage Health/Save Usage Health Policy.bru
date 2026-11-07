@@ -1,0 +1,29 @@
+meta {
+  name: Save Usage Health Policy
+  type: http
+  seq: 2
+}
+
+put {
+  url: {{baseUrl}}/api/v1/companies/{{companyId}}/usage-health/policy
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{boardToken}}
+}
+
+body:json {
+  {
+    "enabled": true,
+    "thresholds": { "inputTokensPerRun": 250000, "outputTokensPerRun": 30000, "runsPerTaskHour": 8, "cacheWriteShare": 0.5, "minCacheWriteTokens": 50000 },
+    "agentOverrides": {}
+  }
+}
+
+tests {
+  test("request succeeds", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}

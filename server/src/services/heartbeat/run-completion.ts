@@ -479,6 +479,14 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       costUsdExact: adapterResult.costUsdExact ?? null,
       providerRequestId: adapterResult.providerRequestId ?? null,
       ...(normalizedUsage ?? {}),
+      // Cache writes are a subset of input. Preserve the split only when the
+      // adapter reports this turn's usage; session totals need their own delta.
+      ...(adapterResult.usageBasis === "per_run" &&
+          typeof adapterResult.usage?.cacheWriteTokens === "number" &&
+          Number.isFinite(adapterResult.usage.cacheWriteTokens)
+        ? { cacheWriteTokens: Math.min(normalizedUsage?.inputTokens ?? 0,
+            Math.max(0, Math.floor(adapterResult.usage.cacheWriteTokens))) }
+        : {}),
       ...(adapterResult.usageByModel ? { usageByModel: adapterResult.usageByModel } : {}),
       ...(rawUsage
         ? {

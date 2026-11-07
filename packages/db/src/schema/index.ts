@@ -247,3 +247,5 @@ export { aiSubscriptions, aiSubscriptionPrices, aiSubscriptionConnections } from
 
 export * from "./fast_responses.js";
 export { companyPhaseRouting } from "./company_phase_routing.js";
+
+export { companyUsageHealth } from "./company_usage_health.js";

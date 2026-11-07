@@ -1470,7 +1470,7 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(result.exitCode).toBe(0);
     expect(statusCalls).toBe(2);
     // Cache-write tokens count as input tokens; cached reads stay separate.
-    expect(result.usage).toEqual({ inputTokens: 150, outputTokens: 4500, cachedInputTokens: 900 });
+    expect(result.usage).toEqual({ inputTokens: 150, outputTokens: 4500, cachedInputTokens: 900, cacheWriteTokens: 30 });
     expect(result.usageBasis).toBe("per_run");
     // Agent-reported cost is cumulative; this run pays the delta.
     expect(result.costUsd).toBeCloseTo(0.75);
@@ -1521,8 +1521,8 @@ describe("shared ACPX engine runtime behavior", () => {
       provider: "anthropic", biller: "anthropic", billingType: "api" });
     expect(result.errorMessage).toContain("Receipt storage unavailable");
     expect(result.usage).toEqual(failedSave === "terminal"
-      ? { inputTokens: 150, outputTokens: 4500, cachedInputTokens: 900 }
-      : { inputTokens: 120, outputTokens: 4000, cachedInputTokens: 800 });
+      ? { inputTokens: 150, outputTokens: 4500, cachedInputTokens: 900, cacheWriteTokens: 30 }
+      : { inputTokens: 120, outputTokens: 4000, cachedInputTokens: 800, cacheWriteTokens: 20 });
     expect(result.costUsd).toBeCloseTo(failedSave === "terminal" ? 0.75 : 0.7);
     expect(onUsage).toHaveBeenCalledTimes(failedSave === "terminal" ? 2 : 1);
     expect(cancel).toHaveBeenCalledTimes(1);
@@ -2500,6 +2500,28 @@ describe("shared ACPX engine runtime behavior", () => {
       (second.sessionInputs[0]!.sessionOptions as { env: Record<string, string> }).env
         .PAPERCLIP_API_KEY,
     ).toBe("second");
+  });
+
+  it("preserves a native conversation and stops blind retries when configuration requires session repair", async () => {
+    const root = await makeTempRoot();
+    const turn = vi.fn();
+    const execute = createAcpxEngineExecutor({
+      createRuntime: () => buildRuntime(() => {
+        const error = new Error("Persistent ACP session could not be resumed: Internal error");
+        error.name = "SessionResumeRequiredError";
+        Object.assign(error, { retryable: true });
+        throw error;
+      }, undefined, turn) as never,
+    });
+    const result = await execute({
+      runId: "run-resume", agent: { id: "agent-1", companyId: "company-1" }, runtime: {},
+      config: { agent: "custom", agentCommand: "node ./fake-acp.js", model: "fixture-model", stateDir: root },
+      context: {}, onLog: async () => {}, onMeta: async () => {},
+    } as never);
+    expect(result).toMatchObject({ exitCode: 1, errorCode: "acpx_session_resume_required",
+      errorMeta: { phase: "configure_session", retryable: false, recoveryAction: "repair_existing_session" } });
+    expect(result.clearSession).not.toBe(true);
+    expect(turn).not.toHaveBeenCalled();
   });
 
   it("enriches acpx.error diagnostics and child stderr when ensureSession rejects", async () => {
