@@ -1,6 +1,9 @@
 import * as codexAdapter from "@paperclipai/adapter-codex-local/server";
 import { WORKSPACE_RESTORE_LOCK_TIMEOUT_CODE } from "@paperclipai/adapter-utils/workspace-restore-merge";
 import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import { once } from "node:events";
+import { promisify } from "node:util";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -56,7 +59,7 @@ afterAll(async () => {
   if (home) await rm(home, { recursive: true, force: true });
 });
 
-async function fixture(provider: "anthropic" | "openai", method: "api_key" | "subscription" = "api_key") {
+async function fixture(provider: "anthropic" | "openai", method: "api_key" | "subscription" = "api_key", board = false) {
   const companyId = randomUUID();
   const agentId = randomUUID();
   const userId = `owner-${companyId}`;
@@ -70,7 +73,9 @@ async function fixture(provider: "anthropic" | "openai", method: "api_key" | "su
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
-    req.actor = { type: "agent", agentId, companyId, runId: run!.id, source: "agent_jwt", onBehalfOfUserId: userId, onBehalfOfMemberships: [{ companyId, membershipRole: "owner", status: "active" }] };
+    req.actor = board
+      ? { type: "board", userId, companyIds: [companyId], source: "local_implicit", isInstanceAdmin: false }
+      : { type: "agent", agentId, companyId, runId: run!.id, source: "agent_jwt", onBehalfOfUserId: userId, onBehalfOfMemberships: [{ companyId, membershipRole: "owner", status: "active" }] };
     next();
   });
   app.use("/api", agentRoutes(db));
@@ -99,6 +104,57 @@ async function poolFixture(f: Awaited<ReturnType<typeof fixture>>, extraMembers:
 }
 
 describe("agent-created hires use managed AI connections", () => {
+  it("saves an Astra planning fallback over curl without probing an unchanged quota-limited base connection", async () => {
+    const f = await fixture("anthropic", "subscription", true);
+    await db.insert(principalPermissionGrants).values({ companyId: f.companyId, principalType: "user", principalId: f.userId, permissionKey: "agents:configure" });
+    const account = await aiConnectionService(db).save(f.companyId, f.userId, { provider: "openai", method: "subscription", ownership: "personal", name: "Planning fallback", allAgents: true, agentIds: [], loginSessionId: "fixture" }, JSON.stringify({ tokens: { access_token: "fixture-access", refresh_token: "fixture-refresh", id_token: "fixture-id", account_id: "fixture-account" } }));
+    const codexBinding = { provider: "openai", method: "subscription", mode: "delegated", ...account } as const;
+    const phaseRouting = { enabled: true, planning: [
+      { id: "claude", adapterType: "claude_local", model: "claude-sonnet-5", binding: f.binding },
+      { id: "astra", adapterType: "codex_local", model: "gpt-6-astra", binding: codexBinding },
+    ], implementation: [{ id: "codex", adapterType: "codex_local", model: "gpt-6.1-sol", binding: codexBinding }], unknownResetCooldownSeconds: 3600 };
+    const original = getServerAdapter(f.adapterType);
+    const probe = vi.fn(async () => ({ adapterType: f.adapterType, status: "warn" as const, testedAt: new Date().toISOString(),
+      checks: [{ code: "claude_hello_probe_usage_limited", level: "warn" as const, message: "Quota exhausted" }] }));
+    registerServerAdapter({ ...original, testEnvironment: probe });
+    const server = f.app.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    try {
+      const [stored] = await db.select().from(agents).where(eq(agents.id, f.agentId));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("Expected loopback test server");
+      const { stdout } = await promisify(execFile)("curl", ["--silent", "--show-error", "--max-time", "15", "--write-out", "\n%{http_code}",
+        "--request", "PATCH", "--header", "Content-Type: application/json", "--data-binary", JSON.stringify({ runtimeConfig: { ...stored.runtimeConfig, phaseRouting } }),
+        `http://127.0.0.1:${address.port}/api/agents/${f.agentId}`]);
+      const separator = stdout.lastIndexOf("\n");
+      const status = Number(stdout.slice(separator + 1));
+      const body = JSON.parse(stdout.slice(0, separator));
+      expect(status, JSON.stringify(body)).toBe(200);
+      expect(body.runtimeConfig.phaseRouting).toEqual(phaseRouting);
+      expect(body.runtimeConfig.aiConnection).toEqual(f.binding);
+      expect(probe).not.toHaveBeenCalled();
+      console.info(JSON.stringify({ check: "phase-routing-curl-save", status, planning: body.runtimeConfig.phaseRouting.planning.map((profile: { model: string }) => profile.model), implementation: body.runtimeConfig.phaseRouting.implementation.map((profile: { model: string }) => profile.model), baseProviderProbes: probe.mock.calls.length }));
+    } finally {
+      await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+      unregisterServerAdapter(f.adapterType);
+    }
+  }, 30_000);
+
+  it("still requires a successful hello before adopting an explicitly changed subscription binding", async () => {
+    const f = await fixture("anthropic", "subscription", true);
+    await db.insert(principalPermissionGrants).values({ companyId: f.companyId, principalType: "user", principalId: f.userId, permissionKey: "agents:configure" });
+    const original = getServerAdapter(f.adapterType);
+    const probe = vi.fn(async () => ({ adapterType: f.adapterType, status: "warn" as const, testedAt: new Date().toISOString(),
+      checks: [{ code: "claude_hello_probe_usage_limited", level: "warn" as const, message: "Quota exhausted" }] }));
+    registerServerAdapter({ ...original, testEnvironment: probe });
+    try {
+      const response = await request(f.app).patch(`/api/agents/${f.agentId}`).send({ runtimeConfig: { aiConnection: { ...f.binding, mode: "delegated", ...f.account } } });
+      expect(response.status).toBe(422);
+      expect(response.body.details?.code).toBe("ai_connection_validation_failed");
+      expect(probe).toHaveBeenCalled();
+      expect((await db.select().from(agents).where(eq(agents.id, f.agentId)))[0].runtimeConfig.aiConnection).toEqual(f.binding);
+    } finally { unregisterServerAdapter(f.adapterType); }
+  });
   it.each(["agent-hires", "agents"])("%s inherits a manager's pool without copying legacy credentials", async (endpoint) => {
     const f = await fixture("openai");
     const p = await poolFixture(f);

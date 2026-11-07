@@ -16,6 +16,12 @@ disable phase routing for that agent. Re-enable inheritance to remove the
 override. Company defaults require accounts installed for the whole company;
 an override can use an account installed for that agent.
 
+Saving only phase models or fallbacks checks their account access and model
+compatibility without probing the unchanged regular connection. A regular
+connection, harness, model/configuration, or environment change still runs its
+normal connection validation. The agent's runtime Test checks that regular
+connection; a quota-limited Claude test does not describe a Codex fallback.
+
 The task's `workMode` selects the phase: `planning` uses the planning chain and
 `standard` uses implementation. Plan acceptance still uses the existing approval
 workflow. Ask, chat, other work modes, and agents using other harnesses retain

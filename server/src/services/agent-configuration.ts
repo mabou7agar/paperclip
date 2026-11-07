@@ -1,4 +1,5 @@
 import { and, eq } from "drizzle-orm";
+import { isDeepStrictEqual } from "node:util";
 import { assets, agentConfigRevisions, agentTaskSessions, agentRuntimeState, type Db } from "@paperclipai/db";
 import { normalizeAgentUrlKey } from "@paperclipai/shared";
 import { normalizePaperclipRunnerAdapterConfig } from "@paperclipai/adapter-utils/server-utils";
@@ -11,6 +12,17 @@ import { secretService, assertClaudeOAuthBindingInvariant } from "./secrets.js";
 import { agentCredentialService } from "./agent-credentials.js";
 import { clearPrimaryAgent } from "./primary-agent.js";
 import { budgetServiceInTransaction } from "./budgets.js";
+
+type ManagedConnectionValidationSnapshot = Pick<AgentConfigurationRecord,
+  "adapterType" | "adapterConfig" | "runtimeConfig" | "defaultEnvironmentId">;
+
+/** Compare execution settings structurally: JSONB key order is not a new connection. */
+export function managedAgentConnectionNeedsValidation(previous: ManagedConnectionValidationSnapshot, next: ManagedConnectionValidationSnapshot): boolean {
+  return previous.adapterType !== next.adapterType
+    || previous.defaultEnvironmentId !== next.defaultEnvironmentId
+    || !isDeepStrictEqual(previous.adapterConfig, next.adapterConfig)
+    || !isDeepStrictEqual(previous.runtimeConfig.aiConnection, next.runtimeConfig.aiConnection);
+}
 
 export async function prepareAgentConfiguration(db: Db, existing: AgentConfigurationRecord, data: AgentConfigurationPatch, options?: UpdateAgentOptions): Promise<AgentConfigurationPatch> {
   const id = existing.id;
