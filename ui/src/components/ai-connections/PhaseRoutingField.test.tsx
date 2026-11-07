@@ -54,7 +54,7 @@ it("supports more than five fallback levels and lets the user reorder and remove
 it("starts from editable model defaults with an independent implementation chain", async () => {
   mount(<Editor />); await settle();
   const fields = container.querySelectorAll("fieldset");
-  expect(fields).toHaveLength(2);
+  expect(fields).toHaveLength(3);
   expect(fields[0].textContent).toContain("Planning");
   expect(fields[1].textContent).toContain("Implementation");
   expect(fields[0].querySelectorAll("datalist")).toHaveLength(2);
@@ -62,7 +62,7 @@ it("starts from editable model defaults with an independent implementation chain
   const input = fields[0].querySelector<HTMLInputElement>("input[list]")!;
   const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
   flushSync(() => { setter.call(input, ""); input.dispatchEvent(new Event("input", { bubbles: true })); });
-  expect(container.querySelectorAll("fieldset")).toHaveLength(2);
+  expect(container.querySelectorAll("fieldset")).toHaveLength(3);
 });
 
 it("inherits company defaults and creates an explicit override on request", async () => {
@@ -96,4 +96,17 @@ it("keeps one stable company settings region through loading and cache refreshes
     expect(container.querySelectorAll("h2")).toHaveLength(1);
     expect(container.querySelector("section")).toBe(section);
   }
+});
+
+
+it("changes agent responsibility independently while inheriting company chains", async () => {
+  const responsibility = vi.fn();
+  mount(<AgentPhaseRoutingField {...common} onChange={vi.fn()} onInherit={vi.fn()} responsibility="review" onResponsibilityChange={responsibility} />);
+  await settle();
+  const select = container.querySelector<HTMLSelectElement>("select")!;
+  expect(select.value).toBe("review");
+  expect(container.querySelector<HTMLInputElement>('input[type="checkbox"]')!.checked).toBe(true);
+  flushSync(() => { select.value = "planning"; select.dispatchEvent(new Event("change", { bubbles: true })); });
+  expect(responsibility).toHaveBeenCalledWith("planning");
+  expect(container.querySelectorAll("fieldset")).toHaveLength(0);
 });

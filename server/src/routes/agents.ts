@@ -4290,6 +4290,7 @@ export function agentRoutes(
       adapterConfig: desiredSkillAssignment.adapterConfig,
     });
     const normalizedRuntimeConfig = await normalizeCreatedAgentRuntimeConfig(req, companyId, hireInput.adapterType, normalizedAdapterConfig, hireInput.runtimeConfig);
+    if (normalizedRuntimeConfig.executionResponsibility !== undefined) assertBoard(req);
     if (normalizedRuntimeConfig.phaseRouting !== undefined) await phaseRoutingService(db).validateConfiguration({
       companyId, agentId: hiredAgentId, userId: responsibleUserForAiRequest(req), isBoard: req.actor.type === "board",
       adapterType: hireInput.adapterType, policy: normalizedRuntimeConfig.phaseRouting,
@@ -4601,6 +4602,7 @@ export function agentRoutes(
       adapterConfig: desiredSkillAssignment.adapterConfig,
     });
     const normalizedRuntimeConfig = await normalizeCreatedAgentRuntimeConfig(req, companyId, createInput.adapterType, normalizedAdapterConfig, createInput.runtimeConfig);
+    if (normalizedRuntimeConfig.executionResponsibility !== undefined) assertBoard(req);
     if (normalizedRuntimeConfig.phaseRouting !== undefined) await phaseRoutingService(db).validateConfiguration({
       companyId, agentId, userId: responsibleUserForAiRequest(req), isBoard: req.actor.type === "board",
       adapterType: createInput.adapterType, policy: normalizedRuntimeConfig.phaseRouting,
@@ -5333,6 +5335,7 @@ export function agentRoutes(
         runtimeConfig: { aiConnection: nextAiBinding },
       })) await validateManagedAgentBinding(req, existing.companyId, existing.id, requestedAdapterType, aiConfig, nextAiBinding, environmentId, true);
     }
+    if (requestedRuntimeConfig && requestedRuntimeConfig.executionResponsibility !== existing.runtimeConfig.executionResponsibility) assertBoard(req);
     const nextPhaseRouting = (requestedRuntimeConfig ?? existing.runtimeConfig).phaseRouting;
     if (JSON.stringify(nextPhaseRouting) !== JSON.stringify(existing.runtimeConfig.phaseRouting) ||
         (nextPhaseRouting !== undefined && requestedAdapterType !== existing.adapterType)) {

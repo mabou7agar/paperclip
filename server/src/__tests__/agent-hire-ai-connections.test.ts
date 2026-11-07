@@ -124,13 +124,14 @@ describe("agent-created hires use managed AI connections", () => {
       const address = server.address();
       if (!address || typeof address === "string") throw new Error("Expected loopback test server");
       const { stdout } = await promisify(execFile)("curl", ["--silent", "--show-error", "--max-time", "15", "--write-out", "\n%{http_code}",
-        "--request", "PATCH", "--header", "Content-Type: application/json", "--data-binary", JSON.stringify({ runtimeConfig: { ...stored.runtimeConfig, phaseRouting } }),
+        "--request", "PATCH", "--header", "Content-Type: application/json", "--data-binary", JSON.stringify({ runtimeConfig: { ...stored.runtimeConfig, phaseRouting, executionResponsibility: "review" } }),
         `http://127.0.0.1:${address.port}/api/agents/${f.agentId}`]);
       const separator = stdout.lastIndexOf("\n");
       const status = Number(stdout.slice(separator + 1));
       const body = JSON.parse(stdout.slice(0, separator));
       expect(status, JSON.stringify(body)).toBe(200);
       expect(body.runtimeConfig.phaseRouting).toEqual(phaseRouting);
+      expect(body.runtimeConfig.executionResponsibility).toBe("review");
       expect(body.runtimeConfig.aiConnection).toEqual(f.binding);
       expect(probe).not.toHaveBeenCalled();
       console.info(JSON.stringify({ check: "phase-routing-curl-save", status, planning: body.runtimeConfig.phaseRouting.planning.map((profile: { model: string }) => profile.model), implementation: body.runtimeConfig.phaseRouting.implementation.map((profile: { model: string }) => profile.model), baseProviderProbes: probe.mock.calls.length }));

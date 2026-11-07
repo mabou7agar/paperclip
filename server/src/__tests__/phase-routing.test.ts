@@ -46,6 +46,35 @@ describe("phase routing", () => {
     expect((await service().resolve({ ...input, runtimeConfig: { phaseRouting: { ...policy, planning: [codex] } } }))?.profile?.id).toBe("codex");
   });
 
+  it("routes ordinary CTO coordination and independent review by responsibility", async () => {
+    getDefaults.mockResolvedValue({ ...policy, roleResponsibilities: { cto: "planning" }, review: [claude] });
+    const ordinary = { ...input, workMode: "standard", runtimeConfig: {} };
+    expect((await service().resolve({ ...ordinary, agentRole: "cto" }))?.phase).toBe("planning");
+    expect((await service().resolve({ ...ordinary, agentRole: "engineer" }))?.phase).toBe("implementation");
+    expect((await service().resolve({ ...ordinary, runtimeConfig: { executionResponsibility: "review" } }))?.phase).toBe("review");
+    expect((await service().resolve({ ...ordinary, agentRole: "cto", runtimeConfig: { executionResponsibility: "implementation" } }))?.phase).toBe("implementation");
+    expect((await service().resolve({ ...ordinary, workMode: "planning", runtimeConfig: { executionResponsibility: "review" } }))?.phase).toBe("planning");
+  });
+
+  it("fails closed when review is selected without a review chain", async () => {
+    expect(await service().resolve({ ...input, workMode: "standard", runtimeConfig: { phaseRouting: policy, executionResponsibility: "review" } }))
+      .toMatchObject({ phase: "review", profile: null, retryAt: null, maxFallbackAttempts: 0 });
+    expect(select).not.toHaveBeenCalled();
+  });
+
+  it("does not carry fallback position across responsibilities", async () => {
+    const result = await service().resolve({ ...input, workMode: "standard", afterPhase: "planning", afterProfileId: "codex" });
+    expect(result).toMatchObject({ phase: "implementation", profile: { id: "codex" } });
+  });
+
+  it("parks the review chain on quota without switching to an implementation model", async () => {
+    latestEvidence.mockResolvedValue({ status: "failed", finishedAt: now, result: { retryNotBefore: "2026-11-08T10:00:00Z" } });
+    const result = await service().resolve({ ...input, workMode: "standard", runtimeConfig: { executionResponsibility: "review", phaseRouting: { ...policy, review: [claude] } } });
+    expect(result).toMatchObject({ phase: "review", profile: null, maxFallbackAttempts: 0, retryAt: "2026-11-08T10:00:00.000Z" });
+    expect(select).toHaveBeenCalledTimes(1);
+    expect(select.mock.calls[0][0].binding.provider).toBe("anthropic");
+  });
+
   it("accepts an ordered chain of arbitrary depth", async () => {
     const chain = Array.from({ length: 12 }, (_, i) => ({ ...codex, id: `level-${i}` }));
     expect(phaseRoutingSchema.safeParse({ ...policy, planning: chain }).success).toBe(true);

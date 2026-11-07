@@ -1,9 +1,9 @@
 ---
-title: "Planning models and quota fallbacks"
+title: "Responsibility routing and quota fallbacks"
 description: "Company model defaults with per-agent overrides and ordered quota fallbacks."
 ---
 
-Company settings contain **Default planning and implementation models**. Enable
+Company settings contain **Default models by responsibility**. Enable
 the policy, choose a model and connection for each phase, and add or reorder any
 number of fallback levels. Each level has its own optional reasoning effort.
 The initial template uses Claude then Codex for planning, and Codex for
@@ -22,8 +22,31 @@ connection, harness, model/configuration, or environment change still runs its
 normal connection validation. The agent's runtime Test checks that regular
 connection; a quota-limited Claude test does not describe a Codex fallback.
 
-The task's `workMode` selects the phase: `planning` uses the planning chain and
-`standard` uses implementation. Plan acceptance still uses the existing approval
+Ordinary (`standard`) tasks select a chain by responsibility, in this order:
+
+1. The agent's `runtimeConfig.executionResponsibility` override.
+2. The company policy's `roleResponsibilities[agent.role]` mapping.
+3. The company policy's `defaultResponsibility`, or `implementation` for older policies.
+
+The three responsibilities are `planning` (planning and coordination),
+`implementation`, and `review`. Chain inheritance is independent of the agent's
+responsibility: a CTO can inherit the company's planning chain, while a Tech Lead
+with the same generic `engineer` role can explicitly select review. Agent chain
+overrides inherit omitted review and responsibility defaults from the company.
+Explicit `planning` task mode still selects planning for every agent.
+A selected review responsibility without a review chain stops with a configuration
+error; it never silently switches to implementation. Older policies with no new
+fields preserve their existing behavior.
+
+This changes model selection, not delegation or authority. Existing child tasks,
+self-contained handoff briefs, frozen revisions, acceptance criteria, review
+verdicts, and escalation rules remain the communication contract. Routing does
+not automatically copy private parent documents or approve plans. The task context
+records the actual routed provider and reminds agents to apply existing independent
+review rules to it. Cross-provider review is an existing company instruction,
+not a new server-enforced review policy. Configure eligible review fallbacks;
+Astra and Sol are both OpenAI and cannot independently review one another where
+that company rule applies. Plan acceptance still uses the existing approval
 workflow. Ask, chat, other work modes, and agents using other harnesses retain
 their regular configuration. This extension supports the existing Claude,
 Codex and OpenCode adapters. Select OpenCode and a connected OpenRouter account
@@ -95,6 +118,8 @@ routing disabled.
   until configured).
 - `PUT /api/v1/companies/:companyId/phase-routing` validates and replaces the
   company policy. It requires board access and connection-management permission.
+- Per-agent responsibility uses `runtimeConfig.executionResponsibility`; omit it to
+  inherit the company role/default. Only the board may change this setting.
 - Per-agent policies use the existing compatible agent update API's optional
   `runtimeConfig.phaseRouting` field. Omit the field from the complete runtime
   configuration to inherit. An explicit disabled policy opts out. Existing

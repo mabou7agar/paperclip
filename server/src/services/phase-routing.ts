@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { Db } from "@paperclipai/db";
 import {
-  ADAPTER_AGNOSTIC_KEYS, PHASE_ROUTING_ADAPTERS, executionPhaseForWorkMode, phaseRouteProfileSchema,
+  ADAPTER_AGNOSTIC_KEYS, PHASE_ROUTING_ADAPTERS, executionPhaseForResponsibility, phaseRouteProfileSchema,
   phaseRoutingSchema, type PhaseRouteProfile,
 } from "@paperclipai/shared";
 import { aiConnectionService } from "./ai-connections.js";
@@ -14,7 +14,8 @@ import { phaseRoutingSettingsRepository } from "../repositories/phase-routing-se
 export const PHASE_QUOTA_FALLBACK_RETRY_REASON = "phase_quota_fallback";
 export const PHASE_QUOTA_RESET_WAKE_REASON = "phase_quota_reset";
 export const phaseRouteDispatchSchema = z.object({
-  phase: z.enum(["planning", "implementation"]),
+  phase: z.enum(["planning", "implementation", "review"]),
+  workMode: z.enum(["planning", "standard"]).optional(),
   profile: phaseRouteProfileSchema.nullable(),
   maxFallbackAttempts: z.number().int().nonnegative(),
   connectionId: z.string().nullable(),
@@ -77,7 +78,7 @@ export function phaseRoutingService(db: Db) {
     getCompanyDefaults: settings.get,
     async saveCompanyDefaults(input: { companyId: string; userId: string; policy: unknown }) {
       const policy = phaseRoutingSchema.parse(input.policy);
-      if (policy.enabled) for (const profile of [...policy.planning, ...policy.implementation]) {
+      if (policy.enabled) for (const profile of [...policy.planning, ...policy.implementation, ...(policy.review ?? [])]) {
         // Company defaults require company-wide installations. Per-agent
         // credentials can still be chosen in that agent's explicit override.
         await accounts.select({ companyId: input.companyId, agentId: "company-defaults",
@@ -96,7 +97,7 @@ export function phaseRoutingService(db: Db) {
       if (!(PHASE_ROUTING_ADAPTERS as readonly string[]).includes(input.adapterType)) {
         throw unprocessable("Phase routing supports Claude, Codex and OpenCode agents");
       }
-      for (const profile of [...policy.planning, ...policy.implementation]) {
+      for (const profile of [...policy.planning, ...policy.implementation, ...(policy.review ?? [])]) {
         await accounts.select({ companyId: input.companyId, agentId: input.agentId,
           userId: input.userId, adapterType: profile.adapterType, binding: profile.binding, model: profile.model });
       }
@@ -104,19 +105,28 @@ export function phaseRoutingService(db: Db) {
     async resolve(input: {
       companyId: string; agentId: string; userId: string | null;
       adapterType: string; runtimeConfig: Record<string, unknown>; workMode: unknown;
-      isConversation: boolean; now?: Date; afterProfileId?: string;
+      isConversation: boolean; now?: Date; afterProfileId?: string; afterPhase?: string; agentRole?: string;
     }): Promise<PhaseRouteDispatch | null> {
-      const phase = executionPhaseForWorkMode(input.workMode);
-      if (!phase || input.isConversation || !(PHASE_ROUTING_ADAPTERS as readonly string[]).includes(input.adapterType)) return null;
-      const policy = phaseRoutingSchema.safeParse(input.runtimeConfig.phaseRouting ?? await settings.get(input.companyId));
+      if (!["planning", "standard"].includes(String(input.workMode)) || input.isConversation || !(PHASE_ROUTING_ADAPTERS as readonly string[]).includes(input.adapterType)) return null;
+      const companyPolicy = phaseRoutingSchema.safeParse(await settings.get(input.companyId));
+      const override = input.runtimeConfig.phaseRouting;
+      const policy = phaseRoutingSchema.safeParse(override && typeof override === "object"
+        ? { ...(companyPolicy.success ? companyPolicy.data : {}), ...override }
+        : companyPolicy.success ? companyPolicy.data : null);
       if (!policy.success || !policy.data.enabled) return null;
+      const phase = executionPhaseForResponsibility({ workMode: input.workMode, agentRole: input.agentRole,
+        responsibility: input.runtimeConfig.executionResponsibility, policy: policy.data })!;
+      const workMode = input.workMode as "planning" | "standard";
       const now = input.now ?? new Date();
-      const profiles = policy.data[phase];
+      const profiles = policy.data[phase] ?? [];
+      if (!profiles.length) return { phase, workMode, profile: null, connectionId: null, grantId: null,
+        maxFallbackAttempts: 0, retryAt: null, notes: ["Configure a review model chain before running a reviewer."] };
+      const afterProfileId = !input.afterPhase || input.afterPhase === phase ? input.afterProfileId : undefined;
       const notes: string[] = [];
       const retryDates: Date[] = [];
-      const previousIndex = input.afterProfileId ? profiles.findIndex(profile => profile.id === input.afterProfileId) : -1;
-      if (input.afterProfileId && previousIndex < 0) return {
-        phase, profile: null, connectionId: null, grantId: null, maxFallbackAttempts: profiles.length - 1,
+      const previousIndex = afterProfileId ? profiles.findIndex(profile => profile.id === afterProfileId) : -1;
+      if (afterProfileId && previousIndex < 0) return {
+        phase, workMode, profile: null, connectionId: null, grantId: null, maxFallbackAttempts: profiles.length - 1,
         retryAt: null, notes: ["The fallback policy changed. Start a new turn with the updated policy."],
       };
       for (const profile of profiles.slice(previousIndex + 1)) {
@@ -132,7 +142,7 @@ export function phaseRoutingService(db: Db) {
           if (!(error instanceof HttpError)) throw error;
           // Authentication/access errors require configuration, never a silent
           // provider switch or a retry loop.
-          return { phase, profile: null, connectionId: null, grantId: null,
+          return { phase, workMode, profile: null, connectionId: null, grantId: null,
             maxFallbackAttempts: profiles.length - 1, retryAt: null,
             notes: [`${profile.id}: ${error.message}`] };
         }
@@ -143,7 +153,7 @@ export function phaseRoutingService(db: Db) {
           continue;
         }
         return {
-          phase, profile: { ...profile, binding: {
+          phase, workMode, profile: { ...profile, binding: {
             provider: account.attribution.provider, method: account.attribution.method,
             mode: account.grant.kind === "organization" ? "shared" : "delegated",
             connectionId: account.connection.id, grantId: account.grant.id,
@@ -152,7 +162,7 @@ export function phaseRoutingService(db: Db) {
         };
       }
       return {
-        phase, profile: null, connectionId: null, grantId: null,
+        phase, workMode, profile: null, connectionId: null, grantId: null,
         maxFallbackAttempts: profiles.length - 1,
         retryAt: retryDates.length ? new Date(Math.min(...retryDates.map(date => date.getTime()))).toISOString() : null,
         notes,

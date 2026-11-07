@@ -1,5 +1,9 @@
 import { z } from "zod";
 import { aiConnectionBindingSchema, isAiConnectionCompatible } from "./ai-connections.js";
+import { AGENT_ROLES } from "./constants.js";
+
+export const EXECUTION_RESPONSIBILITIES = ["planning", "implementation", "review"] as const;
+export const executionResponsibilitySchema = z.enum(EXECUTION_RESPONSIBILITIES);
 
 export const PHASE_ROUTING_ADAPTERS = ["claude_local", "codex_local", "opencode_local"] as const;
 export const phaseRouteProfileSchema = z.object({
@@ -25,12 +29,28 @@ export const phaseRoutingSchema = z.object({
   enabled: z.boolean().default(false),
   planning: phaseProfilesSchema,
   implementation: phaseProfilesSchema,
+  review: phaseProfilesSchema.optional(),
+  defaultResponsibility: executionResponsibilitySchema.optional(),
+  roleResponsibilities: z.partialRecord(z.enum(AGENT_ROLES), executionResponsibilitySchema).optional(),
   unknownResetCooldownSeconds: z.number().int().min(60).max(86_400).default(3_600),
 }).strict();
 
 export type PhaseRouteProfile = z.infer<typeof phaseRouteProfileSchema>;
 export type PhaseRouting = z.infer<typeof phaseRoutingSchema>;
-export type ExecutionPhase = "planning" | "implementation";
+export type ExecutionPhase = typeof EXECUTION_RESPONSIBILITIES[number];
+
+/** Explicit planning remains a task workflow; ordinary work follows the agent's responsibility. */
+export function executionPhaseForResponsibility(input: {
+  workMode: unknown; agentRole?: string; responsibility?: unknown; policy: PhaseRouting;
+}): ExecutionPhase | null {
+  if (input.workMode === "planning") return "planning";
+  if (input.workMode !== "standard") return null;
+  const explicit = executionResponsibilitySchema.safeParse(input.responsibility);
+  const roles = input.policy.roleResponsibilities;
+  return explicit.success ? explicit.data
+    : roles?.[input.agentRole as keyof NonNullable<typeof roles>]
+      ?? input.policy.defaultResponsibility ?? "implementation";
+}
 
 export function executionPhaseForWorkMode(workMode: unknown): ExecutionPhase | null {
   return workMode === "planning" ? "planning" : workMode === "standard" ? "implementation" : null;

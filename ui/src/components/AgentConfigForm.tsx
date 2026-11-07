@@ -1700,6 +1700,13 @@ export function AgentConfigForm(props: AgentConfigFormProps) {
             value={(overlay.runtime.runtimeConfig !== undefined
               ? (overlay.runtime.runtimeConfig as Record<string, unknown>).phaseRouting as PhaseRouting | undefined
               : phaseRoutingSchema.safeParse(runtimeConfig.phaseRouting).data)}
+            responsibility={(overlay.runtime.runtimeConfig !== undefined ? overlay.runtime.runtimeConfig as Record<string, unknown> : runtimeConfig).executionResponsibility}
+            onResponsibilityChange={executionResponsibility => {
+              const nextRuntime = { ...runtimeConfig, ...(overlay.runtime.runtimeConfig as Record<string, unknown> | undefined) };
+              if (executionResponsibility) nextRuntime.executionResponsibility = executionResponsibility;
+              else delete nextRuntime.executionResponsibility;
+              mark("runtime", "runtimeConfig", nextRuntime);
+            }}
             onInherit={() => {
               const nextRuntime = { ...runtimeConfig, ...(overlay.runtime.runtimeConfig as Record<string, unknown> | undefined) };
               delete nextRuntime.phaseRouting;

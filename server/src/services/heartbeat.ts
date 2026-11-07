@@ -2281,7 +2281,7 @@ export function heartbeatService(
       let issueContext = issueId
         ? await getIssueExecutionContext(agent.companyId, issueId)
         : null;
-      if (phaseRoute && (isConversation(issueContext) || executionPhaseForWorkMode(issueContext?.workMode) !== phaseRoute.phase)) {
+      if (phaseRoute && (isConversation(issueContext) || (phaseRoute.workMode ? issueContext?.workMode !== phaseRoute.workMode : executionPhaseForWorkMode(issueContext?.workMode) !== phaseRoute.phase))) {
         throw new Error("Task phase changed during startup; start a new turn with the updated phase.");
       }
       if (phaseRoute?.profile) await appendRunEvent(run, {
@@ -2906,6 +2906,7 @@ export function heartbeatService(
               description: issueRef.description,
             }
           : null,
+        executionRoute: phaseRoute?.profile ? { responsibility: phaseRoute.phase, provider: phaseRoute.profile.binding.provider, model: phaseRoute.profile.model } : null,
         ancestors: issueAncestors,
         wakeComment: safeWakeCommentContext,
         wakeComments: safeWakeComments,

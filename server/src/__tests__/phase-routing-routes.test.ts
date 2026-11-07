@@ -59,8 +59,8 @@ describe("versioned phase routing API", () => {
     try {
       const get = await curl("curl", ["--fail-with-body", "--silent", "--show-error", url]);
       expect(JSON.parse(get.stdout)).toEqual({ policy });
-      const put = await curl("curl", ["--fail-with-body", "--silent", "--show-error", "--request", "PUT", "--header", "Content-Type: application/json", "--data-binary", JSON.stringify(policy), url]);
-      expect(JSON.parse(put.stdout)).toEqual({ policy });
+      const put = await curl("curl", ["--fail-with-body", "--silent", "--show-error", "--request", "PUT", "--header", "Content-Type: application/json", "--data-binary", JSON.stringify({ ...policy, review: policy.planning, defaultResponsibility: "implementation", roleResponsibilities: { cto: "planning" } }), url]);
+      expect(JSON.parse(put.stdout)).toEqual({ policy: { ...policy, review: policy.planning, defaultResponsibility: "implementation", roleResponsibilities: { cto: "planning" } } });
     } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
   });
 });

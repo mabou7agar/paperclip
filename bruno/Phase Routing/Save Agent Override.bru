@@ -17,6 +17,7 @@ auth:bearer {
 body:json {
   {
     "runtimeConfig": {
+      "executionResponsibility": "implementation",
       "aiConnection": {
         "provider": "anthropic",
         "method": "subscription",
@@ -67,6 +68,7 @@ body:json {
 tests {
   test("saves an agent planning fallback", function () {
     expect(res.getStatus()).to.equal(200);
+    expect(res.getBody().runtimeConfig.executionResponsibility).to.equal("implementation");
     expect(res.getBody().runtimeConfig.phaseRouting.planning[1].model).to.equal("gpt-6-astra");
     expect(res.getBody().runtimeConfig.phaseRouting.implementation[0].model).to.equal("gpt-6.1-sol");
   });

@@ -78,6 +78,77 @@ async function eventually(check: () => Promise<boolean>, attempts = 200) {
   }
   const success = (sessionId = randomUUID()): AdapterExecutionResult => ({ exitCode: 0, signal: null, timedOut: false, errorMessage: null, summary: "Finished fake run", provider: "test", model: "test", sessionId, sessionParams: { sessionId } });
 
+  it("routes a standard CTO to worker to Tech Lead review and back without repeating work", async () => {
+    const { companyId, agentId: ctoId, issueId: parentId } = await seed();
+    const workerId = randomUUID(), reviewerId = randomUUID(), workerTask = randomUUID(), reviewTask = randomUUID();
+    const marker = `delegated-context-${randomUUID()}`;
+    const companyPolicy = { ...policy, review: [claude], roleResponsibilities: { cto: "planning" as const } };
+    await phaseRoutingSettingsRepository(db).save(companyId, companyPolicy);
+    await db.update(agents).set({ role: "cto", runtimeConfig: { heartbeat: { wakeOnDemand: true } } }).where(eq(agents.id, ctoId));
+    for (const [id, name, responsibility] of [[workerId, "Worker", "implementation"], [reviewerId, "Tech Lead", "review"]]) {
+      await db.insert(agents).values({ id, companyId, name, role: "engineer", status: "active", adapterType: "claude_local",
+        adapterConfig: { model: "claude-test" }, permissions: {}, reportsTo: ctoId,
+        runtimeConfig: { executionResponsibility: responsibility, heartbeat: { wakeOnDemand: true } } });
+    }
+    const visited: string[] = [];
+    mocks.execute.mockImplementation(async ctx => {
+      const taskId = ctx.context.issueId as string;
+      visited.push(ctx.agent.id);
+      if (ctx.agent.id === ctoId && visited.length === 1) {
+        expect(ctx.config.model).toBe("claude-test");
+        await documentService(db).upsertIssueDocument({ issueId: parentId, key: "plan", format: "markdown", body: marker, createdByAgentId: ctoId });
+        await db.insert(issues).values({ id: workerTask, companyId, parentId, title: "Implement delegated plan", description: marker,
+          status: "todo", workMode: "standard", assigneeAgentId: workerId, responsibleUserId: "user", createdByAgentId: ctoId });
+        await documentService(db).upsertIssueDocument({ issueId: workerTask, key: "plan", format: "markdown", body: marker, createdByAgentId: ctoId });
+        await db.update(issues).set({ status: "done" }).where(eq(issues.id, parentId));
+      } else if (ctx.agent.id === workerId) {
+        expect(ctx.config.model).toBe("codex-test");
+        expect(ctx.context.paperclipTaskMarkdown).toContain(marker);
+        expect(ctx.context.paperclipTaskMarkdown).toContain('Actual provider: "openai"');
+        await db.insert(issues).values({ id: reviewTask, companyId, parentId: workerTask, title: "Review frozen handoff", description: `${marker} HANDOFF frozen-artifact; author provider openai`,
+          status: "todo", workMode: "standard", assigneeAgentId: reviewerId, responsibleUserId: "user", createdByAgentId: workerId });
+        await db.update(issues).set({ status: "done" }).where(eq(issues.id, workerTask));
+      } else if (ctx.agent.id === reviewerId) {
+        expect(ctx.config.model).toBe("claude-test");
+        expect(ctx.context.paperclipTaskMarkdown).toContain(marker);
+        expect(ctx.context.paperclipTaskMarkdown).toContain('Actual provider: "anthropic"');
+        await db.insert(issueComments).values({ companyId, issueId: reviewTask, authorAgentId: reviewerId, body: `accept: ${marker}; independently checked frozen-artifact` });
+        await db.update(issues).set({ status: "done" }).where(eq(issues.id, reviewTask));
+        await db.update(issues).set({ status: "done" }).where(eq(issues.id, workerTask));
+      } else {
+        expect(ctx.agent.id).toBe(ctoId);
+        expect(ctx.config.model).toBe("claude-test");
+        expect(ctx.context.paperclipTaskMarkdown).toContain(marker);
+        expect((await db.select().from(issueComments).where(eq(issueComments.issueId, reviewTask)))[0].body).toContain("accept:");
+        await db.update(issues).set({ status: "done" }).where(eq(issues.id, parentId));
+      }
+      return success();
+    });
+    // Exercise ordinary assignment/return dispatch and durable task/document handoffs.
+    // Provider outputs are deterministic here; the live acceptance exercises agent-authored handoffs.
+    for (const [agentId, issueId] of [[ctoId, parentId], [workerId, workerTask], [reviewerId, reviewTask], [ctoId, parentId]]) {
+      if (visited.length === 3) await db.update(issues).set({ status: "todo" }).where(eq(issues.id, parentId));
+      const before = visited.length;
+      await wake(agentId, issueId);
+      await eventually(async () => visited.length === before + 1);
+      await heartbeat.drainActiveRunExecutions();
+    }
+    for (let sweep = 0; sweep < 3; sweep++) {
+      await heartbeat.promoteDueScheduledRetries(new Date(Date.now() + 60_000));
+      await heartbeat.resumeQueuedRuns();
+      await heartbeat.reconcileStrandedAssignedIssues();
+      await heartbeat.drainActiveRunExecutions();
+    }
+    expect(visited).toEqual([ctoId, workerId, reviewerId, ctoId]);
+    const runs = await db.select().from(heartbeatRuns).orderBy(heartbeatRuns.createdAt);
+    expect(runs.filter(run => run.status === "succeeded").map(run => (run.runnerProfileJson?.adapterDispatch as { phaseRoute?: { phase: string } })?.phaseRoute?.phase))
+      .toEqual(["planning", "implementation", "review", "planning"]);
+    // Completion can enqueue a delivery wake; the terminal-task gate cancels it before provider dispatch.
+    expect(runs.every(run => run.status === "succeeded" || (run.status === "cancelled" && run.errorCode === "issue_terminal_status"))).toBe(true);
+    expect(runs.some(run => run.scheduledRetryAt || run.retryOfRunId)).toBe(false);
+    expect((await db.select().from(issues)).every(issue => issue.status === "done")).toBe(true);
+  }, 30_000);
+
   it("claims Codex for implementation while preserving the agent's configured identity", async () => {
     const { agentId, issueId } = await seed();
     mocks.execute.mockImplementation(async () => {

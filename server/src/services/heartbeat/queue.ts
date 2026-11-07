@@ -153,7 +153,6 @@ import { isHeartbeatWakeOnDemandEnabled } from "../heartbeat-policy.js";
 import { isUuidLike } from "@paperclipai/shared";
 import { retryChatControlAdmission } from "../chat-control-admission-retry.js";
 import { phaseRoutingService, phaseRouteDispatchSchema, PHASE_QUOTA_FALLBACK_RETRY_REASON } from "../phase-routing.js";
-import { executionPhaseForWorkMode } from "@paperclipai/shared";
 
 import type { HeartbeatServiceOptions } from "../heartbeat.js";
 import type { createHeartbeatRunState } from "./run-state.js";
@@ -1163,9 +1162,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     const phaseRoute = run.runtimeMode === "legacy" && !run.startedAt
       ? await phaseRoutingService(db).resolve({
           companyId: run.companyId, agentId: agent.id, userId: responsibleUserId,
-          adapterType: agent.adapterType, runtimeConfig: agent.runtimeConfig,
+          adapterType: agent.adapterType, runtimeConfig: agent.runtimeConfig, agentRole: agent.role,
           workMode: routeIssueContext?.workMode, isConversation: isConversation(routeIssueContext),
-          afterProfileId: sourceRoute?.phase === executionPhaseForWorkMode(routeIssueContext?.workMode) ? sourceRoute.profile?.id : undefined,
+          afterProfileId: sourceRoute?.profile?.id, afterPhase: sourceRoute?.phase,
         })
       : null;
     const adapterDispatch = run.startedAt && savedDispatch.adapterType

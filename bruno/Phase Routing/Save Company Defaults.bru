@@ -24,6 +24,11 @@ body:json {
     "implementation": [
       { "id": "codex", "adapterType": "codex_local", "model": "{{codexModel}}", "binding": { "mode": "shared", "provider": "openai", "method": "subscription", "connectionId": "{{codexConnectionId}}", "grantId": "{{codexGrantId}}" } }
     ],
+    "review": [
+      { "id": "claude-review", "adapterType": "claude_local", "model": "{{claudeModel}}", "binding": { "mode": "responsible_user", "provider": "anthropic", "method": "subscription" } }
+    ],
+    "defaultResponsibility": "implementation",
+    "roleResponsibilities": { "cto": "planning" },
     "unknownResetCooldownSeconds": 3600
   }
 }
@@ -33,5 +38,7 @@ tests {
     expect(res.getStatus()).to.equal(200);
     expect(res.getBody().policy.planning).to.have.length(2);
     expect(res.getBody().policy.implementation).to.have.length(1);
+    expect(res.getBody().policy.review).to.have.length(1);
+    expect(res.getBody().policy.roleResponsibilities.cto).to.equal("planning");
   });
 }
