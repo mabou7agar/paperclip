@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { PhaseRouting } from "@paperclipai/shared";
 import { AgentPhaseRoutingField, PhaseRoutingField, recommendedPhaseRouting } from "./PhaseRoutingField";
+import { CompanyPhaseRoutingSettings } from "./CompanyPhaseRoutingSettings";
 
 const mocks = vi.hoisted(() => ({ models: vi.fn(), get: vi.fn() }));
 vi.mock("@/api/agents", () => ({ agentsApi: { adapterModels: mocks.models } }));
@@ -74,4 +75,25 @@ it("inherits company defaults and creates an explicit override on request", asyn
   expect(container.querySelectorAll("fieldset")).toHaveLength(0);
   flushSync(() => checkbox.click());
   expect(onChange).toHaveBeenCalledWith(recommendedPhaseRouting());
+});
+
+it("keeps one stable company settings region through loading and cache refreshes", async () => {
+  let resolve!: (value: { policy: PhaseRouting }) => void;
+  mocks.get.mockReturnValue(new Promise(value => { resolve = value; }));
+  mount(<CompanyPhaseRoutingSettings companyId="company" />);
+  const section = container.querySelector("section");
+  expect(section).not.toBeNull();
+  expect(section?.textContent).toContain("Loading model defaults");
+  resolve({ policy: recommendedPhaseRouting() }); await settle();
+  expect(container.querySelectorAll("section")).toHaveLength(1);
+  expect(container.querySelector("section")).toBe(section);
+  expect(section?.textContent).not.toContain("Loading model defaults");
+  for (let i = 0; i < 3; i++) {
+    flushSync(() => client.setQueryData(["phase-routing", "company"], {
+      policy: { ...recommendedPhaseRouting(), unknownResetCooldownSeconds: 3601 + i },
+    }));
+    await settle();
+    expect(container.querySelectorAll("h2")).toHaveLength(1);
+    expect(container.querySelector("section")).toBe(section);
+  }
 });

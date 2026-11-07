@@ -16,10 +16,10 @@ export function CompanyPhaseRoutingSettings({ companyId }: { companyId: string }
   const policy = draft ?? defaults.data?.policy ?? template;
   const save = useMutation({ mutationFn: () => phaseRoutingApi.save(companyId, policy),
     onSuccess: result => { client.setQueryData(queryKey, result); setDraft(null); } });
-  if (defaults.isPending) return <p className="text-sm text-muted-foreground">{t("loading")}</p>;
-  return <section className="max-w-2xl space-y-4">
+  return <section className="max-w-2xl space-y-4" aria-label={t("companyTitle")}>
     <h2 className="text-sm font-semibold">{t("companyTitle")}</h2>
-    {defaults.error ? <p role="alert" className="text-sm text-destructive">{t("defaultsLoadError")}</p> : <>
+    {defaults.isPending ? <p className="text-sm text-muted-foreground">{t("loading")}</p>
+      : defaults.error ? <p role="alert" className="text-sm text-destructive">{t("defaultsLoadError")}</p> : <>
       <PhaseRoutingField companyId={companyId} agentId="" agentName={t("companyTitle")}
         adapterType="claude_local" model={template.planning[0].model} binding={template.planning[0].binding}
         value={policy} onChange={setDraft} />
