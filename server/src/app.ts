@@ -30,6 +30,7 @@ import { agentAvatarRoutes } from "./routes/agent-avatars.js";
 import { decisionModelRoutes } from "./routes/decision-models.js";
 import { aiConnectionRoutes } from "./routes/ai-connections.js";
 import { phaseRoutingRoutes } from "./routes/phase-routing.js";
+import { monitoringRoutes } from "./routes/monitoring.js";
 import { projectToolRoutes } from "./routes/project-tools.js";
 import { emailChannelService } from "./services/email-channels.js";
 import { emailRoutes, emailWebhookRoutes } from "./routes/email.js";
@@ -939,6 +940,7 @@ export async function createApp(
   api.use(fastResponseRoutes(db));
   api.use(aiConnectionRoutes(db, { deploymentMode: opts.deploymentMode, deploymentExposure: opts.deploymentExposure, trustedLocalStdioRuntimeHost }));
   api.use(phaseRoutingRoutes(db));
+  api.use(monitoringRoutes(db));
   api.use(
     toolAccessRoutes(db, {
       deploymentMode: opts.deploymentMode,

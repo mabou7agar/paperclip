@@ -1,4 +1,3 @@
-import { monitoringRoutes } from "./monitoring.js";
 import { createHash, randomUUID } from "node:crypto";
 import express, { Router, type NextFunction, type Request, type Response } from "express";
 import multer from "multer";
@@ -278,7 +277,6 @@ export interface CompanyRoutesOptions {
 
 export function companyRoutes(db: Db, storage?: StorageService, options?: CompanyRoutesOptions) {
   const router = Router();
-  router.use(monitoringRoutes(db));
   const importTransferSpoolRoot =
     options?.importTransferSpoolRoot ?? resolveDefaultImportTransferSpoolRoot();
   const svc = companyService(db, {
