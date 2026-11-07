@@ -110,3 +110,13 @@ it("changes agent responsibility independently while inheriting company chains",
   expect(responsibility).toHaveBeenCalledWith("planning");
   expect(container.querySelectorAll("fieldset")).toHaveLength(0);
 });
+
+it("preserves API-configured task exceptions when company defaults are edited", async () => {
+  const base = recommendedPhaseRouting();
+  const taskOverrides = { "30000000-0000-4000-8000-000000000001": { review: base.planning } };
+  mount(<PhaseRoutingField {...common} value={{ ...base, taskOverrides }} onChange={changed} />);
+  await settle();
+  const add = [...container.querySelectorAll("button")].find(button => button.textContent === "Add quota fallback")!;
+  flushSync(() => add.click());
+  expect(changed.mock.lastCall?.[0].taskOverrides).toEqual(taskOverrides);
+});

@@ -43,6 +43,13 @@ describe("versioned phase routing API", () => {
     expect(mocks.activity).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: "company.phase_routing_updated" }));
     expect((await request(app()).put(path).send({ ...policy, planning: [] })).status).toBe(400);
   });
+  it("round-trips task exceptions through the existing board-only policy API", async () => {
+    const scoped = { ...policy, taskOverrides: { "30000000-0000-4000-8000-000000000001": { review: policy.planning } } };
+    const response = await request(app()).put(path).send(scoped);
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ policy: scoped });
+    expect((await request(app({ type: "agent" } as never)).put(path).send(scoped)).status).toBe(403);
+  });
   it("rejects foreign-company, agent, and insufficient-permission mutations", async () => {
     expect((await request(app()).get("/api/v1/companies/foreign/phase-routing")).status).toBe(403);
     expect((await request(app({ type: "agent" } as never)).get(path)).status).toBe(403);
@@ -59,8 +66,8 @@ describe("versioned phase routing API", () => {
     try {
       const get = await curl("curl", ["--fail-with-body", "--silent", "--show-error", url]);
       expect(JSON.parse(get.stdout)).toEqual({ policy });
-      const put = await curl("curl", ["--fail-with-body", "--silent", "--show-error", "--request", "PUT", "--header", "Content-Type: application/json", "--data-binary", JSON.stringify({ ...policy, review: policy.planning, defaultResponsibility: "implementation", roleResponsibilities: { cto: "planning" } }), url]);
-      expect(JSON.parse(put.stdout)).toEqual({ policy: { ...policy, review: policy.planning, defaultResponsibility: "implementation", roleResponsibilities: { cto: "planning" } } });
+      const put = await curl("curl", ["--fail-with-body", "--silent", "--show-error", "--request", "PUT", "--header", "Content-Type: application/json", "--data-binary", JSON.stringify({ ...policy, review: policy.planning, defaultResponsibility: "implementation", roleResponsibilities: { cto: "planning" }, taskOverrides: { "30000000-0000-4000-8000-000000000001": { review: policy.planning } } }), url]);
+      expect(JSON.parse(put.stdout)).toEqual({ policy: { ...policy, review: policy.planning, defaultResponsibility: "implementation", roleResponsibilities: { cto: "planning" }, taskOverrides: { "30000000-0000-4000-8000-000000000001": { review: policy.planning } } } });
     } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
   });
 });

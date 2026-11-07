@@ -11,6 +11,8 @@ export function providerQuotaRepository(db: Db) {
         finishedAt: heartbeatRuns.finishedAt,
         result: heartbeatRuns.resultJson,
         errorCode: heartbeatRuns.errorCode,
+        error: heartbeatRuns.error,
+        provider: sql<string>`${heartbeatRuns.contextSnapshot}->'aiConnection'->>'provider'`,
       }).from(heartbeatRuns).where(and(
         eq(heartbeatRuns.companyId, companyId),
         sql`${heartbeatRuns.contextSnapshot}->'aiConnection'->>'connectionId' = ${connectionId}`,

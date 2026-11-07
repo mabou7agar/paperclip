@@ -56,6 +56,31 @@ describe("phase routing", () => {
     expect((await service().resolve({ ...ordinary, workMode: "planning", runtimeConfig: { executionResponsibility: "review" } }))?.phase).toBe("planning");
   });
 
+  it("limits a task review fallback to its configured task and responsibility", async () => {
+    const taskId = "30000000-0000-4000-8000-000000000001";
+    getDefaults.mockResolvedValue({ ...policy, review: [claude], taskOverrides: { [taskId]: { review: [claude, codex] } } });
+    latestEvidence.mockImplementation(async (_company, connectionId) => connectionId.endsWith("1")
+      ? { status: "failed", finishedAt: now, result: { retryNotBefore: "2026-11-08T10:00:00Z" } } : null);
+    const review = { ...input, workMode: "standard", runtimeConfig: { executionResponsibility: "review" }, issueId: taskId };
+    expect(await service().resolve(review)).toMatchObject({ phase: "review", profile: { id: "codex" }, maxFallbackAttempts: 1 });
+    expect(await service().resolve({ ...review, issueId: "30000000-0000-4000-8000-000000000002" })).toMatchObject({ profile: null, retryAt: "2026-11-08T10:00:00.000Z", maxFallbackAttempts: 0 });
+    expect(await service().resolve({ ...review, runtimeConfig: {} })).toMatchObject({ phase: "implementation", profile: { id: "codex" }, maxFallbackAttempts: 0 });
+    expect(await service().resolve({ ...review, afterProfileId: "claude", afterPhase: "review" })).toMatchObject({ profile: { id: "codex" } });
+    expect(await service().resolve({ ...review, afterProfileId: "codex", afterPhase: "review" })).toMatchObject({ profile: null });
+  });
+
+  it("validates task profile connections and rejects non-board configuration", async () => {
+    const taskId = "30000000-0000-4000-8000-000000000001";
+    const scoped = { ...policy, taskOverrides: { [taskId]: { review: [{ ...codex, model: "codex-task-model" }] } } };
+    await service().validateConfiguration({ companyId: "company", agentId: "agent", userId: "user", isBoard: true, adapterType: "claude_local", policy: scoped });
+    expect(select).toHaveBeenCalledTimes(4);
+    select.mockImplementation(async ({ model }) => { if (model === "codex-task-model") throw forbidden("Unavailable grant"); return {}; });
+    await expect(service().validateConfiguration({ companyId: "company", agentId: "agent", userId: "user", isBoard: true, adapterType: "claude_local", policy: scoped })).rejects.toThrow("Unavailable grant");
+    await expect(service().validateConfiguration({ companyId: "company", agentId: "agent", userId: "user", isBoard: false, adapterType: "claude_local", policy: scoped })).rejects.toThrow("Only the board");
+    expect(phaseRoutingSchema.safeParse({ ...policy, taskOverrides: { invalid: { review: [codex] } } }).success).toBe(false);
+    expect(phaseRoutingSchema.safeParse({ ...policy, taskOverrides: { [taskId]: { review: [] } } }).success).toBe(false);
+  });
+
   it("fails closed when review is selected without a review chain", async () => {
     expect(await service().resolve({ ...input, workMode: "standard", runtimeConfig: { phaseRouting: policy, executionResponsibility: "review" } }))
       .toMatchObject({ phase: "review", profile: null, retryAt: null, maxFallbackAttempts: 0 });
@@ -147,5 +172,15 @@ describe("quota cooldown", () => {
     expect(quotaCooldownUntil(evidence, 3600, new Date("2026-11-07T11:00:00Z"))).toBeNull();
     expect(quotaCooldownUntil({ ...evidence, status: "succeeded" }, 3600, now)).toBeNull();
     expect(quotaCooldownUntil({ ...evidence, result: { retryNotBefore: "2026-11-07T09:00:00Z" } }, 3600, now)).toBeNull();
+  });
+});
+
+
+describe("legacy provider reset receipts", () => {
+  it("anchors a dated Claude reset to the original receipt, without modifying it", () => {
+    const evidence = { status: "failed", finishedAt: new Date("2026-11-07T16:54:48Z"), result: null, provider: "anthropic", error: "You've hit your weekly limit · resets Nov 8, 7pm (UTC)" };
+    expect(quotaCooldownUntil(evidence, 3600, new Date("2026-11-07T20:00:00Z"))?.toISOString()).toBe("2026-11-08T19:00:00.000Z");
+    expect(quotaCooldownUntil(evidence, 3600, new Date("2026-11-08T19:00:01Z"))).toBeNull();
+    expect(quotaCooldownUntil({ ...evidence, provider: "openai" }, 3600, new Date("2026-11-07T20:00:00Z"))).toBeNull();
   });
 });

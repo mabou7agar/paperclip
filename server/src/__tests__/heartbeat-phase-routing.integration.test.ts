@@ -149,6 +149,31 @@ async function eventually(check: () => Promise<boolean>, attempts = 200) {
     expect((await db.select().from(issues)).every(issue => issue.status === "done")).toBe(true);
   }, 30_000);
 
+  it("uses a scoped review fallback at claim while other reviews remain parked", async () => {
+    const { companyId, agentId, issueId } = await seed();
+    const otherTask = randomUUID();
+    await db.insert(issues).values({ id: otherTask, companyId, title: "Other review", status: "todo", workMode: "standard", assigneeAgentId: agentId, responsibleUserId: "user" });
+    await phaseRoutingSettingsRepository(db).save(companyId, phaseRoutingSchema.parse({ ...policy, review: [claude], taskOverrides: { [issueId]: { review: [claude, codex] } } }));
+    await db.update(agents).set({ runtimeConfig: { executionResponsibility: "review", heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } } }).where(eq(agents.id, agentId));
+    await db.insert(heartbeatRuns).values({ companyId, agentId, scopeKind: "issue", issueId, invocationSource: "assignment", status: "failed", finishedAt: new Date(), errorCode: "provider_quota", resultJson: { retryNotBefore: new Date(Date.now() + 3_600_000).toISOString() }, contextSnapshot: { issueId, aiConnection: { connectionId: claudeId } } });
+    mocks.execute.mockImplementation(async ctx => {
+      expect(ctx.agent.adapterType).toBe("codex_local");
+      expect(ctx.context.issueId).toBe(issueId);
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      return success();
+    });
+    await wake(agentId, issueId);
+    await eventually(async () => mocks.execute.mock.calls.length === 1);
+    await heartbeat.drainActiveRunExecutions();
+    const other = await wake(agentId, otherTask);
+    await eventually(async () => (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, other!.id)))[0]?.status === "cancelled");
+    await heartbeat.drainActiveRunExecutions();
+    expect(mocks.execute).toHaveBeenCalledTimes(1);
+    const runs = await db.select().from(heartbeatRuns);
+    expect(runs.find(run => run.status === "succeeded")?.runnerProfileJson).toMatchObject({ adapterDispatch: { phaseRoute: { phase: "review", profile: { id: "codex" } } } });
+    expect(runs.filter(run => run.status === "scheduled_retry")).toHaveLength(1);
+  }, 30_000);
+
   it("claims Codex for implementation while preserving the agent's configured identity", async () => {
     const { agentId, issueId } = await seed();
     mocks.execute.mockImplementation(async () => {

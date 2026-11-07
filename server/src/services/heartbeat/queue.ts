@@ -1163,7 +1163,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       ? await phaseRoutingService(db).resolve({
           companyId: run.companyId, agentId: agent.id, userId: responsibleUserId,
           adapterType: agent.adapterType, runtimeConfig: agent.runtimeConfig, agentRole: agent.role,
-          workMode: routeIssueContext?.workMode, isConversation: isConversation(routeIssueContext),
+          workMode: routeIssueContext?.workMode, issueId: issueId ?? undefined, isConversation: isConversation(routeIssueContext),
           afterProfileId: sourceRoute?.profile?.id, afterPhase: sourceRoute?.phase,
         })
       : null;

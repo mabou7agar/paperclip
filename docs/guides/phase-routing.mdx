@@ -52,6 +52,25 @@ their regular configuration. This extension supports the existing Claude,
 Codex and OpenCode adapters. Select OpenCode and a connected OpenRouter account
 to use a supported GLM model from its model catalog.
 
+## Scoped task exceptions
+
+Advanced API configuration may include `taskOverrides`, keyed by task UUID.
+Each entry may override `planning`, `implementation` or `review` with the same
+ordered profile schema. Unspecified responsibilities and tasks inherit their
+normal company/agent chains. Company exceptions require the existing board
+connection-management permission and validate every referenced account; agent
+exceptions use the existing board-only agent configuration controls. The task id
+is considered both at dispatch and at quota fallback, so an exception cannot
+silently fall back into a different task's policy.
+
+For example, a frozen Claude-authored patch can explicitly use an OpenAI review
+fallback after verifying authorship, without changing review routing for other
+Sol-authored work. This is an operator-configured exception, not automatic
+authorship inference or a new review authorization rule. Existing independent
+review instructions still apply. Remove an exception when it is no longer needed.
+The current settings form preserves these entries; edit them through the versioned
+policy API (Bruno example included).
+
 ## Quota safety and session reuse
 
 Only the adapter's typed `provider_quota` outcome triggers a quota fallback.
@@ -138,3 +157,5 @@ The implementation lives on a branch above the pinned upstream release. Keep
 `upstream` pointing to `paperclipai/paperclip` and `origin` pointing to the
 maintained fork. Integrate upstream updates through a review branch and rerun
 session, scheduling, company-scoping and quota tests before deployment.
+
+Claude calendar reset hints with an explicit timezone (for example `Nov 8, 7pm (UTC)`) are honored for new runs and historical quota receipts. Historical hints are anchored to the original failure time; reading them never edits provider receipts or extends the once-only renewal budget. Unrecognized hints retain the configured unknown-reset cooldown.

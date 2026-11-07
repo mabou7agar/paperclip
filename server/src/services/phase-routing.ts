@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
+import { extractClaudeRetryNotBefore } from "@paperclipai/adapter-claude-local/server";
 import type { Db } from "@paperclipai/db";
 import {
   ADAPTER_AGNOSTIC_KEYS, PHASE_ROUTING_ADAPTERS, executionPhaseForResponsibility, phaseRouteProfileSchema,
-  phaseRoutingSchema, type PhaseRouteProfile,
+  phaseRoutingSchema, type PhaseRouteProfile, type PhaseRouting,
 } from "@paperclipai/shared";
 import { aiConnectionService } from "./ai-connections.js";
 import { AI_AUTH_ENV_KEYS, stripAiAuthBindings } from "./ai-connection-runtime.js";
@@ -56,7 +57,7 @@ export function phaseRouteTaskKey(taskKey: string | null, route: PhaseRouteDispa
 }
 
 export function quotaCooldownUntil(
-  evidence: { status: string; finishedAt: Date | null; result: Record<string, unknown> | null } | null,
+  evidence: { status: string; finishedAt: Date | null; result: Record<string, unknown> | null; error?: string | null; provider?: string | null } | null,
   unknownResetCooldownSeconds: number,
   now: Date,
 ): Date | null {
@@ -66,8 +67,15 @@ export function quotaCooldownUntil(
   const parsedReset = typeof reset === "string" ? Date.parse(reset) : NaN;
   const until = Number.isFinite(parsedReset)
     ? new Date(parsedReset)
-    : new Date(evidence.finishedAt.getTime() + unknownResetCooldownSeconds * 1_000);
+    : (evidence.provider === "anthropic" ? extractClaudeRetryNotBefore({ errorMessage: evidence.error }, evidence.finishedAt) : null)
+      ?? new Date(evidence.finishedAt.getTime() + unknownResetCooldownSeconds * 1_000);
   return until.getTime() > now.getTime() ? until : null;
+}
+
+function configuredProfiles(policy: PhaseRouting): PhaseRouteProfile[] {
+  return [...policy.planning, ...policy.implementation, ...(policy.review ?? []),
+    ...Object.values(policy.taskOverrides ?? {}).flatMap(task =>
+      [...(task.planning ?? []), ...(task.implementation ?? []), ...(task.review ?? [])])];
 }
 
 export function phaseRoutingService(db: Db) {
@@ -78,7 +86,7 @@ export function phaseRoutingService(db: Db) {
     getCompanyDefaults: settings.get,
     async saveCompanyDefaults(input: { companyId: string; userId: string; policy: unknown }) {
       const policy = phaseRoutingSchema.parse(input.policy);
-      if (policy.enabled) for (const profile of [...policy.planning, ...policy.implementation, ...(policy.review ?? [])]) {
+      if (policy.enabled) for (const profile of configuredProfiles(policy)) {
         // Company defaults require company-wide installations. Per-agent
         // credentials can still be chosen in that agent's explicit override.
         await accounts.select({ companyId: input.companyId, agentId: "company-defaults",
@@ -97,7 +105,7 @@ export function phaseRoutingService(db: Db) {
       if (!(PHASE_ROUTING_ADAPTERS as readonly string[]).includes(input.adapterType)) {
         throw unprocessable("Phase routing supports Claude, Codex and OpenCode agents");
       }
-      for (const profile of [...policy.planning, ...policy.implementation, ...(policy.review ?? [])]) {
+      for (const profile of configuredProfiles(policy)) {
         await accounts.select({ companyId: input.companyId, agentId: input.agentId,
           userId: input.userId, adapterType: profile.adapterType, binding: profile.binding, model: profile.model });
       }
@@ -105,7 +113,7 @@ export function phaseRoutingService(db: Db) {
     async resolve(input: {
       companyId: string; agentId: string; userId: string | null;
       adapterType: string; runtimeConfig: Record<string, unknown>; workMode: unknown;
-      isConversation: boolean; now?: Date; afterProfileId?: string; afterPhase?: string; agentRole?: string;
+      isConversation: boolean; issueId?: string; now?: Date; afterProfileId?: string; afterPhase?: string; agentRole?: string;
     }): Promise<PhaseRouteDispatch | null> {
       if (!["planning", "standard"].includes(String(input.workMode)) || input.isConversation || !(PHASE_ROUTING_ADAPTERS as readonly string[]).includes(input.adapterType)) return null;
       const companyPolicy = phaseRoutingSchema.safeParse(await settings.get(input.companyId));
@@ -118,11 +126,12 @@ export function phaseRoutingService(db: Db) {
         responsibility: input.runtimeConfig.executionResponsibility, policy: policy.data })!;
       const workMode = input.workMode as "planning" | "standard";
       const now = input.now ?? new Date();
-      const profiles = policy.data[phase] ?? [];
+      const taskProfiles = input.issueId ? policy.data.taskOverrides?.[input.issueId]?.[phase] : undefined;
+      const profiles = taskProfiles ?? policy.data[phase] ?? [];
       if (!profiles.length) return { phase, workMode, profile: null, connectionId: null, grantId: null,
         maxFallbackAttempts: 0, retryAt: null, notes: ["Configure a review model chain before running a reviewer."] };
       const afterProfileId = !input.afterPhase || input.afterPhase === phase ? input.afterProfileId : undefined;
-      const notes: string[] = [];
+      const notes: string[] = taskProfiles ? [`Task-specific ${phase} chain for ${input.issueId}`] : [];
       const retryDates: Date[] = [];
       const previousIndex = afterProfileId ? profiles.findIndex(profile => profile.id === afterProfileId) : -1;
       if (afterProfileId && previousIndex < 0) return {

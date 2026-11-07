@@ -32,6 +32,12 @@ export const phaseRoutingSchema = z.object({
   review: phaseProfilesSchema.optional(),
   defaultResponsibility: executionResponsibilitySchema.optional(),
   roleResponsibilities: z.partialRecord(z.enum(AGENT_ROLES), executionResponsibilitySchema).optional(),
+  /** Explicit task exceptions; omitted responsibilities continue to inherit. */
+  taskOverrides: z.record(z.string().uuid(), z.object({
+    planning: phaseProfilesSchema.optional(),
+    implementation: phaseProfilesSchema.optional(),
+    review: phaseProfilesSchema.optional(),
+  }).strict()).optional(),
   unknownResetCooldownSeconds: z.number().int().min(60).max(86_400).default(3_600),
 }).strict();
 

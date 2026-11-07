@@ -467,6 +467,18 @@ describe("isClaudeImageProcessingError", () => {
 });
 
 describe("extractClaudeRetryNotBefore", () => {
+  it.each([
+    ["Nov 8, 7pm (UTC)", "2026-11-07T16:54:48Z", "2026-11-08T19:00:00.000Z"],
+    ["November 8, 2026, 7:30pm (Africa/Cairo)", "2026-11-07T16:54:48Z", "2026-11-08T17:30:00.000Z"],
+    ["Jan 1, 1am (UTC)", "2026-12-31T22:00:00Z", "2027-01-01T01:00:00.000Z"],
+    ["Feb 30, 7pm (UTC)", "2026-02-01T00:00:00Z", null],
+    ["Nov 5, 7pm (UTC)", "2026-11-07T00:00:00Z", null],
+    ["Nov 8, 7pm (Unknown/Zone)", "2026-11-07T00:00:00Z", null],
+    ["Nov 8, 7pm", "2026-11-07T00:00:00Z", null],
+  ])("honors an explicit calendar reset: %s", (hint, anchor, expected) => {
+    expect(extractClaudeRetryNotBefore({ errorMessage: `You've hit your weekly limit · resets ${hint}` }, new Date(anchor))?.toISOString() ?? null).toBe(expected);
+  });
+
   it("parses the 'resets 4pm' hint in its explicit timezone", () => {
     const now = new Date("2026-04-22T15:15:00.000Z");
     const extracted = extractClaudeRetryNotBefore(

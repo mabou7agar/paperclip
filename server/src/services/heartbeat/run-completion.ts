@@ -838,7 +838,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         const now = new Date();
         const available = await phaseRoutingService(db).resolve({ companyId: run.companyId, agentId: agent.id,
           userId: run.responsibleUserId ?? null, adapterType: agent.adapterType, runtimeConfig: parseObject(agent.runtimeConfig), agentRole: agent.role,
-          workMode: issueRef?.workMode, isConversation: false, now });
+          workMode: issueRef?.workMode, issueId: issueId ?? undefined, isConversation: false, now });
         await scheduleBoundedRetryForRun(livenessRun, agent, available && !available.profile && available.retryAt ? {
           now, retryReason: AI_CONNECTION_POOL_WAIT_RETRY_REASON, wakeReason: PHASE_QUOTA_RESET_WAKE_REASON,
           maxAttempts: 1, delayMs: Math.max(1_000, Date.parse(available.retryAt) - now.getTime()),
