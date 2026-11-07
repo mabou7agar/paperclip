@@ -27,6 +27,7 @@ const apiPrefixes: Record<string, string> = {
   "decision-models.ts": "/api",
   "fast-responses.ts": "/api",
   "phase-routing.ts": "/api",
+  "usage-health.ts": "/api",
   "attention.ts": "/api",
   "approvals.ts": "/api",
   "assets.ts": "/api",
@@ -296,6 +297,18 @@ function loadSpecRoutes() {
 }
 
 describe("openapi routes", () => {
+  it("documents usage health and account quota recovery as board-only", () => {
+    const { spec } = loadSpecRoutes();
+    for (const [method, path] of [
+      ["get", "/api/v1/companies/{companyId}/usage-health"],
+      ["put", "/api/v1/companies/{companyId}/usage-health/policy"],
+      ["post", "/api/v1/companies/{companyId}/ai-connections/{connectionId}/quota-restored"],
+    ]) {
+      expect(spec.paths[path][method].security).toEqual([{ BoardSessionAuth: [] }, { BoardApiKeyAuth: [] }]);
+      expect(spec.paths[path][method]["x-paperclip-authorization"]).toEqual({ actor: "board" });
+      expect(spec.paths[path][method].responses["403"]).toBeDefined();
+    }
+  });
   it("documents board-only versioned model routing with arbitrary fallback chains", () => {
     const { spec } = loadSpecRoutes();
     const routes = spec.paths["/api/v1/companies/{companyId}/phase-routing"];

@@ -1373,6 +1373,9 @@ const browserUseOperations = [
 const BOARD_ONLY_OPERATIONS = new Set([
   "GET /api/v1/companies/{companyId}/phase-routing",
   "PUT /api/v1/companies/{companyId}/phase-routing",
+  "GET /api/v1/companies/{companyId}/usage-health",
+  "PUT /api/v1/companies/{companyId}/usage-health/policy",
+  "POST /api/v1/companies/{companyId}/ai-connections/{connectionId}/quota-restored",
   "GET /api/companies/{companyId}/fast-response",
   "PUT /api/companies/{companyId}/fast-response",
   "GET /api/companies/{companyId}/fast-response/models",
