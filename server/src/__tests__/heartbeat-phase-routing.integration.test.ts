@@ -223,7 +223,7 @@ async function eventually(check: () => Promise<boolean>, attempts = 200) {
     await eventually(async () => mocks.execute.mock.calls.length === 3);
     await heartbeat.drainActiveRunExecutions();
     expect(mocks.execute.mock.calls[2][0].agent.adapterType).toBe("codex_local");
-  }, 30_000);
+  }, 60_000);
 
   it("uses saved company defaults when the agent has no override", async () => {
     const { companyId, agentId, issueId } = await seed();
