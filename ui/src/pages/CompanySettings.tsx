@@ -343,7 +343,7 @@ export function CompanySettings() {
       )}
 
       {/* Hiring */}
-      {selectedCompanyId && <CompanyPhaseRoutingSettings key={selectedCompanyId} companyId={selectedCompanyId} />}
+      {selectedCompanyId && <CompanyPhaseRoutingSettings key={`phase-routing:${selectedCompanyId}`} companyId={selectedCompanyId} />}
 
       <div className="max-w-2xl space-y-4" data-testid="company-settings-team-section">
         <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
