@@ -176,6 +176,7 @@ async function runExecutor(
     executionTransport?: Record<string, unknown>;
     authToken?: string;
     agentIdentity?: AdapterExecutionContext["agentIdentity"];
+    sessionFingerprintEnv?: Record<string, string>;
     executionTarget?: Record<string, unknown>;
     runtimeMcp?: AdapterRuntimeMcpAccess;
     prepareRemoteManagedHome?: AcpxEngineExecutorOptions["prepareRemoteManagedHome"];
@@ -222,6 +223,7 @@ async function runExecutor(
       context: options.context ?? {},
       executionTransport: options.executionTransport,
       authToken: options.authToken,
+      sessionFingerprintEnv: options.sessionFingerprintEnv,
       agentIdentity: options.agentIdentity,
       executionTarget: options.executionTarget,
       runtimeMcp: options.runtimeMcp,
@@ -2120,6 +2122,31 @@ describe("shared ACPX engine runtime behavior", () => {
       context: { taskId: "issue-1" }, runtime: { sessionParams: first.result.sessionParams },
     });
     expect(changed.result.sessionParams?.configFingerprint).not.toBe(first.result.sessionParams?.configFingerprint);
+    expect(changed.sessionInputs[0]?.resumeSessionId).toBeFalsy();
+  });
+
+  it("reuses the CTO session on worker return with fresh launcher credentials and exact planning context", async () => {
+    const root = await makeTempRoot();
+    const config = { agent: "codex", agentCommand: "node ./fake-acp.js", cwd: root, stateDir: path.join(root, "state") };
+    const stable = { PATH: "/usr/bin", OPERATOR_SETTING: "one" };
+    const launch = (run: string) => ({ ...config, env: { ...stable,
+      PATH: `/tmp/github-${run}:/usr/bin`, ZDOTDIR: `/tmp/github-${run}`,
+      PAPERCLIP_GITHUB_BROKER_TOKEN: `token-${run}`, PAPERCLIP_RUN_SCRATCH_DIR: `/tmp/${run}` } });
+    const first = await runExecutor(launch("plan"), { sessionFingerprintEnv: stable,
+      context: { taskId: "cto-task", paperclipTaskMarkdown: "Frozen plan ROUTINGPLAN-123: batch size 3", paperclipTaskMarkdownCompact: "Frozen plan ROUTINGPLAN-123: batch size 3" } });
+    const returned = await runExecutor(launch("return"), { sessionFingerprintEnv: stable,
+      runtime: { sessionParams: first.result.sessionParams },
+      context: { taskId: "cto-task", wakeReason: "issue_commented", wakeCommentId: "worker-result",
+        paperclipTaskMarkdown: "Frozen plan ROUTINGPLAN-123: batch size 3", paperclipTaskMarkdownCompact: "Frozen plan ROUTINGPLAN-123: batch size 3", wakeCommentBody: "Worker implemented the frozen plan" } });
+    expect(returned.result.sessionParams?.configFingerprint).toBe(first.result.sessionParams?.configFingerprint);
+    expect(returned.sessionInputs[0]?.resumeSessionId).toBe(first.result.sessionId);
+    const env = (returned.sessionInputs[0]?.sessionOptions as { env: Record<string, string> }).env;
+    expect(env.PAPERCLIP_GITHUB_BROKER_TOKEN).toBe("token-return");
+    expect(env.PATH).toContain("github-return");
+    expect(returned.turnInputs).toHaveLength(1);
+    expect(JSON.stringify(returned.turnInputs)).toContain("ROUTINGPLAN-123");
+    const changed = await runExecutor(launch("changed"), { sessionFingerprintEnv: { ...stable, OPERATOR_SETTING: "two" },
+      runtime: { sessionParams: first.result.sessionParams }, context: { taskId: "cto-task" } });
     expect(changed.sessionInputs[0]?.resumeSessionId).toBeFalsy();
   });
 

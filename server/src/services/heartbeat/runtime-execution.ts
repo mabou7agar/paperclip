@@ -128,6 +128,7 @@ export interface HeartbeatRuntimeExecutionInput {
   };
   config: Pick<Selection["config"], "runtimeConfig" | "resolvedConfig" | "managedAiRuntime"> & {
     resolvedInstanceSettings: { experimental: Pick<Awaited<ReturnType<ReturnType<typeof instanceSettingsService>["getExperimental"]>>, "enableWorkspaceBranchReconcileForward" | "enableWorkspaceDirtyQuarantineRepair"> };
+    sessionFingerprintEnv?: Record<string, string>;
     configuredTaskEnvironment: Parameters<typeof configuredEnvironmentProjection>[0];
     adapterEnv: Parameters<typeof buildNativeProviderEnvironment>[0];
     agentIdentity: AdapterExecutionContext["agentIdentity"];
@@ -797,6 +798,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
               agent,
               runtime: runtimeForAdapter,
               config: runtimeConfig,
+              sessionFingerprintEnv: input.config.sessionFingerprintEnv,
               context: adapterContext,
               executionContinuation: executionContinuation ?? null,
               runtimeCommandSpec:

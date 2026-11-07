@@ -2041,12 +2041,19 @@ async function buildRuntime(input: {
     // are absent from tempKeysApplied and keep their compatibility protection.
     if (!scratchKeys.has(key) || value !== scratch.dir) resolvedAdapterEnv[key] = value;
   }
+  // The launch env includes rotating GitHub broker credentials and launcher paths.
+  // Keep those out of conversation identity; still forward the current values.
+  // Only the server-owned execution-context field can supply the configured base.
+  const fingerprintEnv = input.ctx.sessionFingerprintEnv === undefined ? resolvedAdapterEnv
+    : Object.fromEntries(Object.entries(input.ctx.sessionFingerprintEnv)
+      .filter(([key, value]) => !isForbiddenConfigEnvKey(key) && !(isPaperclipRuntimeEnvKey(key) && key in env)
+        && (!scratchKeys.has(key) || value !== scratch.dir)));
   if (authToken) env.PAPERCLIP_API_KEY = authToken;
   const managedSessionIdentity = (acpxAgent === "claude" || (acpxAgent === "codex" && !executionTargetIsRemote))
     ? asString(parseObject(config.managedAiConnection).sessionIdentity, "")
     : "";
   const canonicalManagedConfig = managedSessionIdentity
-    ? managedAiSessionFingerprintConfig({ ...config, env: resolvedAdapterEnv }, asString(envConfig.HOME, "") || undefined)
+    ? managedAiSessionFingerprintConfig({ ...config, env: fingerprintEnv }, asString(envConfig.HOME, "") || undefined)
     : null;
   if (acpxAgent === "claude" && managedSessionIdentity && !executionTargetIsRemote) {
     await prepareManagedClaudeSessionStorage({ stateDir, sessionIdentity: managedSessionIdentity, env });
@@ -2287,7 +2294,7 @@ async function buildRuntime(input: {
     // resolvedAdapterEnv, so they don't churn the fingerprint every heartbeat.
     adapterEnvHash: shortHash(canonicalManagedConfig
       ? { env: canonicalManagedConfig.env, sessionIdentity: managedSessionIdentity }
-      : resolvedAdapterEnv),
+      : fingerprintEnv),
   };
   const fingerprint = buildSessionFingerprint(fingerprintIdentity);
   const taskKey = asString(input.ctx.runtime.taskKey, "") || wakeTaskId || workspaceId || "default";

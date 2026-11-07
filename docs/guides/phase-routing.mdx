@@ -74,7 +74,11 @@ in a private account/credential-epoch namespace. `auth.json` remains in the
 disposable credentials home. SQLite uses the documented
 [`CODEX_SQLITE_HOME`](https://learn.chatgpt.com/docs/config-file/environment-variables#core-locations)
 setting. Disposable credential and skill-home paths do not reset the conversation
-fingerprint. Custom operator homes retain their existing storage contract;
+fingerprint. The heartbeat controller separately supplies the configured environment
+before adding disposable GitHub launcher paths and broker credentials. ACP hashes
+that stable environment while forwarding fresh launch values on every resumed turn.
+Configured environment, model, account, permission and network-policy changes still
+invalidate incompatible sessions. Custom operator homes retain their existing storage contract;
 remote Codex storage behavior is unchanged.
 Codex's `state_5.sqlite` index retains an exact rollout filename. Resume relocates
 only that path into private retained storage after matching the thread header

@@ -3713,6 +3713,7 @@ export function heartbeatService(
           trustPreset.kind === "standard" &&
           process.env.PAPERCLIP_RUNNER_NETWORK_ACCESS !== "disabled",
       });
+      const sessionFingerprintEnv = { ...gitExecutionEnv };
       runtimeConfig = { ...runtimeConfig, env: gitExecutionEnv };
       for (const key of MANAGED_GITHUB_TOKEN_KEYS) secretKeys.add(key);
       context.githubAuthenticationMode = useHostGitHub ? "host" : "managed";
@@ -4574,6 +4575,7 @@ export function heartbeatService(
           },
           config: {
             runtimeConfig,
+            sessionFingerprintEnv,
             resolvedConfig,
             resolvedInstanceSettings,
             configuredTaskEnvironment,
