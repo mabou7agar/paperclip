@@ -2026,6 +2026,7 @@ async function buildRuntime(input: {
       ...(Array.isArray(scratch.tempKeysApplied) ? scratch.tempKeysApplied.filter((key): key is string =>
         typeof key === "string" && ["TMPDIR", "TEMP", "TMP"].includes(key)) : [])])
     : new Set<string>();
+  const runtimeAssignedEnvKeys = new Set(Object.keys(env));
   for (const [key, value] of Object.entries(shapedEnvConfig)) {
     if (typeof value !== "string") continue;
     // Runtime PAPERCLIP_* always wins over config: skip a PAPERCLIP_* key that
@@ -2046,7 +2047,7 @@ async function buildRuntime(input: {
   // Only the server-owned execution-context field can supply the configured base.
   const fingerprintEnv = input.ctx.sessionFingerprintEnv === undefined ? resolvedAdapterEnv
     : Object.fromEntries(Object.entries(input.ctx.sessionFingerprintEnv)
-      .filter(([key, value]) => !isForbiddenConfigEnvKey(key) && !(isPaperclipRuntimeEnvKey(key) && key in env)
+      .filter(([key, value]) => !isForbiddenConfigEnvKey(key) && !(isPaperclipRuntimeEnvKey(key) && runtimeAssignedEnvKeys.has(key))
         && (!scratchKeys.has(key) || value !== scratch.dir)));
   if (authToken) env.PAPERCLIP_API_KEY = authToken;
   const managedSessionIdentity = (acpxAgent === "claude" || (acpxAgent === "codex" && !executionTargetIsRemote))

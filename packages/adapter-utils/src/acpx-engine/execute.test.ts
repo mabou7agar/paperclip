@@ -2128,7 +2128,7 @@ describe("shared ACPX engine runtime behavior", () => {
   it("reuses the CTO session on worker return with fresh launcher credentials and exact planning context", async () => {
     const root = await makeTempRoot();
     const config = { agent: "codex", agentCommand: "node ./fake-acp.js", cwd: root, stateDir: path.join(root, "state") };
-    const stable = { PATH: "/usr/bin", OPERATOR_SETTING: "one" };
+    const stable = { PATH: "/usr/bin", OPERATOR_SETTING: "one", PAPERCLIP_CLOUD_PROVIDER_TOKEN: "configured-one" };
     const launch = (run: string) => ({ ...config, env: { ...stable,
       PATH: `/tmp/github-${run}:/usr/bin`, ZDOTDIR: `/tmp/github-${run}`,
       PAPERCLIP_GITHUB_BROKER_TOKEN: `token-${run}`, PAPERCLIP_RUN_SCRATCH_DIR: `/tmp/${run}` } });
@@ -2145,7 +2145,7 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(env.PATH).toContain("github-return");
     expect(returned.turnInputs).toHaveLength(1);
     expect(JSON.stringify(returned.turnInputs)).toContain("ROUTINGPLAN-123");
-    const changed = await runExecutor(launch("changed"), { sessionFingerprintEnv: { ...stable, OPERATOR_SETTING: "two" },
+    const changed = await runExecutor(launch("changed"), { sessionFingerprintEnv: { ...stable, PAPERCLIP_CLOUD_PROVIDER_TOKEN: "configured-two" },
       runtime: { sessionParams: first.result.sessionParams }, context: { taskId: "cto-task" } });
     expect(changed.sessionInputs[0]?.resumeSessionId).toBeFalsy();
   });
