@@ -49,6 +49,7 @@ import {
   stageCodexHomeForSync,
 } from "./codex-home.js";
 import { ADAPTER_AUTH_MISSING_CHECK_CODE } from "./auth-check.js";
+import { buildCodexExecArgs } from "./codex-args.js";
 import { checkCodexCliVersionForModel } from "./cli-version.js";
 
 const moduleDir = path.dirname(fileURLToPath(import.meta.url));
@@ -149,12 +150,25 @@ export function buildCodexAcpConfig(config: Record<string, unknown>): Record<str
     if (match) networkAccess = match[1] === "true";
   }
 
+  // ACP approvals and Codex's native sandbox are separate controls. Use the
+  // same bypass decision as the CLI lane, then apply the native preset before
+  // every turn (including resumed sessions). Explicit restrictions win.
+  const codexArgs = buildCodexExecArgs(config, { networkAccess }).args;
+  const readOnly = permissionMode === "deny-all" || permissionMode === "approve-reads"
+    || codexArgs.some((arg, index) => /^(?:--sandbox=|-s=)read-only$/.test(arg)
+      || /^(?:(?:--config=|-c=?)\s*)?sandbox_mode\s*=\s*["']?read-only["']?$/.test(arg)
+      || (arg === "read-only" && ["--sandbox", "-s"].includes(codexArgs[index - 1] ?? "")));
+  const codexSessionMode = readOnly ? "read-only"
+    : networkAccess && env.PAPERCLIP_RUNNER_NETWORK_ACCESS !== "disabled"
+      && codexArgs.includes("--dangerously-bypass-approvals-and-sandbox") ? "agent-full-access" : "agent";
+
   return {
     ...config,
     env: { ...env, PAPERCLIP_CODEX_ACP_NETWORK_ACCESS: String(networkAccess) },
     agent: "codex",
     mode,
     permissionMode,
+    codexSessionMode,
     nonInteractivePermissions,
     warmHandleIdleMs,
     ...(normalizedModel ? { model: normalizedModel } : {}),

@@ -90,6 +90,7 @@ import { shellQuote } from "@paperclipai/adapter-utils/ssh";
 import { createEphemeralSessionEnvironmentStore } from "./ephemeral-session-environment.js";
 import { managedAiSessionFingerprintConfig } from "../managed-ai-session-fingerprint.js";
 import { prepareManagedClaudeSessionStorage } from "../managed-claude-session-storage.js";
+import { prepareManagedCodexSessionStorage } from "../managed-codex-session-storage.js";
 import {
   createAcpRuntime,
   createAgentRegistry,
@@ -457,6 +458,7 @@ interface AcpxPreparedRuntime {
   permissionMode: "approve-all" | "approve-reads" | "deny-all";
   nonInteractivePermissions: "deny" | "fail";
   requestedModel: string;
+  requestedAgentMode: string;
   requestedThinkingEffort: string;
   fastMode: boolean;
   timeoutSec: number;
@@ -1942,6 +1944,7 @@ async function buildRuntime(input: {
   const permissionMode = normalizePermissionMode(config);
   const nonInteractivePermissions = normalizeNonInteractivePermissions(config);
   const requestedModel = asString(config.model, "").trim();
+  const requestedAgentMode = acpxAgent === "codex" ? asString(config.codexSessionMode, "") : "";
   const requestedThinkingEffort = normalizeRequestedThinkingEffort(config);
   const fastMode = acpxAgent === "codex" && config.fastMode === true;
   const runtimeMcpServers = input.ctx.runtimeMcp?.getServers() ?? [];
@@ -2039,7 +2042,7 @@ async function buildRuntime(input: {
     if (!scratchKeys.has(key) || value !== scratch.dir) resolvedAdapterEnv[key] = value;
   }
   if (authToken) env.PAPERCLIP_API_KEY = authToken;
-  const managedSessionIdentity = acpxAgent === "claude"
+  const managedSessionIdentity = (acpxAgent === "claude" || (acpxAgent === "codex" && !executionTargetIsRemote))
     ? asString(parseObject(config.managedAiConnection).sessionIdentity, "")
     : "";
   const canonicalManagedConfig = managedSessionIdentity
@@ -2047,6 +2050,9 @@ async function buildRuntime(input: {
     : null;
   if (acpxAgent === "claude" && managedSessionIdentity && !executionTargetIsRemote) {
     await prepareManagedClaudeSessionStorage({ stateDir, sessionIdentity: managedSessionIdentity, env });
+  }
+  if (acpxAgent === "codex" && managedSessionIdentity && !executionTargetIsRemote) {
+    await prepareManagedCodexSessionStorage({ stateDir, sessionIdentity: managedSessionIdentity, env });
   }
   // For the claude agent, set model via ANTHROPIC_MODEL at startup rather than
   // via session/set_config_option — the ACP server's set_config_option handler
@@ -2245,6 +2251,7 @@ async function buildRuntime(input: {
     permissionMode,
     nonInteractivePermissions,
     requestedModel,
+    ...(requestedAgentMode ? { requestedAgentMode } : {}),
     requestedThinkingEffort,
     fastMode,
     remoteExecutionIdentity,
@@ -2253,7 +2260,12 @@ async function buildRuntime(input: {
     // next launch stages the current referenced-project trees instead of reusing
     // a stale staged tree.
     additionalSourcesIdentity: additionalSourcesIdentity as unknown as Record<string, unknown>,
-    skillsIdentity,
+    skillsIdentity: acpxAgent === "codex" && canonicalManagedConfig
+      ? { ...skillsIdentity,
+          codexHome: parseObject(canonicalManagedConfig.env).CODEX_HOME,
+          skillsHome: path.join(asString(parseObject(canonicalManagedConfig.env).CODEX_HOME, ""), "skills"),
+        }
+      : skillsIdentity,
     skillPromptInstructions,
     paperclipClaudeSettings: paperclipClaudeSettings
       ? {
@@ -2637,6 +2649,7 @@ async function buildRuntime(input: {
     permissionMode,
     nonInteractivePermissions,
     requestedModel,
+    requestedAgentMode,
     requestedThinkingEffort,
     fastMode,
     timeoutSec,
@@ -2668,6 +2681,7 @@ async function buildRuntime(input: {
 
 function sessionConfigOptions(prepared: AcpxPreparedRuntime): Array<{ key: string; value: string }> {
   const options: Array<{ key: string; value: string }> = [];
+  if (prepared.requestedAgentMode) options.push({ key: "mode", value: prepared.requestedAgentMode });
   // Claude, Codex and Gemini runtime config is pre-set via startup env vars; skip
   // set_config_option to avoid ACP-server picker validation rejecting valid
   // backend model IDs that are not advertised by the local ACP server.
@@ -2704,7 +2718,7 @@ async function applySessionConfigOptions(input: {
   if (options.length === 0) return;
   if (!input.runtime.setConfigOption) {
     const message =
-      "ACPX runtime does not expose session config controls; upgrade ACPX or remove configured model, effort, and fast mode overrides.";
+      "ACPX runtime does not expose session config controls; upgrade ACPX or remove configured model, effort, fast mode, and native permission overrides.";
     await input.onLog("stderr", `[paperclip] ${message}\n`);
     throw new Error(message);
   }
@@ -4302,6 +4316,12 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         const previousParams = parseObject(ctx.runtime.sessionParams);
         const canResume = isCompatibleSession(previousParams, prepared);
         const resumeSessionId = canResume ? asString(previousParams.acpSessionId, "") || undefined : undefined;
+        if (resumeSessionId && prepared.acpxAgent === "codex" && !prepared.remoteExecutionIdentity) {
+          const sessionIdentity = asString(parseObject(ctx.config.managedAiConnection).sessionIdentity, "");
+          if (sessionIdentity) await prepareManagedCodexSessionStorage({
+            stateDir: prepared.stateDir, sessionIdentity, env: { ...prepared.env }, resumeSessionId,
+          });
+        }
         // Borrow the warm entry without removing it, so an overlapping run of the
         // same session still sees it. The borrow clears the entry's idle timer, so
         // the reused runtime cannot expire under its own timer while this run uses
@@ -4313,7 +4333,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
           || prepared.mcpServers.length > 0
           // A managed login gets a disposable home/current credentials per run.
           // Resume its saved conversation with a fresh process and environment.
-          || (prepared.acpxAgent === "claude" && Boolean(parseObject(ctx.config.managedAiConnection).sessionIdentity)))) {
+          || (["claude", "codex"].includes(prepared.acpxAgent) && Boolean(parseObject(ctx.config.managedAiConnection).sessionIdentity)))) {
           await hostStore.discard(prepared.sessionKey);
           cached = undefined;
         }

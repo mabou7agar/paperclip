@@ -40,6 +40,7 @@ import { ACPX_HANDSHAKE_TIMEOUT_MS } from "./constants.js";
 import { sessionCodec } from "./session-codec.js";
 import { runChildProcess } from "../server-utils.js";
 import { createPromptContextFixture } from "../test-fixtures/prompt-context.js";
+import { managedAiHomeEnvironment } from "../managed-ai-session-fingerprint.js";
 import { setExpensiveWorkspaceGitExecutor } from "../git-workspace-sync.js";
 import { createWorkspaceRestoreTeardown } from "../workspace-restore-teardown.js";
 import { withWorkspaceRestoreDiagnostics, withWorkspaceRestoreStep } from "../workspace-restore-diagnostics.js";
@@ -237,7 +238,7 @@ async function runExecutor(
     onUsage: async (receipt: unknown) => { receipts.push(receipt); },
   } as never);
 
-  expect(result.exitCode).toBe(0);
+  expect(result.exitCode, result.errorMessage ?? result.summary ?? undefined).toBe(0);
   return { logs, meta, events, receipts, runtimeOptions, configOptions, sessionInputs, turnInputs, result };
 }
 
@@ -2077,6 +2078,49 @@ describe("shared ACPX engine runtime behavior", () => {
       expect(changed.sessionInputs[0]?.resumeSessionId).toBeFalsy();
       expect(await pathExists(path.join(home, "provider", "projects", "fixture-session.jsonl"))).toBe(false);
     }
+  });
+
+  it("applies the native Codex mode before each fresh and resumed turn", async () => {
+    const root = await makeTempRoot();
+    const config = { agent: "codex", stateDir: path.join(root, "state"), codexSessionMode: "agent-full-access" };
+    const first = await runExecutor(config, { context: { taskId: "mode-issue" } });
+    const second = await runExecutor(config, { context: { taskId: "mode-issue" }, runtime: { sessionParams: first.result.sessionParams } });
+    for (const run of [first, second]) {
+      expect(run.result.exitCode).toBe(0);
+      expect(run.configOptions).toContainEqual({ key: "mode", value: "agent-full-access" });
+    }
+    expect(second.sessionInputs[0]?.resumeSessionId).toBe(first.result.sessionParams?.acpSessionId);
+  });
+
+  it("resumes managed Codex with new credentials and retained native state after disposable-home cleanup", async () => {
+    const root = await makeTempRoot();
+    const base = { agent: "codex", agentCommand: "node ./fake-acp.js", cwd: root, stateDir: path.join(root, "state") };
+    const configFor = (home: string, identity = "grant:user:secret:1", token = "fixture-key") => ({
+      ...base, managedAiConnection: { sessionIdentity: identity, identity: `${identity}:generation` },
+      env: { ...managedAiHomeEnvironment(home), OPENAI_API_KEY: token },
+    });
+    const firstHome = path.join(root, "home-1");
+    const first = await runExecutor(configFor(firstHome), { context: { taskId: "issue-1" } });
+    const firstEnv = (first.sessionInputs[0]?.sessionOptions as { env: Record<string, string> }).env;
+    await fs.writeFile(path.join(firstEnv.CODEX_HOME, "sessions", "fixture.jsonl"), "native Codex transcript");
+    await fs.writeFile(path.join(firstEnv.CODEX_HOME, "auth.json"), "private fixture");
+    await fs.rm(firstHome, { recursive: true, force: true });
+    const resumed = await runExecutor(configFor(path.join(root, "home-2"), undefined, "rotated-fixture-key"), {
+      context: { taskId: "issue-1" }, runtime: { sessionParams: first.result.sessionParams },
+    });
+    expect(resumed.result.sessionParams?.configFingerprint).toBe(first.result.sessionParams?.configFingerprint);
+    expect(resumed.sessionInputs[0]?.resumeSessionId).toBe(first.result.sessionId);
+    const env = (resumed.sessionInputs[0]?.sessionOptions as { env: Record<string, string> }).env;
+    expect(env.CODEX_HOME).toBe(path.join(root, "home-2", "provider"));
+    expect(env.CODEX_SQLITE_HOME).toBe(firstEnv.CODEX_SQLITE_HOME);
+    expect(env.OPENAI_API_KEY).toBe("rotated-fixture-key");
+    expect(await fs.readFile(path.join(env.CODEX_HOME, "sessions", "fixture.jsonl"), "utf8")).toBe("native Codex transcript");
+    expect(await pathExists(path.join(env.CODEX_HOME, "auth.json"))).toBe(false);
+    const changed = await runExecutor(configFor(path.join(root, "home-3"), "other-grant:user:secret:1"), {
+      context: { taskId: "issue-1" }, runtime: { sessionParams: first.result.sessionParams },
+    });
+    expect(changed.result.sessionParams?.configFingerprint).not.toBe(first.result.sessionParams?.configFingerprint);
+    expect(changed.sessionInputs[0]?.resumeSessionId).toBeFalsy();
   });
 
   it("keeps rotated run scratch paths out of session identity while retaining user temp overrides", async () => {

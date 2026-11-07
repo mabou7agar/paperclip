@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import fs from "node:fs/promises";
 import path from "node:path";
+import { linkManagedSessionDirectory } from "./managed-session-directory.js";
 
 export interface ManagedClaudeSessionStorageInput {
   stateDir: string;
@@ -16,16 +16,5 @@ export async function prepareManagedClaudeSessionStorage(input: ManagedClaudeSes
   if (!home || configDir !== path.join(home, "provider")) return;
   const namespace = createHash("sha256").update(input.sessionIdentity).digest("hex");
   const projects = path.join(input.stateDir, "claude-session-projects", namespace, "projects");
-  await fs.mkdir(projects, { recursive: true, mode: 0o700 });
-  await fs.mkdir(configDir, { recursive: true, mode: 0o700 });
-  const link = path.join(configDir, "projects");
-  try {
-    await fs.symlink(projects, link, process.platform === "win32" ? "junction" : "dir");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    const stat = await fs.lstat(link);
-    if (!stat.isSymbolicLink() || path.resolve(configDir, await fs.readlink(link)) !== projects) {
-      throw new Error("Managed Claude transcript storage conflicts with an existing projects path");
-    }
-  }
+  await linkManagedSessionDirectory(projects, path.join(configDir, "projects"));
 }

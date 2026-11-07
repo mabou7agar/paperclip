@@ -101,6 +101,7 @@ describe("phase routing", () => {
     expect(phaseRouteAdapterConfig({}, { ...codex, effort: "high" }).modelReasoningEffort).toBe("high");
     expect(phaseRouteAdapterConfig({}, { ...claude, effort: "high" }).effort).toBe("high");
     expect(phaseRouteAdapterConfig({}, { ...codex, adapterType: "opencode_local", effort: "high" }).variant).toBe("high");
+    expect(phaseRouteAdapterConfig({ permissionMode: "deny-all", dangerouslyBypassApprovalsAndSandbox: false }, codex)).toMatchObject({ permissionMode: "deny-all", dangerouslyBypassApprovalsAndSandbox: false });
   });
 
   it("validates strict profiles, compatibility and duplicate identities", () => {

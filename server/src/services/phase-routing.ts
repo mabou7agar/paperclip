@@ -27,7 +27,7 @@ export type PhaseRouteDispatch = z.infer<typeof phaseRouteDispatchSchema>;
 export function phaseRouteAdapterConfig(base: Record<string, unknown>, profile: PhaseRouteProfile): Record<string, unknown> {
   const commonKeys = [
     ...ADAPTER_AGNOSTIC_KEYS, "instructionsBundle", "desiredSkills",
-    "engine", "mode", "nonInteractivePermissions", "warmHandleIdleMs",
+    "engine", "mode", "permissionMode", "nonInteractivePermissions", "warmHandleIdleMs",
     "maxTurnsPerRun",
     "dangerouslySkipPermissions", "dangerouslyBypassApprovalsAndSandbox",
   ];

@@ -40,6 +40,28 @@ phase, harness, model, and resolved account. Later wakes reuse the same selected
 profile's session; moving between providers uses the existing task handoff and
 plan documents rather than passing incompatible native conversation ids.
 
+Local managed Codex ACP runs retain their rollout directories and SQLite state
+in a private account/credential-epoch namespace. `auth.json` remains in the
+disposable credentials home. SQLite uses the documented
+[`CODEX_SQLITE_HOME`](https://learn.chatgpt.com/docs/config-file/environment-variables#core-locations)
+setting. Disposable credential and skill-home paths do not reset the conversation
+fingerprint. Custom operator homes retain their existing storage contract;
+remote Codex storage behavior is unchanged.
+Codex's `state_5.sqlite` index retains an exact rollout filename. Resume relocates
+only that path into private retained storage after matching the thread header
+and history mode. The shared path-relocation helper also serves native cleanup;
+unknown schemas, update triggers, and cascading topology are refused. Other
+thread metadata and history remain unchanged.
+
+Codex ACP applies the adapter's existing **Bypass approvals and sandbox** setting
+to its native session mode before every fresh or resumed turn. Full access is
+the existing Codex adapter default, intended for a controlled runner/container;
+turn the setting off for workspace sandboxing. ACP tool approval alone does not
+disable Codex's sandbox. Explicit read-only permissions and network denials take
+precedence. The outer container, connection authorization and Paperclip's task
+approval gates still apply. A rejected native mode change fails setup before
+any model turn.
+
 One automatic chain has at most `number of configured levels - 1` fallback
 attempts. Existing retry accounting, Stop, budget, task ownership and pause
 gates still apply. When all accounts are cooling down, provider work is skipped
