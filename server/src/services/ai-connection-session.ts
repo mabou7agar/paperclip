@@ -61,6 +61,7 @@ export function aiConnectionSessionCompatibilityInputs(input: {
   binding: AiConnectionBinding;
   router: boolean;
   phaseRouted?: boolean;
+  persistedAgentRuntimeConfig?: unknown;
   storedIdentity: unknown;
   sessionIdentity: string;
   credentialIdentity: string;
@@ -86,7 +87,7 @@ export function aiConnectionSessionCompatibilityInputs(input: {
     }
   }
   if (input.router || input.phaseRouted) {
-    let expectedRuntimeConfig = record(input.agentRuntimeConfig);
+    let expectedRuntimeConfig = record(input.persistedAgentRuntimeConfig ?? input.agentRuntimeConfig);
     for (let index = 0; index < Math.min(20, input.revisions.length); index++) {
       const revision = input.revisions[index]!;
       if (index === 0 && revision.id !== record(input.agentConfigRevision).id) break;
@@ -95,7 +96,13 @@ export function aiConnectionSessionCompatibilityInputs(input: {
       // An incomplete bounded history is not sufficient to waive a revision.
       const previous = input.revisions[index + 1];
       if (!previous && input.revisions.length >= 21) break;
-      variants.push({ agentRuntimeConfig: record(revision.beforeConfig.runtimeConfig), agentConfigRevision: aiConnectionRevisionMetadata(previous) });
+      const previousRuntimeConfig = record(revision.beforeConfig.runtimeConfig);
+      variants.push({
+        agentRuntimeConfig: input.phaseRouted
+          ? { ...previousRuntimeConfig, aiConnection: record(input.agentRuntimeConfig).aiConnection }
+          : previousRuntimeConfig,
+        agentConfigRevision: aiConnectionRevisionMetadata(previous),
+      });
       expectedRuntimeConfig = record(revision.beforeConfig.runtimeConfig);
     }
   }

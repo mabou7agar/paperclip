@@ -21,7 +21,11 @@ function useUsageHealth(companyId: string, from?: string, to?: string) {
     queryKey: ["usage-health", companyId, from ?? null, to ?? null],
     queryFn: () => usageHealthApi.report(companyId, from, to),
     enabled: !!companyId && companyId !== "__none__",
-    refetchInterval: 30_000,
+    refetchInterval: 60_000,
+    placeholderData: (previous, query) =>
+      query?.queryKey[1] === companyId && query.queryKey[2] === (from ?? null)
+        ? previous
+        : undefined,
   });
 }
 export function UsageHealthNotice({

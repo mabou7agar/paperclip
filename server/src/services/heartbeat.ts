@@ -2140,6 +2140,7 @@ export function heartbeatService(
       // execute a newly selected adapter under a previous adapter's claim.
       const selectedAdapter = claimedAdapterType(run);
       const adapterDispatch = parseObject(parseObject(run.runnerProfileJson).adapterDispatch);
+      const persistedAgentRuntimeConfig = agent.runtimeConfig;
       const phaseRoute = adapterDispatch.phaseRoute ? phaseRouteDispatchSchema.parse(adapterDispatch.phaseRoute) : null;
       const claimedAgentAdapter = phaseRoute ? readNonEmptyString(adapterDispatch.agentAdapterType) : selectedAdapter;
       if (claimedAgentAdapter && claimedAgentAdapter !== agent.adapterType) {
@@ -3373,6 +3374,7 @@ export function heartbeatService(
           agentConfigRevision: sessionConfigMetadataInput.agentConfigRevision,
           issueOverrides: issueAssigneeOverrides, originalIssueOverrides: originalAiIssueOverrides,
           binding: aiBinding, router: requestedAiBinding?.mode === "router", phaseRouted: Boolean(phaseRoute),
+          persistedAgentRuntimeConfig: phaseRoute ? persistedAgentRuntimeConfig : undefined,
           storedIdentity: taskSession.sessionParamsJson?.paperclipAiCredentialIdentity,
           sessionIdentity: managedAiRuntime.sessionIdentity, credentialIdentity: managedAiRuntime.identity, revisions,
         });

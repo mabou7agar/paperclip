@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { agents, agentTaskSessions, agentWakeupRequests, companies, createDb, heartbeatRuns, heartbeatRunEvents, issueComments, issues } from "@paperclipai/db";
+import { agents, agentConfigRevisions, agentTaskSessions, agentWakeupRequests, companies, createDb, heartbeatRuns, heartbeatRunEvents, issueComments, issueRelations, issues } from "@paperclipai/db";
 import type { AdapterExecutionContext, AdapterExecutionResult } from "@paperclipai/adapter-utils";
 import { phaseRoutingSchema } from "@paperclipai/shared";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -15,7 +15,11 @@ vi.mock("../services/ai-connections.js", () => ({ aiConnectionService: () => ({ 
 vi.mock("../services/ai-connection-runtime.js", async () => ({
   ...await vi.importActual<typeof import("../services/ai-connection-runtime.js")>("../services/ai-connection-runtime.js"),
   prepareManagedAiRuntime: vi.fn(async (_db, input) => ({
-    config: input.config,
+    config: { ...input.config, managedAiConnection: {
+      provider: input.binding.provider, method: input.binding.method, mode: input.binding.mode,
+      connectionId: input.binding.connectionId, grantId: input.binding.grantId,
+      identity: `${input.binding.grantId}:user:fake`, sessionIdentity: `${input.binding.grantId}:user:fake`,
+    } },
     attribution: { provider: input.binding.provider, method: input.binding.method, connectionId: input.binding.connectionId, grantId: input.binding.grantId },
     identity: `${input.binding.grantId}:user:fake`, sessionIdentity: `${input.binding.grantId}:user:fake`,
     accountName: "Fake isolated account", cleanup: async () => {},
@@ -148,6 +152,38 @@ async function eventually(check: () => Promise<boolean>, attempts = 200) {
     expect(runs.filter(run => run.status === "succeeded")).toHaveLength(4);
     expect((await db.select().from(issues)).every(issue => issue.status === "done")).toBe(true);
   }, 30_000);
+
+  it("reuses the phase session after a planning-only edit when the base connection is Claude", async () => {
+    const {companyId,agentId,issueId}=await seed();
+    const [agent]=await db.select().from(agents).where(eq(agents.id,agentId));
+    const raw={...agent.runtimeConfig,aiConnection:claude.binding};
+    await db.update(agents).set({runtimeConfig:raw}).where(eq(agents.id,agentId));
+    const snapshot={name:agent.name,adapterConfig:agent.adapterConfig,runtimeConfig:raw};
+    await db.insert(agentConfigRevisions).values({companyId,agentId,changedKeys:["runtimeConfig"],beforeConfig:{},afterConfig:snapshot,createdAt:new Date(Date.now()-1000)});
+    const reviewId=randomUUID(),sid=randomUUID(),marker=`preserved-planning-${randomUUID()}`;
+    await db.update(issues).set({description:marker}).where(eq(issues.id,issueId));
+    const observed:Array<{params:unknown;markdown:unknown;model:unknown}>=[];
+    mocks.execute.mockImplementation(async ctx=>{
+      observed.push({params:ctx.runtime.sessionParams,markdown:ctx.context.paperclipTaskMarkdown,model:ctx.config.model});
+      if(observed.length===1){
+        await db.insert(issues).values({id:reviewId,companyId,title:"Existing review",status:"todo",responsibleUserId:"user"});
+        await db.insert(issueRelations).values({companyId,issueId:reviewId,relatedIssueId:issueId,type:"blocks"});
+        await db.update(issues).set({status:"blocked"}).where(eq(issues.id,issueId));
+      }else await db.update(issues).set({status:"done"}).where(eq(issues.id,issueId));
+      return success(sid);
+    });
+    await wake(agentId,issueId);await eventually(async()=>mocks.execute.mock.calls.length===1);await heartbeat.drainActiveRunExecutions();
+    const nextRaw={...raw,phaseRouting:phaseRoutingSchema.parse({...policy,planning:[...policy.planning,{...claude,id:"claude-api",binding:{...claude.binding,method:"api_key"}}]})};
+    await db.insert(agentConfigRevisions).values({companyId,agentId,changedKeys:["runtimeConfig"],beforeConfig:snapshot,afterConfig:{...snapshot,runtimeConfig:nextRaw},createdAt:new Date()});
+    await db.update(agents).set({runtimeConfig:nextRaw}).where(eq(agents.id,agentId));
+    await db.update(issues).set({status:"done"}).where(eq(issues.id,reviewId));
+    await heartbeat.wakeup(agentId,{source:"automation",reason:"issue_blockers_resolved",payload:{issueId},contextSnapshot:{issueId,wakeReason:"issue_blockers_resolved"}});await eventually(async()=>mocks.execute.mock.calls.length===2);await heartbeat.drainActiveRunExecutions();
+    for(let sweep=0;sweep<3;sweep++){await heartbeat.promoteDueScheduledRetries(new Date(Date.now()+60_000));await heartbeat.resumeQueuedRuns();await heartbeat.drainActiveRunExecutions();}
+    const runs=await db.select().from(heartbeatRuns);
+    expect(observed.length,JSON.stringify(runs.map(r=>({status:r.status,code:r.errorCode,reason:r.contextSnapshot?.wakeReason})))).toBe(2);
+    expect(observed[1].params,JSON.stringify(runs.map(r=>({status:r.status,freshness:r.usageJson?.configFreshness})))).toMatchObject({sessionId:sid});expect(observed[1].markdown).toContain(marker);expect(observed.map(o=>o.model)).toEqual(["codex-test","codex-test"]);
+    expect(runs.filter(r=>r.status==="succeeded")).toHaveLength(2);expect(runs.some(r=>r.status==="scheduled_retry")).toBe(false);
+  },60000);
 
   it("uses a scoped review fallback at claim while other reviews remain parked", async () => {
     const { companyId, agentId, issueId } = await seed();
