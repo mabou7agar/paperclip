@@ -12,6 +12,7 @@ import { forbidden, HttpError, unprocessable } from "../errors.js";
 import { phaseRoutingSettingsRepository } from "../repositories/phase-routing-settings.js";
 
 export const PHASE_QUOTA_FALLBACK_RETRY_REASON = "phase_quota_fallback";
+export const PHASE_QUOTA_RESET_WAKE_REASON = "phase_quota_reset";
 export const phaseRouteDispatchSchema = z.object({
   phase: z.enum(["planning", "implementation"]),
   profile: phaseRouteProfileSchema.nullable(),

@@ -1,5 +1,5 @@
 import { deriveTaskKeyWithHeartbeatFallback } from "./run-state.js";
-import { PHASE_QUOTA_FALLBACK_RETRY_REASON } from "../phase-routing.js";
+import { PHASE_QUOTA_FALLBACK_RETRY_REASON, PHASE_QUOTA_RESET_WAKE_REASON } from "../phase-routing.js";
 import {
   WORKSPACE_VALIDATION_FAILURE_CODE,
   isWorkspaceValidationFailedRun,
@@ -14,6 +14,7 @@ import { legacyExecutionNeedsReconciliationWithEvidence } from "../legacy-execut
 import {
   executionFailureRetryCount,
   executionRetryAttemptCount,
+  executionQuotaRenewalWaitCount,
   accountingForScheduledRetry,
 } from "../execution-recovery-attempt.js";
 import { WORKSPACE_GIT_SCAN_ERROR_CODES } from "../workspace-git-operation-scheduler.js";
@@ -421,7 +422,8 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
         opts?.maxAttempts ?? BOUNDED_TRANSIENT_HEARTBEAT_RETRY_MAX_ATTEMPTS,
       ),
     );
-    const consumedAttempts = executionRetryAttemptCount(run, retryReason);
+    const quotaRenewalWait = retryReason === AI_CONNECTION_POOL_WAIT_RETRY_REASON && wakeReason === PHASE_QUOTA_RESET_WAKE_REASON;
+    const consumedAttempts = quotaRenewalWait ? executionQuotaRenewalWaitCount(run) : executionRetryAttemptCount(run, retryReason);
     const nextAttempt = consumedAttempts + 1;
     const computedBaseSchedule =
       opts?.delayMs != null
@@ -613,7 +615,7 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
     const retryContextSnapshot: Record<string, unknown> = withRecoveryContext(
       {
         ...contextSnapshot,
-        executionRetryAccounting: accountingForScheduledRetry(run, retryReason, schedule.attempt),
+        executionRetryAccounting: accountingForScheduledRetry(run, retryReason, schedule.attempt, { quotaRenewalWait }),
         retryOfRunId: run.id,
         wakeReason,
         retryReason,

@@ -1,5 +1,5 @@
 import { selectHeartbeatEnvironment } from "./heartbeat/environment-selection.js";
-import { phaseRouteDispatchSchema, phaseRouteAdapterConfig, phaseRouteTaskKey } from "./phase-routing.js";
+import { phaseRouteDispatchSchema, phaseRouteAdapterConfig, phaseRouteTaskKey, PHASE_QUOTA_RESET_WAKE_REASON } from "./phase-routing.js";
 import { executionPhaseForWorkMode } from "@paperclipai/shared";
 import { prepareHeartbeatWorkspace } from "./heartbeat/workspace-preparation.js";
 import { executeHeartbeatRuntime, NativeSessionResumeScheduledError, NativeWorkspaceFinalizeScheduledError } from "./heartbeat/runtime-execution.js";
@@ -2163,7 +2163,8 @@ export function heartbeatService(
           await setWakeupStatus(run.wakeupRequestId, "cancelled", { finishedAt: now, error: reason });
           await appendRunEvent(cancelled.run ?? run, { eventType: "lifecycle", stream: "system", level: "info", message: reason, payload: { phase: phaseRoute.phase, retryAt: phaseRoute.retryAt, notes: phaseRoute.notes } });
           const retry = await scheduleBoundedRetryForRun(cancelled.run ?? run, agent, {
-            retryReason: AI_CONNECTION_POOL_WAIT_RETRY_REASON, wakeReason: "phase_quota_reset",
+            now,
+            retryReason: AI_CONNECTION_POOL_WAIT_RETRY_REASON, wakeReason: PHASE_QUOTA_RESET_WAKE_REASON,
             maxAttempts: 1, delayMs: Math.max(1_000, Date.parse(phaseRoute.retryAt) - now.getTime()),
           });
           if (retry.outcome !== "scheduled") await releaseIssueExecutionAndPromote(cancelled.run ?? run, { suppressImmediateRecovery: true });

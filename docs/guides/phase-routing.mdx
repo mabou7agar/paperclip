@@ -68,6 +68,14 @@ gates still apply. When all accounts are cooling down, provider work is skipped
 and at most one reset wait is scheduled by the phase routing path. Run lifecycle
 events show the selected profile and skipped accounts.
 
+The saved reset timestamp is the earliest eligible dispatch time; the next
+scheduler sweep resumes the same task with its durable plan and comments.
+Competing sweeps share the persisted retry claim. Completed or cancelled tasks
+are not reopened, and a provider that still reports quota after renewal remains
+subject to the bounded retry limits. Each automatic chain has one renewal wait;
+switching fallback levels does not replenish that separate allowance. Fresh
+quota failures that exhaust the chain use the same renewal mechanism.
+
 Phase profiles share task/workspace/instruction and permission settings.
 Custom harness commands, extra CLI arguments, provider state directories, and
 authentication environment variables are deliberately excluded from profile

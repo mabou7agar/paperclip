@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { executionFailureRetryCount } from "./execution-recovery-attempt.js";
+import { accountingForScheduledRetry, executionFailureRetryCount, executionQuotaRenewalWaitCount } from "./execution-recovery-attempt.js";
 
 describe("failure attempts across resource waits", () => {
   it("preserves prior failures through subscription waits without trusting unrelated context", () => {
@@ -27,6 +27,23 @@ describe("failure attempts across resource waits", () => {
 });
 
 describe("persisted independent accounting", () => {
+  it("retains a renewal debit across fallback and resource waits without spending a failure", () => {
+    const renewal = accountingForScheduledRetry({}, "ai_connection_pool_wait", 1, { quotaRenewalWait: true });
+    expect(renewal).toEqual({ version: 1, failureRetries: 0, maxTurnContinuations: 0, quotaRenewalWaits: 1 });
+    const fallback = accountingForScheduledRetry({ contextSnapshot: { executionRetryAccounting: renewal } }, "phase_quota_fallback", 1);
+    const resource = accountingForScheduledRetry({ contextSnapshot: { executionRetryAccounting: fallback } }, "workspace_busy", 5);
+    expect(executionQuotaRenewalWaitCount({ scheduledRetryReason: "workspace_busy", contextSnapshot: { executionRetryAccounting: resource } })).toBe(1);
+    expect(resource.failureRetries).toBe(1);
+  });
+  it("recognizes an already scheduled phase renewal from before the ledger extension", () => {
+    const historical = { scheduledRetryReason: "ai_connection_pool_wait", scheduledRetryAttempt: 1,
+      contextSnapshot: { wakeReason: "phase_quota_reset", failureRetriesBeforeAiConnectionWait: 0 } };
+    expect(executionQuotaRenewalWaitCount(historical)).toBe(1);
+    const fallback = accountingForScheduledRetry(historical, "phase_quota_fallback", 1);
+    expect(executionQuotaRenewalWaitCount({ scheduledRetryReason: "phase_quota_fallback", contextSnapshot: { executionRetryAccounting: fallback } })).toBe(1);
+    expect(executionQuotaRenewalWaitCount({ scheduledRetryReason: "ai_connection_pool_wait", scheduledRetryAttempt: 5,
+      contextSnapshot: { wakeReason: "ai_connection_pool_retry" } })).toBe(0);
+  });
   it.each(["max_turns_continuation", "issue_disposition_repair", "workspace_busy", "ai_connection_busy", "ai_connection_pool_wait"])("%s cannot erase prior infrastructure debits or spend more", scheduledRetryReason => {
     expect(executionFailureRetryCount({ scheduledRetryReason, scheduledRetryAttempt: 20,
       contextSnapshot: { executionRetryAccounting: { version: 1, failureRetries: 2, maxTurnContinuations: 1 } },

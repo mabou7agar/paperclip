@@ -10,6 +10,7 @@ export interface ExecutionRetryAccounting {
   version: 1;
   failureRetries: number;
   maxTurnContinuations: number;
+  quotaRenewalWaits?: number;
 }
 
 function count(value: unknown): number | null {
@@ -23,7 +24,9 @@ function savedAccounting(run: RetryRun): ExecutionRetryAccounting | null {
   const failureRetries = count(saved.failureRetries);
   const maxTurnContinuations = count(saved.maxTurnContinuations);
   if (saved.version !== 1 || failureRetries === null || maxTurnContinuations === null) return null;
-  return { version: 1, failureRetries, maxTurnContinuations };
+  const quotaRenewalWaits = count(saved.quotaRenewalWaits) ?? 0;
+  return { version: 1, failureRetries, maxTurnContinuations,
+    ...(quotaRenewalWaits > 0 ? { quotaRenewalWaits } : {}) };
 }
 
 function historicalFailureCount(run: RetryRun): number {
@@ -42,12 +45,14 @@ function historicalFailureCount(run: RetryRun): number {
 
 export function executionRetryAccounting(run: RetryRun): ExecutionRetryAccounting {
   const saved = savedAccounting(run);
+  const quotaRenewalWaits = executionQuotaRenewalWaitCount(run);
   const nonFailureLane = ["max_turns_continuation", "issue_disposition_repair", "workspace_busy", "ai_connection_busy", "ai_connection_pool_wait"].includes(run.scheduledRetryReason ?? "");
   return {
     version: 1,
     failureRetries: Math.max(saved?.failureRetries ?? 0, saved && nonFailureLane ? 0 : historicalFailureCount(run)),
     maxTurnContinuations: Math.max(saved?.maxTurnContinuations ?? 0,
       run.scheduledRetryReason === "max_turns_continuation" ? count(run.scheduledRetryAttempt) ?? 0 : 0),
+    ...(quotaRenewalWaits > 0 ? { quotaRenewalWaits } : {}),
   };
 }
 
@@ -64,8 +69,16 @@ export function executionRetryAttemptCount(run: RetryRun, reason: string): numbe
   return reason === "max_turns_continuation" ? accounting.maxTurnContinuations : accounting.failureRetries;
 }
 
-export function accountingForScheduledRetry(run: RetryRun, reason: string, attempt: number): ExecutionRetryAccounting {
+/** A phase's renewal budget survives intervening fallback/resource-wait lanes. */
+export function executionQuotaRenewalWaitCount(run: RetryRun): number {
+  return Math.max(savedAccounting(run)?.quotaRenewalWaits ?? 0,
+    run.scheduledRetryReason === "ai_connection_pool_wait" && run.contextSnapshot?.wakeReason === "phase_quota_reset"
+      ? count(run.scheduledRetryAttempt) ?? 0 : 0);
+}
+
+export function accountingForScheduledRetry(run: RetryRun, reason: string, attempt: number, options: { quotaRenewalWait?: boolean } = {}): ExecutionRetryAccounting {
   const accounting = executionRetryAccounting(run);
+  if (options.quotaRenewalWait) accounting.quotaRenewalWaits = attempt;
   if (reason === "max_turns_continuation") accounting.maxTurnContinuations = attempt;
   else if (reason !== "workspace_busy" && reason !== "ai_connection_busy" && reason !== "ai_connection_pool_wait") accounting.failureRetries = attempt;
   return accounting;

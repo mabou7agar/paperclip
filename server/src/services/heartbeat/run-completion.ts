@@ -1,5 +1,5 @@
 import { NON_RETRYABLE_PREFLIGHT_FAILURE_CODES, isHeartbeatRunTerminalStatus } from "./run-lifecycle.js";
-import { phaseRouteDispatchSchema, PHASE_QUOTA_FALLBACK_RETRY_REASON } from "../phase-routing.js";
+import { phaseRouteDispatchSchema, phaseRoutingService, PHASE_QUOTA_FALLBACK_RETRY_REASON, PHASE_QUOTA_RESET_WAKE_REASON } from "../phase-routing.js";
 import { ChatControlRecoveryUnresolvedError } from "./queue.js";
 import { readTransientRecoveryContractFromRun, readHeartbeatRunErrorFamily, isTransientWorkspaceGitScanCode } from "./retries.js";
 import { type RunSessionOutcome, resolveNextSessionState, normalizeUsageTotals, resolveCacheAdjustedCostUsd, resolveLedgerBiller, resolveLedgerCostStatus, normalizeLedgerBillingType } from "./run-state.js";
@@ -26,7 +26,7 @@ import { isUnresolvedWorkspaceBaseRefError, readUnresolvedWorkspaceBaseRefDiagno
 import { runnerGoalService } from "../runner-goals.js";
 import { resolveChatRunPresentationAuthorizationReason } from "../chat-run-publications.js";
 import { SANDBOX_PROVIDER_PLUGIN_NOT_READY_REASON } from "../recovery/stranded-notice.js";
-import { MAX_TURN_CONTINUATION_RETRY_REASON } from "../../modules/run-dispatch/index.js";
+import { AI_CONNECTION_POOL_WAIT_RETRY_REASON, MAX_TURN_CONTINUATION_RETRY_REASON } from "../../modules/run-dispatch/index.js";
 import { redactCurrentUserText } from "../../log-redaction.js";
 import type { createHeartbeatLifecycle } from "./run-lifecycle.js";
 import type { createHeartbeatRunPreparation } from "./run-preparation.js";
@@ -833,7 +833,16 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       }
       const phaseRoute = phaseRouteDispatchSchema.safeParse(parseObject(parseObject(run.runnerProfileJson).adapterDispatch).phaseRoute).data;
       if (outcome === "failed" && readHeartbeatRunErrorFamily(livenessRun) === "provider_quota" && phaseRoute?.profile) {
-        await scheduleBoundedRetryForRun(livenessRun, agent, {
+        // The just-persisted quota receipt can exhaust the last available level.
+        // Resolve the complete chain before deciding between fallback and renewal.
+        const now = new Date();
+        const available = await phaseRoutingService(db).resolve({ companyId: run.companyId, agentId: agent.id,
+          userId: run.responsibleUserId ?? null, adapterType: agent.adapterType, runtimeConfig: parseObject(agent.runtimeConfig),
+          workMode: issueRef?.workMode, isConversation: false, now });
+        await scheduleBoundedRetryForRun(livenessRun, agent, available && !available.profile && available.retryAt ? {
+          now, retryReason: AI_CONNECTION_POOL_WAIT_RETRY_REASON, wakeReason: PHASE_QUOTA_RESET_WAKE_REASON,
+          maxAttempts: 1, delayMs: Math.max(1_000, Date.parse(available.retryAt) - now.getTime()),
+        } : {
           retryReason: PHASE_QUOTA_FALLBACK_RETRY_REASON, wakeReason: "phase_quota_fallback",
           maxAttempts: phaseRoute.maxFallbackAttempts, delayMs: 1_000,
         });

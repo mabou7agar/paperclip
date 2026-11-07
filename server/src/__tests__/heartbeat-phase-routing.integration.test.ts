@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { agents, agentTaskSessions, companies, createDb, heartbeatRuns, heartbeatRunEvents, issues } from "@paperclipai/db";
+import { agents, agentTaskSessions, agentWakeupRequests, companies, createDb, heartbeatRuns, heartbeatRunEvents, issueComments, issues } from "@paperclipai/db";
 import type { AdapterExecutionContext, AdapterExecutionResult } from "@paperclipai/adapter-utils";
 import { phaseRoutingSchema } from "@paperclipai/shared";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -24,6 +24,7 @@ vi.mock("../services/ai-connection-runtime.js", async () => ({
 import { heartbeatService } from "../services/heartbeat.js";
 import { providerQuotaRepository } from "../repositories/provider-quota.js";
 import { phaseRoutingSettingsRepository } from "../repositories/phase-routing-settings.js";
+import { documentService } from "../services/documents.js";
 
 const support = await getEmbeddedPostgresTestSupport();
 const claudeId = "10000000-0000-4000-8000-000000000001";
@@ -33,8 +34,8 @@ const claude = { id: "claude", adapterType: "claude_local", model: "claude-test"
 const codex = { id: "codex", adapterType: "codex_local", model: "codex-test", binding: { provider: "openai", method: "subscription", mode: "responsible_user" } };
 const policy = phaseRoutingSchema.parse({ enabled: true, planning: [claude, codex], implementation: [codex] });
 
-async function eventually(check: () => Promise<boolean>) {
-  for (let i = 0; i < 200; i++) {
+async function eventually(check: () => Promise<boolean>, attempts = 200) {
+  for (let i = 0; i < attempts; i++) {
     if (await check()) return;
     await new Promise(resolve => setTimeout(resolve, 50));
   }
@@ -163,6 +164,218 @@ async function eventually(check: () => Promise<boolean>) {
     expect(runs.find(saved => saved.id === run!.id)?.resultJson).toMatchObject({ executionRecovery: { providerWorkStarted: false }, cancellation: { expected: true } });
     const events = await db.select({ message: heartbeatRunEvents.message, payload: heartbeatRunEvents.payload }).from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, run!.id));
     expect(runs.filter(saved => saved.status === "scheduled_retry"), JSON.stringify(events)).toHaveLength(1);
+  }, 30_000);
+
+  async function parkUntilRenewal(options: { secondaryResetDelayMs?: number } = {}) {
+    const fixture = await seed("planning");
+    const { companyId, agentId, issueId } = fixture;
+    const marker = `renewal-context-${randomUUID()}`;
+    const renewal = new Date(Date.now() + 8_000);
+    const planBody = `# Saved plan\n\nPreserve ${marker}. Continue step two without repeating step one.`;
+    await db.update(issues).set({ description: `Resume the same objective: ${marker}` }).where(eq(issues.id, issueId));
+    const plan = await documentService(db).upsertIssueDocument({ issueId, key: "plan", format: "markdown", body: planBody, createdByAgentId: agentId });
+    await db.insert(issueComments).values({ companyId, issueId, authorAgentId: agentId, body: `Step one complete: ${marker}` });
+    for (const [connectionId, reset] of [[claudeId, renewal], [codexId, new Date(renewal.getTime() + (options.secondaryResetDelayMs ?? 3_600_000))]] as const) {
+      await db.insert(heartbeatRuns).values({ companyId, agentId, scopeKind: "issue", issueId,
+        status: "failed", finishedAt: new Date(), errorCode: "provider_quota",
+        resultJson: { errorFamily: "provider_quota", retryNotBefore: reset.toISOString() },
+        contextSnapshot: { issueId, aiConnection: { connectionId } },
+      });
+    }
+    const parked = await heartbeat.wakeup(agentId, { source: "assignment", reason: "issue_assigned", payload: { issueId },
+      contextSnapshot: { issueId, wakeReason: "issue_assigned", renewalCheckpoint: { marker, completedSteps: ["one"] } } });
+    await eventually(async () => (await db.select().from(heartbeatRuns)).some(run => run.status === "scheduled_retry"));
+    await heartbeat.drainActiveRunExecutions();
+    const [scheduled] = (await db.select().from(heartbeatRuns)).filter(run => run.status === "scheduled_retry");
+    expect(scheduled.retryOfRunId).toBe(parked!.id);
+    expect(scheduled.scheduledRetryReason).toBe("ai_connection_pool_wait");
+    expect(scheduled.scheduledRetryAt?.getTime()).toBe(renewal.getTime());
+    expect(mocks.execute).not.toHaveBeenCalled();
+    return { ...fixture, marker, planBody, planRevisionId: plan.document.latestRevisionId, renewal, scheduled };
+  }
+
+  it("resumes the same task once at renewal across restart and competing scheduler sweeps, preserving its saved context", async () => {
+    const fixture = await parkUntilRenewal();
+    const { issueId, agentId, marker, renewal, scheduled } = fixture;
+    // Keep the process and PostgreSQL lease clocks aligned. Only the provider's
+    // fixture reset is shortened; no global fake clock or lease mock is used.
+    heartbeat = heartbeatService(db);
+    const competingScheduler = heartbeatService(db);
+    expect((await heartbeat.promoteDueScheduledRetries(new Date(renewal.getTime() - 1))).promoted).toBe(0);
+    await heartbeat.resumeQueuedRuns();
+    await heartbeat.reconcileStrandedAssignedIssues();
+    await heartbeat.drainActiveRunExecutions();
+    expect(mocks.execute).not.toHaveBeenCalled();
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, scheduled.id)))[0].status).toBe("scheduled_retry");
+    mocks.execute.mockImplementation(async ctx => {
+      expect(ctx.agent.id).toBe(agentId);
+      expect(ctx.agent.adapterType).toBe("claude_local");
+      expect(ctx.context.issueId).toBe(issueId);
+      expect(ctx.context.renewalCheckpoint).toEqual({ marker, completedSteps: ["one"] });
+      expect(ctx.context.paperclipTaskMarkdown).toContain(fixture.planBody);
+      expect((await db.select().from(issueComments).where(eq(issueComments.issueId, issueId))).some(comment => comment.body === `Step one complete: ${marker}`)).toBe(true);
+      expect(ctx.runtime.taskKey).toContain(issueId);
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      return success();
+    });
+    await eventually(async () => Date.now() >= renewal.getTime(), 400);
+    const promotions = await Promise.all([heartbeat.promoteDueScheduledRetries(), competingScheduler.promoteDueScheduledRetries()]);
+    expect(promotions.reduce((sum, result) => sum + result.promoted, 0)).toBe(1);
+    await Promise.all([heartbeat.resumeQueuedRuns(), competingScheduler.resumeQueuedRuns()]);
+    await eventually(async () => mocks.execute.mock.calls.length === 1);
+    await Promise.all([heartbeat.drainActiveRunExecutions(), competingScheduler.drainActiveRunExecutions()]);
+    for (const elapsed of [30_000, 60_000, 3_600_000, 86_400_000]) {
+      expect((await heartbeat.promoteDueScheduledRetries(new Date(renewal.getTime() + elapsed))).promoted).toBe(0);
+      await heartbeat.resumeQueuedRuns();
+      await heartbeat.reconcileStrandedAssignedIssues();
+      await heartbeat.drainActiveRunExecutions();
+    }
+    expect(mocks.execute).toHaveBeenCalledTimes(1);
+    const runs = await db.select().from(heartbeatRuns);
+    expect(runs.filter(run => run.retryOfRunId === scheduled.retryOfRunId)).toHaveLength(1);
+    expect(runs.find(run => run.id === scheduled.id)).toMatchObject({ status: "succeeded", issueId, agentId, scheduledRetryAttempt: 1 });
+    expect(runs.some(run => ["scheduled_retry", "queued", "running"].includes(run.status))).toBe(false);
+    expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0].status).toBe("done");
+    expect((await documentService(db).getIssueDocumentByKey(issueId, "plan"))?.latestRevisionId).toBe(fixture.planRevisionId);
+    expect((await db.select().from(agentWakeupRequests)).filter(wake => ["queued", "claimed"].includes(wake.status))).toHaveLength(0);
+  }, 30_000);
+
+  it.each(["done", "cancelled"] as const)("does not resume a renewal wait after the task becomes %s", async status => {
+    const { issueId, renewal } = await parkUntilRenewal();
+    await db.update(issues).set({ status }).where(eq(issues.id, issueId));
+    heartbeat = heartbeatService(db);
+    for (let sweep = 0; sweep < 3; sweep++) {
+      await heartbeat.promoteDueScheduledRetries(renewal);
+      await heartbeat.resumeQueuedRuns();
+      await heartbeat.reconcileStrandedAssignedIssues();
+      await heartbeat.drainActiveRunExecutions();
+    }
+    expect(mocks.execute).not.toHaveBeenCalled();
+    expect((await db.select().from(heartbeatRuns)).some(run => ["scheduled_retry", "queued", "running"].includes(run.status))).toBe(false);
+  }, 30_000);
+
+  it("automatically resumes once when real wall-clock time reaches renewal", async () => {
+    const { issueId, marker, renewal } = await parkUntilRenewal();
+    const starts: number[] = [];
+    mocks.execute.mockImplementation(async ctx => {
+      starts.push(Date.now());
+      expect(ctx.context.issueId).toBe(issueId);
+      expect(ctx.context.paperclipTaskMarkdown).toContain(marker);
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      return success();
+    });
+    heartbeat = heartbeatService(db);
+    let sweeping: Promise<void> | null = null;
+    let sweepError: unknown;
+    let completedSweeps = 0;
+    const timer = setInterval(() => {
+      if (sweeping || sweepError) return;
+      sweeping = (async () => {
+        await heartbeat.promoteDueScheduledRetries();
+        await heartbeat.resumeQueuedRuns();
+        completedSweeps++;
+      })().catch(error => { sweepError = error; }).finally(() => { sweeping = null; });
+    }, 100);
+    try {
+      await eventually(async () => starts.length === 1 || !!sweepError, 400);
+      await heartbeat.drainActiveRunExecutions();
+      const sweepsAtCompletion = completedSweeps;
+      await eventually(async () => completedSweeps >= sweepsAtCompletion + 3 || !!sweepError);
+      expect(sweepError).toBeUndefined();
+      expect(starts).toHaveLength(1);
+      expect(starts[0]).toBeGreaterThanOrEqual(renewal.getTime());
+      expect(mocks.execute).toHaveBeenCalledTimes(1);
+      expect((await db.select().from(heartbeatRuns)).some(run => ["scheduled_retry", "queued", "running"].includes(run.status))).toBe(false);
+    } finally {
+      clearInterval(timer);
+      await sweeping;
+    }
+  }, 30_000);
+
+  it("stops automatic renewal recovery when the provider still reports quota after its reset", async () => {
+    const { renewal } = await parkUntilRenewal();
+    await eventually(async () => Date.now() >= renewal.getTime(), 400);
+    mocks.execute.mockResolvedValue({ ...success(), exitCode: 1, errorMessage: "Quota remains exhausted after reset", errorFamily: "provider_quota",
+      retryNotBefore: new Date(renewal.getTime() + 7_200_000).toISOString() });
+    await heartbeat.promoteDueScheduledRetries();
+    await heartbeat.resumeQueuedRuns();
+    await eventually(async () => mocks.execute.mock.calls.length === 1);
+    await heartbeat.drainActiveRunExecutions();
+    // The bounded fallback may inspect remaining levels, but neither a provider
+    // nor a second renewal wait may loop indefinitely if the reset was stale.
+    for (const elapsed of [2_000, 4_000, 8_000, 86_400_000]) {
+      await heartbeat.promoteDueScheduledRetries(new Date(renewal.getTime() + elapsed));
+      await heartbeat.resumeQueuedRuns();
+      await heartbeat.reconcileStrandedAssignedIssues();
+      await heartbeat.drainActiveRunExecutions();
+    }
+    expect(mocks.execute).toHaveBeenCalledTimes(1);
+    const runs = await db.select().from(heartbeatRuns);
+    expect(runs.filter(run => run.scheduledRetryReason === "ai_connection_pool_wait"), JSON.stringify(runs.map(run => ({ id: run.id, status: run.status, reason: run.scheduledRetryReason, attempt: run.scheduledRetryAttempt, wakeReason: run.contextSnapshot?.wakeReason, retryOf: run.retryOfRunId })))).toHaveLength(1);
+    expect(runs.some(run => ["scheduled_retry", "queued", "running"].includes(run.status))).toBe(false);
+  }, 30_000);
+
+  it("schedules renewal when fresh quota failures exhaust the fallback chain, then resumes only once", async () => {
+    const { agentId, issueId } = await seed("planning");
+    const marker = `fresh-chain-${randomUUID()}`;
+    const renewal = new Date(Date.now() + 20_000);
+    await documentService(db).upsertIssueDocument({ issueId, key: "plan", format: "markdown", body: `Continue ${marker}`, createdByAgentId: agentId });
+    mocks.execute.mockImplementation(async ctx => {
+      if (Date.now() < renewal.getTime()) return { ...success(), exitCode: 1, errorMessage: "Quota exhausted", errorFamily: "provider_quota",
+        retryNotBefore: (ctx.agent.adapterType === "claude_local" ? renewal : new Date(renewal.getTime() + 3_600_000)).toISOString() };
+      expect(ctx.context.issueId).toBe(issueId);
+      expect(ctx.context.paperclipTaskMarkdown).toContain(marker);
+      await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      return success();
+    });
+    await wake(agentId, issueId);
+    await eventually(async () => (await db.select().from(heartbeatRuns)).some(run => run.status === "scheduled_retry"));
+    await heartbeat.drainActiveRunExecutions();
+    await heartbeat.promoteDueScheduledRetries(new Date(Date.now() + 2_000));
+    await heartbeat.resumeQueuedRuns();
+    await eventually(async () => mocks.execute.mock.calls.length === 2);
+    await heartbeat.drainActiveRunExecutions();
+    const waits = (await db.select().from(heartbeatRuns)).filter(run => run.status === "scheduled_retry");
+    expect(waits).toHaveLength(1);
+    expect(waits[0]).toMatchObject({ issueId, agentId, scheduledRetryReason: "ai_connection_pool_wait" });
+    expect(waits[0].scheduledRetryAt?.getTime()).toBe(renewal.getTime());
+    await eventually(async () => Date.now() >= renewal.getTime(), 400);
+    heartbeat = heartbeatService(db);
+    await heartbeat.promoteDueScheduledRetries();
+    await heartbeat.resumeQueuedRuns();
+    await eventually(async () => mocks.execute.mock.calls.length === 3);
+    await heartbeat.drainActiveRunExecutions();
+    await heartbeat.promoteDueScheduledRetries(new Date(renewal.getTime() + 86_400_000));
+    await heartbeat.resumeQueuedRuns();
+    await heartbeat.reconcileStrandedAssignedIssues();
+    await heartbeat.drainActiveRunExecutions();
+    expect(mocks.execute.mock.calls.map(([ctx]) => ctx.agent.adapterType)).toEqual(["claude_local", "codex_local", "claude_local"]);
+    expect((await db.select().from(heartbeatRuns)).some(run => ["scheduled_retry", "queued", "running"].includes(run.status))).toBe(false);
+  }, 45_000);
+
+  it("does not replenish the renewal allowance after switching fallback providers", async () => {
+    const { renewal } = await parkUntilRenewal({ secondaryResetDelayMs: 0 });
+    await eventually(async () => Date.now() >= renewal.getTime(), 400);
+    mocks.execute.mockResolvedValue({ ...success(), exitCode: 1, errorMessage: "Quota remains exhausted", errorFamily: "provider_quota",
+      retryNotBefore: new Date(renewal.getTime() + 7_200_000).toISOString() });
+    await heartbeat.promoteDueScheduledRetries();
+    await heartbeat.resumeQueuedRuns();
+    await eventually(async () => mocks.execute.mock.calls.length === 1);
+    await heartbeat.drainActiveRunExecutions();
+    await heartbeat.promoteDueScheduledRetries(new Date(Date.now() + 2_000));
+    await heartbeat.resumeQueuedRuns();
+    await eventually(async () => mocks.execute.mock.calls.length === 2);
+    await heartbeat.drainActiveRunExecutions();
+    for (let sweep = 0; sweep < 3; sweep++) {
+      await heartbeat.promoteDueScheduledRetries(new Date(renewal.getTime() + 86_400_000));
+      await heartbeat.resumeQueuedRuns();
+      await heartbeat.reconcileStrandedAssignedIssues();
+      await heartbeat.drainActiveRunExecutions();
+    }
+    expect(mocks.execute.mock.calls.map(([ctx]) => ctx.agent.adapterType)).toEqual(["claude_local", "codex_local"]);
+    const runs = await db.select().from(heartbeatRuns);
+    expect(runs.filter(run => run.scheduledRetryReason === "ai_connection_pool_wait")).toHaveLength(1);
+    expect(runs.some(run => ["scheduled_retry", "queued", "running"].includes(run.status))).toBe(false);
   }, 30_000);
 
   it("walks three ordered levels after two quota errors", async () => {
