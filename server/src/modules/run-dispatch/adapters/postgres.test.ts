@@ -199,6 +199,27 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
       .toMatchObject({ allowed: false, errorCode: "issue_interaction_changed" });
   });
 
+  it.each([false, true])("checks the final question handoff without taking ownership (another executor: %s)", async anotherExecutor => {
+    const f = await seedAddressedQuestion();
+    await db.update(heartbeatRuns).set({ status: "running" }).where(eq(heartbeatRuns.id, f.runId));
+    if (anotherExecutor) {
+      const otherRunId = await seedRun({ companyId: f.companyId, agentId: f.workerId, status: "running", contextSnapshot: { issueId: f.issueId } });
+      await db.update(issues).set({ executionRunId: otherRunId }).where(eq(issues.id, f.issueId));
+    }
+    let dispatched = 0;
+    const result = await createPostgresRunDispatchAdapter(db).dispatchResolvedInteractionIfCurrent({
+      ...f, expectedStatus: "running", now: new Date(), dispatch: async () => { dispatched++; return "answered"; },
+    });
+    if (anotherExecutor) {
+      expect(result).toMatchObject({ dispatched: false, cancellation: { outcome: "cancelled", errorCode: "issue_execution_lock_changed" } });
+      expect(dispatched).toBe(0);
+    } else {
+      expect(result.dispatched).toBe(true);
+      expect(dispatched).toBe(1);
+      expect((await db.select().from(issues).where(eq(issues.id, f.issueId)))[0]).toMatchObject({ assigneeAgentId: f.workerId, executionRunId: null });
+    }
+  });
+
   it.each(["resolved", "superseded", "readdressed", "human_only", "governed", "connection_authorization", "wrong_issue", "wrong_company", "deleted"])(
     "revalidates %s questions at the final dispatch gate", async (change) => {
       const f = await seedAddressedQuestion();

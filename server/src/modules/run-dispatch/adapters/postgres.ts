@@ -1124,7 +1124,7 @@ export function createPostgresRunDispatchAdapter(
       if (run.status !== input.expectedStatus || run.resultJson?.cancellation || run.resultJson?.startupCancellation) {
         return { dispatched: false as const, cancellation: { outcome: "lost_race" as const } };
       }
-      const { issueId, decision: initialDecision } = await decideCurrentRunStaleness(
+      const { issueId, facts, decision: initialDecision } = await decideCurrentRunStaleness(
         tx,
         run,
         input.now,
@@ -1137,7 +1137,10 @@ export function createPostgresRunDispatchAdapter(
               .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)))
               .then((rows) => rows[0] ?? null)
               .then((issue) =>
-                issue?.executionRunId === run.id
+                issue?.executionRunId === run.id ||
+                  // Attention does not acquire task ownership. Permit its empty
+                  // lock, but never dispatch over a different active executor.
+                  (facts?.addressedInteractionWake === "pending" && issue?.executionRunId === null)
                   ? initialDecision
                   : {
                       stale: true as const,
