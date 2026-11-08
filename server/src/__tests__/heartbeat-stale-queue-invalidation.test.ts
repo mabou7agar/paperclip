@@ -82,7 +82,9 @@ async function ensureIssueRelationsTable(db: ReturnType<typeof createDb>) {
   `));
 }
 
-async function waitForCondition(fn: () => Promise<boolean>, timeoutMs = 3_000) {
+// Runtime preparation includes accounting and workspace transactions; assert
+// the observable handoff rather than a three-second machine-speed assumption.
+async function waitForCondition(fn: () => Promise<boolean>, timeoutMs = 15_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await fn()) return true;
@@ -611,6 +613,44 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(countExecuteCallsForRun(runId)).toBe(1);
     expect((await db.select().from(issues).where(eq(issues.id, issue.id)))[0]).toMatchObject({ status: "in_review", assigneeAgentId: workerId });
     expect((await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, interaction.id)))[0].status).toBe("pending");
+  });
+
+  it.each(["queued", "scheduled_retry"] as const)("retains a valid %s addressed question when a worker wake arrives", async status => {
+    const { companyId, agentId } = await seedCompanyAndAgent({ heartbeatConfig: { enabled: false } });
+    const workerId = randomUUID();
+    await db.insert(agents).values({ id: workerId, companyId, name: "Worker", role: "engineer", status: "idle", adapterType: "codex_local" });
+    const [issue] = await db.insert(issues).values({ companyId, title: "Pending planning answer", status: "in_review", assigneeAgentId: workerId }).returning();
+    const [interaction] = await db.insert(issueThreadInteractions).values({ companyId, issueId: issue.id,
+      kind: "ask_user_questions", addresseeAgentId: agentId, createdByAgentId: workerId,
+      effectiveResolverPolicy: "addressee_only", payload: { version: 1, questions: [] } }).returning();
+    const { runId } = await seedQueuedRun({ companyId, agentId, issueId: issue.id, wakeReason: "interaction_pending",
+      contextExtras: { source: "issue.interaction.created", interactionId: interaction.id, interactionKind: interaction.kind } });
+    await db.update(heartbeatRuns).set({ status, scheduledRetryReason: status === "scheduled_retry" ? "ai_connection_busy" : null,
+      scheduledRetryAt: status === "scheduled_retry" ? new Date(Date.now() + 3_600_000) : null }).where(eq(heartbeatRuns.id, runId));
+    await db.update(issues).set({ executionRunId: runId }).where(eq(issues.id, issue.id));
+    heartbeat.startTaskDrain();
+    try {
+      await heartbeat.wakeup(workerId, { source: "automation", triggerDetail: "system", reason: "issue_assigned",
+        payload: { issueId: issue.id }, contextSnapshot: { issueId: issue.id, wakeReason: "issue_assigned" } });
+      expect(await heartbeat.getRun(runId)).toMatchObject({ status, errorCode: null });
+      expect(countExecuteCallsForRun(runId)).toBe(0);
+    } finally { heartbeat.stopTaskDrain(); }
+  });
+
+  it("cancels an addressed card resolved after claim at the final provider handoff", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const [issue] = await db.insert(issues).values({ companyId, title: "Question answered during startup", status: "in_review", assigneeAgentId: agentId }).returning();
+    const [interaction] = await db.insert(issueThreadInteractions).values({ companyId, issueId: issue.id,
+      kind: "ask_user_questions", addresseeAgentId: agentId, payload: { version: 1, questions: [] } }).returning();
+    const { runId } = await seedQueuedRun({ companyId, agentId, issueId: issue.id, wakeReason: "interaction_pending",
+      contextExtras: { source: "issue.interaction.created", interactionId: interaction.id, interactionKind: interaction.kind } });
+    beforeContinuationDispatchCheck = async () => { await db.update(issueThreadInteractions).set({ status: "answered", resolvedAt: new Date() }).where(eq(issueThreadInteractions.id, interaction.id)); };
+    await heartbeat.resumeQueuedRuns();
+    expect(await waitForCondition(async () => (await heartbeat.getRun(runId))?.status === "cancelled")).toBe(true);
+    await heartbeat.waitForRunExecutionDrain(runId);
+    const run = await heartbeat.getRun(runId);
+    expect({ status: run?.status, errorCode: run?.errorCode }).toEqual({ status: "cancelled", errorCode: "issue_interaction_changed" });
+    expect(countExecuteCallsForRun(runId)).toBe(0);
   });
 
   it("cancels a resolved connection-intent wake parked before queued-run claim", async () => {

@@ -1,3 +1,4 @@
+import { addressedInteractionWakeState } from "../addressed-interaction-wake.js";
 import { monitoringService } from "../monitoring.js";
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
 import { normalizeAgentNameKey } from "./retries.js";
@@ -3295,6 +3296,11 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               return false;
             }
 
+            if (!issueCancelled && issue.status !== "done" && await addressedInteractionWakeState(tx as unknown as Db, {
+              companyId: issue.companyId, issueId: issue.id, agentId: scheduledRun.agentId,
+              contextSnapshot: parseObject(scheduledRun.contextSnapshot),
+            }) === "pending") return false;
+
             const now = new Date();
             const reason = issueCancelled
               ? "Cancelled because the issue was cancelled before the scheduled retry became due"
@@ -3433,7 +3439,12 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             activeExecutionRun &&
             activeExecutionRun.status !== "running" &&
             issue.assigneeAgentId &&
-            activeExecutionRun.agentId !== issue.assigneeAgentId
+            activeExecutionRun.agentId !== issue.assigneeAgentId &&
+            !(issue.status !== "done" && issue.status !== "cancelled" &&
+              await addressedInteractionWakeState(tx as unknown as Db, {
+                companyId: issue.companyId, issueId: issue.id, agentId: activeExecutionRun.agentId,
+                contextSnapshot: parseObject(activeExecutionRun.contextSnapshot),
+              }) === "pending")
           ) {
             const cancelled = await tx
               .update(heartbeatRuns)

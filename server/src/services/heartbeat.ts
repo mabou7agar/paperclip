@@ -1,3 +1,4 @@
+import { isAddressedInteractionWakeContext } from "./addressed-interaction-wake.js";
 import { ConnectionUsageCapReached } from "./connection-usage-caps.js";
 import { selectHeartbeatEnvironment } from "./heartbeat/environment-selection.js";
 import { phaseRouteDispatchSchema, phaseRouteAdapterConfig, phaseRouteTaskKey, PHASE_QUOTA_RESET_WAKE_REASON } from "./phase-routing.js";
@@ -3609,7 +3610,7 @@ export function heartbeatService(
         }
         if (
           !issueId ||
-          (!isResolvedInteractionContinuationWakeContext(context) &&
+          (!isResolvedInteractionContinuationWakeContext(context) && !isAddressedInteractionWakeContext(context) &&
             !["native_safe_replacement", "native_provider_overloaded"].includes(run.scheduledRetryReason ?? ""))
         ) {
           return { dispatched: true, resultPromise: dispatch(() => {}) };

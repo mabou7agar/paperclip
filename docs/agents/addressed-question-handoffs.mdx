@@ -6,7 +6,8 @@ An agent can address an ordinary task question or confirmation to another agent
 without changing the task assignee. The existing creation path grants the
 recipient access and submits an `interaction_pending` wake. Deferred promotion,
 queued dispatch and resource-wait retries retain the original interaction ID,
-source run and task context.
+source run and task context. A worker wake does not cancel a valid queued or
+provider-waiting recipient merely because it has a different assignee.
 
 Dispatch validates the current persisted interaction: company, task, recipient,
 pending status, kind and resolver audience. A verified recipient can answer its

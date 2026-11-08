@@ -3,6 +3,10 @@ import type { Db } from "@paperclipai/db";
 import { findAddressedInteraction } from "../repositories/addressed-interactions.js";
 import { issueThreadInteractionAttentionAgentAllowed } from "./issue-thread-interaction-resolution.js";
 
+export function isAddressedInteractionWakeContext(context: Record<string, unknown>): boolean {
+  return context.wakeReason === "interaction_pending" && context.source === "issue.interaction.created";
+}
+
 /** An attention request is authority to answer its card, not task ownership.
  * Read current persisted scope and audience; never trust a wake flag alone.
  * Dispatch callers hold the issue lock, as interaction mutations do.
@@ -12,7 +16,7 @@ export async function addressedInteractionWakeState(db: Db, input: {
   contextSnapshot: Record<string, unknown>;
 }): Promise<"pending" | "stale" | null> {
   const context = input.contextSnapshot;
-  if (context.wakeReason !== "interaction_pending" || context.source !== "issue.interaction.created") return null;
+  if (!isAddressedInteractionWakeContext(context)) return null;
   const id = z.string().guid().safeParse(context.interactionId);
   if (!id.success) return "stale";
   const row = await findAddressedInteraction(db, { ...input, interactionId: id.data });
