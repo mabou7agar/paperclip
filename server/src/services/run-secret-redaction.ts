@@ -86,6 +86,9 @@ export function createRunSecretRedactionRegistry(db: Db) {
       .from(heartbeatRuns)
       .where(and(
         eq(heartbeatRuns.companyId, companyId),
+        // Match the partial index before decompressing historical contexts.
+        // Registry writes update the index in the same database transaction.
+        sql`${heartbeatRuns.contextSnapshot} ? 'paperclipSecretRedactions'`,
         // Resolve indexed IDs before projecting the large toasted JSON. An OR
         // can make PostgreSQL scan/decompress every run context on busy issues.
         sql`${heartbeatRuns.id} in (

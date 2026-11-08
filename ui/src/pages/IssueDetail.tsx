@@ -1580,8 +1580,9 @@ const IssueDetailChatTab = memo(function IssueDetailChatTab({
     queryKey: queryKeys.issues.runs(issueQueryRef),
     queryFn: () => activityApi.runsForIssue(issueQueryRef),
     enabled: !!issueId,
-    refetchInterval:
-      hasLiveRuns || issueStatus === "in_progress" ? 1000 : false,
+    // LiveUpdatesProvider refreshes history on run changes and reconciles gaps
+    // on reconnect/focus. An idle In Progress task must not reread every run.
+    refetchInterval: false,
     placeholderData: keepPreviousDataForSameQueryTail<RunForIssue[]>(issueQueryRef),
   });
   const resolvedActivity = activity ?? [];

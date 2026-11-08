@@ -16,6 +16,17 @@ field behavior. The optimization changes reads only: saved context, native
 sessions, retry counters, older runs, credential visibility and execution guards
 retain their existing behavior. No response or execution-state cache is added.
 
+The task chat loads history on navigation and refreshes it through the existing
+run lifecycle events. Focus and WebSocket reconnection reconcile missed events.
+An In Progress status alone does not schedule a full-history poll. Live output
+and lightweight active-run checks keep their existing update paths.
+
+The secret registry lookup uses a partial index containing only runs with a
+registered redaction registry. Runs without a registry do not require historical
+context decompression for comment redaction. Adding or removing a registry
+updates index membership transactionally; secrets remain encrypted in storage
+and plaintext values are never cached across requests.
+
 Compare the complete history response and execution projections against the
 previous reader in a read-only, repeatable-read transaction. Check compressed
 fixtures, legacy activity-linked runs, cross-company access, scheduled retries,

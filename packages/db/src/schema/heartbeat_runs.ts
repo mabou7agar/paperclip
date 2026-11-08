@@ -180,6 +180,10 @@ export const heartbeatRuns = pgTable(
       table.companyId,
       sql`(${table.contextSnapshot} -> 'paperclipIssue' ->> 'id')`,
     ),
+    companySecretRedactionIdx: index("heartbeat_runs_company_secret_redaction_idx").on(
+      table.companyId,
+      table.id,
+    ).where(sql`${table.contextSnapshot} ? 'paperclipSecretRedactions'`),
     companyConnectionQuotaIdx: index("heartbeat_runs_company_connection_quota_idx").on(
       table.companyId,
       sql`(${table.contextSnapshot} -> 'aiConnection' ->> 'connectionId')`,

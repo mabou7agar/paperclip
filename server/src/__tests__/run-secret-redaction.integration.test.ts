@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { agents, companies, createDb, heartbeatRuns } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -6,7 +7,9 @@ import { createRunSecretRedactionRegistry } from "../services/run-secret-redacti
 import { REDACTED_EVENT_VALUE } from "../redaction.js";
 
 const { resolveVersion } = vi.hoisted(() => ({ resolveVersion: vi.fn(async ({ material }) => material.value as string) }));
-vi.mock("../secrets/provider-registry.js", () => ({ getSecretProvider: () => ({ resolveVersion }) }));
+vi.mock("../secrets/provider-registry.js", () => ({ getSecretProvider: () => ({ resolveVersion,
+  createSecret: async ({ value }: { value: string }) => ({ material: { value } }),
+}) }));
 const support = await getEmbeddedPostgresTestSupport();
 (support.supported ? describe : describe.skip)("indexed issue secret registry lookup", () => {
   let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
@@ -34,5 +37,18 @@ const support = await getEmbeddedPostgresTestSupport();
     ]);
     expect(resolveVersion).toHaveBeenCalledTimes(3);
     expect(await registry.redactForIssue(companyId, randomUUID(), values)).toEqual(values);
+  });
+
+  it("observes registry additions and removals immediately without caching plaintext", async () => {
+    const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID(), runId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Changing registry", issuePrefix: `R${companyId.slice(0, 6)}` });
+    await db.insert(agents).values({ id: agentId, companyId, name: "Worker", role: "engineer", adapterType: "claude_local" });
+    await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId, contextSnapshot: { issueId, prompt: "large fixture ".repeat(20_000) } });
+    const registry = createRunSecretRedactionRegistry(db), value = "fixture-newly-registered-secret";
+    expect(await registry.redactForIssue(companyId, issueId, value)).toBe(value);
+    await registry.register(companyId, runId, value);
+    expect(await registry.redactForIssue(companyId, issueId, value)).toBe(REDACTED_EVENT_VALUE);
+    await db.update(heartbeatRuns).set({ contextSnapshot: { issueId } }).where(eq(heartbeatRuns.id, runId));
+    expect(await registry.redactForIssue(companyId, issueId, value)).toBe(value);
   });
 });

@@ -2374,6 +2374,13 @@
       "when": 1794141614047,
       "tag": "0340_cost_connection_attribution",
       "breakpoints": true
+    },
+    {
+      "idx": 341,
+      "version": "7",
+      "when": 1794149636351,
+      "tag": "0341_run_secret_registry_index",
+      "breakpoints": true
     }
   ]
 }

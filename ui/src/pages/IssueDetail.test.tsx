@@ -1423,6 +1423,19 @@ describe("IssueDetail", () => {
     mockRouteParams.companyPrefix = "PAP";
   });
 
+  it("does not poll full history for an idle In Progress task and still refreshes invalidated history", async () => {
+    mockIssuesApi.get.mockResolvedValue(createIssue({ status: "in_progress" }));
+    mockActivityApi.runsForIssue.mockClear();
+    await act(async () => root.render(<QueryClientProvider client={queryClient}><IssueDetail /></QueryClientProvider>));
+    await waitForAssertion(() => expect(mockActivityApi.runsForIssue).toHaveBeenCalled());
+    await flushReact();
+    const initialReads = mockActivityApi.runsForIssue.mock.calls.length;
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 2_200)); });
+    expect(mockActivityApi.runsForIssue).toHaveBeenCalledTimes(initialReads);
+    await act(async () => { await queryClient.invalidateQueries({ queryKey: queryKeys.issues.runs("PAP-1") }); });
+    await waitForAssertion(() => expect(mockActivityApi.runsForIssue.mock.calls.length).toBeGreaterThan(initialReads));
+  });
+
   it("clears only the monitor after confirmation and refreshes the task", async () => {
     const nextCheckAt = new Date(Date.now() + 60_000).toISOString();
     const preservedPolicy = { mode: "normal", commentRequired: false, stages: [{ type: "review", approvalsNeeded: 1, participants: [{ type: "user", userId: "reviewer-1" }] }], maxReviewRounds: 4, authorizationPolicy: { assignmentPolicy: { mode: "protected" } } };
