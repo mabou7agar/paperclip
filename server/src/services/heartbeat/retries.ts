@@ -1643,6 +1643,7 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
 
   async function retryScheduledRetryNow(input: {
     issueId: string;
+    expectedRunId?: string;
     actor?: {
       actorType?: "user" | "agent" | "system";
       actorId?: string | null;
@@ -1660,6 +1661,9 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
     const scheduled = await getIssueRetryRun(issue.companyId, issue.id, [
       "scheduled_retry",
     ]);
+    if (scheduled && input.expectedRunId && scheduled.run.id !== input.expectedRunId) {
+      return { outcome: "no_scheduled_retry" as const, message: "The scheduled continuation changed", scheduledRetry: null };
+    }
     if (!scheduled) {
       const alreadyPromoted = await getIssueRetryRun(
         issue.companyId,

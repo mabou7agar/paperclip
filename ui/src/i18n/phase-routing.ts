@@ -1,5 +1,7 @@
 export const phaseRoutingMessages = {
   en: {
+    apiQuotaChecks: "API quota recovery checks", apiQuotaEnabled: "Periodically recheck exhausted Claude-compatible Messages APIs",
+    apiQuotaInterval: "Check interval (seconds)", apiQuotaHelp: "One short request per connection. Failures back off up to one day. Checks record token usage; only verified recovery releases an existing continuation. No agent wakes while quota is unchanged.",
     enabled: "Route models by responsibility",
     description: "Ordinary tasks use the agent responsibility, then the company role or default. Planning-mode tasks use Planning. Review handoffs and approval rules stay unchanged. Profiles run in order. A quota limit cools down that account and allows a bounded fallback. Each phase keeps its own provider session. Ask and chat turns use the agent’s regular model. Connect an OpenRouter account to use GLM through OpenCode.",
     planning: "Planning and coordination", implementation: "Implementation", review: "Review",
@@ -14,6 +16,8 @@ export const phaseRoutingMessages = {
     companyTitle: "Default models by responsibility", loading: "Loading model defaults…", cancel: "Cancel", saving: "Saving…", saveDefaults: "Save model defaults",
   },
   ar: {
+    apiQuotaChecks: "فحص استعادة حصة API", apiQuotaEnabled: "إعادة فحص اتصالات Messages المتوافقة مع Claude عند نفاد الحصة",
+    apiQuotaInterval: "الفاصل بين الفحوصات بالثواني", apiQuotaHelp: "طلب قصير واحد لكل اتصال مع زيادة الانتظار عند الفشل حتى يوم. يُسجّل استهلاك الرموز وتُستأنف المتابعة الحالية بعد نجاح موثّق فقط، دون إيقاظ الوكلاء عند بقاء الحصة كما هي.",
     enabled: "توجيه النماذج حسب المسؤولية",
     description: "تستخدم المهام العادية مسؤولية الوكيل ثم دور الشركة أو الإعداد الافتراضي. تستخدم مهام التخطيط سلسلة التخطيط. تبقى قواعد المراجعة والموافقة كما هي. تُستخدم الإعدادات بالترتيب. عند بلوغ حد الاستخدام، يُوقف الحساب مؤقتاً ويُسمح بانتقال محدود إلى البديل. تحتفظ كل مرحلة بجلسة مستقلة لكل مزود. تستخدم الأسئلة والمحادثات نموذج الوكيل المعتاد. اربط حساب OpenRouter لاستخدام GLM عبر OpenCode.",
     planning: "التخطيط والتنسيق", implementation: "التنفيذ", review: "المراجعة",

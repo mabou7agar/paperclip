@@ -1,3 +1,4 @@
+import { providerQuotaProbeService } from "./services/provider-quota-probes.js";
 import { subscribeAllCompanyLiveEvents } from "./services/live-events.js";
 import { DELIVERY_QUEUES } from "./services/delivery-work-notifications.js";
 import type { createDeliveryWorkCoordinator } from "./services/delivery-work-coordinator.js";
@@ -1190,6 +1191,7 @@ async function startServerWithDatabaseTeardown(
     ["status_delivery", () => deliverExecutionStatuses(db)],
     ["automatic_disposition", () => settleUnrecoverableExecutions(db)],
     ["local_ai_login_cleanup", () => localAiLoginService(db).reapExpired()],
+    ["api_quota_health", () => heartbeat ? providerQuotaProbeService(db, heartbeat.retryScheduledRetryNow).sweep() : undefined],
   ] as const;
   const sweepExecutionControl = () => {
     if (isIdleTaskDrainActive() || heartbeatSchedulerStopped || isWarmStandby()) return;

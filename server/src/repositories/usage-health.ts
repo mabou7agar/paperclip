@@ -93,6 +93,14 @@ export function usageHealthRepository(db: Db) {
             select 1 from heartbeat_runs mirrored where mirrored.id=e.heartbeat_run_id and mirrored.company_id=e.company_id))
             and e.occurred_at>=${from.toISOString()}::timestamptz
             and e.occurred_at<=${to.toISOString()}::timestamptz
+          union all
+          select p.id,'quota_probe',null::uuid,'API quota check',null::uuid,null::text,'anthropic',p.model,'quota_probe',
+            case when p.outcome='pending' and p.started_at>now()-interval '2 minutes' then 'running' else p.outcome end,p.started_at,false,p.outcome in ('configuration','quota','authentication'),
+            ${number(sql`p.usage->'inputTokens'`)},${number(sql`p.usage->'cachedInputTokens'`)},
+            ${number(sql`p.usage->'cacheWriteTokens'`)},${number(sql`p.usage->'outputTokens'`)},
+            null::text,'metered_api','api_key'
+          from provider_quota_probes p where p.company_id=${companyId}
+            and p.started_at>=${from.toISOString()}::timestamptz and p.started_at<=${to.toISOString()}::timestamptz
         ) select *, "occurredAt"::text as "cursorAt" from observations where true ${after} ${selected} order by "occurredAt",id,kind limit 500`);
       return rows.map((row) => ({
         ...row,

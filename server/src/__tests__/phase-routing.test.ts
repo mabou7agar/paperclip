@@ -147,7 +147,7 @@ describe("phase routing", () => {
     expect(result?.profile?.id).toBe("codex");
     expect(result?.maxFallbackAttempts).toBe(1);
     expect(result?.notes).toHaveLength(1);
-    expect(latestEvidence).toHaveBeenCalledWith("company", expect.any(String), now);
+    expect(latestEvidence).toHaveBeenCalledWith("company", expect.any(String), now, expect.any(String));
     // Pin the resolved account, even when the responsible user's default changes.
     expect(result?.profile?.binding.mode).toBe("delegated");
   });

@@ -29,7 +29,9 @@ body:json {
     ],
     "defaultResponsibility": "implementation",
     "roleResponsibilities": { "cto": "planning" },
-    "unknownResetCooldownSeconds": 3600
+    "unknownResetCooldownSeconds": 3600,
+    "apiQuotaRecheckSeconds": 1800,
+    "apiQuotaRecheckOverrides": {}
   }
 }
 
@@ -40,5 +42,6 @@ tests {
     expect(res.getBody().policy.implementation).to.have.length(1);
     expect(res.getBody().policy.review).to.have.length(1);
     expect(res.getBody().policy.roleResponsibilities.cto).to.equal("planning");
+    expect(res.getBody().policy.apiQuotaRecheckSeconds).to.equal(1800);
   });
 }

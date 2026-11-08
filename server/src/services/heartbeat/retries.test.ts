@@ -285,7 +285,9 @@ describePostgres("heartbeat retry module database wiring", () => {
     const scheduled = await retries.scheduleBoundedRetry(selected.run.id, { now, delayMs: 60_000 });
     const foreign = await retries.scheduleBoundedRetry(other.run.id, { now, delayMs: 60_000 });
     if (scheduled.outcome !== "scheduled" || foreign.outcome !== "scheduled") throw new Error("Expected retries");
-    expect(await retries.retryScheduledRetryNow({ issueId: selected.issue.id, actor: { actorType: "user", actorId: "retry-user" }, now })).toMatchObject({
+    expect(await retries.retryScheduledRetryNow({ issueId: selected.issue.id, expectedRunId: foreign.run.id, now })).toMatchObject({outcome:"no_scheduled_retry"});
+    expect(await deps.getRun(scheduled.run.id)).toMatchObject({status:"scheduled_retry",scheduledRetryAt:scheduled.dueAt});
+    expect(await retries.retryScheduledRetryNow({ issueId: selected.issue.id, expectedRunId: scheduled.run.id, actor: { actorType: "user", actorId: "retry-user" }, now })).toMatchObject({
       outcome: "promoted", scheduledRetry: { runId: scheduled.run.id, status: "queued" },
     });
     expect(await deps.getRun(scheduled.run.id)).toMatchObject({ contextSnapshot: {

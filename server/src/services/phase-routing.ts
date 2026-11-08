@@ -155,7 +155,7 @@ export function phaseRoutingService(db: Db) {
             maxFallbackAttempts: profiles.length - 1, retryAt: null,
             notes: [`${profile.id}: ${error.message}`] };
         }
-        const evidence = await quota.latestEvidence(input.companyId, account.connection.id, now);
+        const evidence = await quota.latestEvidence(input.companyId, account.connection.id, now, account.grant.id);
         if (evidence && evidence.status !== "succeeded" && policy.data.unknownResetCooldownSeconds === 0 && !reportedProviderQuotaReset(evidence)) {
           unknownResetHeld = true;
           notes.push(`${profile.id}: quota exhausted; renewal date is unknown. Confirm quota restoration before retrying.`);

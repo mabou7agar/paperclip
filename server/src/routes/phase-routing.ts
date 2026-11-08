@@ -29,7 +29,7 @@ export function phaseRoutingRoutes(db: Db) {
     const actor = getActorInfo(req);
     const policy = await service.saveCompanyDefaults({ companyId, userId: actor.actorId, policy: req.body });
     await logActivity(db, { companyId, ...actor, action: "company.phase_routing_updated", entityType: "company", entityId: companyId,
-      details: { enabled: policy.enabled, planningLevels: policy.planning.length, implementationLevels: policy.implementation.length, reviewLevels: policy.review?.length ?? 0, defaultResponsibility: policy.defaultResponsibility, roleResponsibilities: policy.roleResponsibilities, taskOverrideIds: Object.keys(policy.taskOverrides ?? {}) } });
+      details: { enabled: policy.enabled, planningLevels: policy.planning.length, implementationLevels: policy.implementation.length, reviewLevels: policy.review?.length ?? 0, defaultResponsibility: policy.defaultResponsibility, roleResponsibilities: policy.roleResponsibilities, taskOverrideIds: Object.keys(policy.taskOverrides ?? {}), apiQuotaRecheckSeconds: policy.apiQuotaRecheckSeconds ?? 0, apiQuotaRecheckOverrides: policy.apiQuotaRecheckOverrides ?? {} } });
     res.json({ policy });
   });
   return router;

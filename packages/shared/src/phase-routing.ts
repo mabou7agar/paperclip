@@ -38,6 +38,9 @@ export const phaseRoutingSchema = z.object({
     implementation: phaseProfilesSchema.optional(),
     review: phaseProfilesSchema.optional(),
   }).strict()).optional(),
+  /** Connection health checks do not run agents. Omitted/0 preserves a manual hold. */
+  apiQuotaRecheckSeconds: z.number().int().min(0).max(86400).refine(v => v === 0 || v >= 300).optional(),
+  apiQuotaRecheckOverrides: z.record(z.string().uuid(), z.number().int().min(0).max(86400).refine(v => v === 0 || v >= 300)).optional(),
   unknownResetCooldownSeconds: z.number().int().min(0).max(86_400).refine(value => value === 0 || value >= 60, "Use 0 to wait for confirmation, or at least 60 seconds").default(3_600),
 }).strict();
 
