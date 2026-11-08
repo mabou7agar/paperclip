@@ -975,9 +975,9 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
 
         const scheduledRunId = randomUUID();
         if (contextSnapshot.explicitUserContinuation) {
-          const continuation = issueId && (retryReason === "transient_failure" || retryReason === PHASE_QUOTA_FALLBACK_RETRY_REASON) ? await admitExplicitContinuationRetry({
+          const continuation = issueId && (retryReason === "transient_failure" || retryReason === PHASE_QUOTA_FALLBACK_RETRY_REASON || quotaRenewalWait) ? await admitExplicitContinuationRetry({
             db: tx as unknown as Db, companyId: run.companyId, issueId, agentId: run.agentId,
-            parentRunId: run.id, successorRunId: scheduledRunId, now,
+            parentRunId: run.id, successorRunId: scheduledRunId, now, allowQuotaWait: quotaRenewalWait,
           }) : null;
           if (!continuation) return {
             outcome: "not_scheduled", issueId,

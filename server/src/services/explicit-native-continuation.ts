@@ -1,3 +1,4 @@
+import { isPhaseQuotaWaitBeforeDispatchVerified } from "./pre-dispatch-review-wait.js";
 import { hasRequiredWorkspaceRecovery } from "./workspace-restore-recovery-state.js";
 import { createHash } from "node:crypto";
 import { appendHeartbeatRunEvent } from "./heartbeat-run-events.js";
@@ -346,7 +347,7 @@ export async function admitExplicitNativeContinuation(input: {
  */
 export async function admitExplicitContinuationRetry(input: {
   db: Db; companyId: string; issueId: string; agentId: string;
-  parentRunId: string; successorRunId: string; now: Date;
+  parentRunId: string; successorRunId: string; now: Date; allowQuotaWait?: boolean;
 }): Promise<{ previousRunId: string; commentId: string } | null> {
   const { db, companyId, issueId, agentId } = input;
   const [task] = await db.select().from(issues).where(and(
@@ -358,7 +359,8 @@ export async function admitExplicitContinuationRetry(input: {
   )).for("update");
   if (!task || task.assigneeAgentId !== agentId || task.executionRunId !== input.parentRunId ||
       ["done", "cancelled"].includes(task.status) || !parent ||
-      !["failed", "timed_out"].includes(parent.status) || !parent.finishedAt ||
+      (!["failed", "timed_out"].includes(parent.status) &&
+        !(input.allowQuotaWait && await isPhaseQuotaWaitBeforeDispatchVerified(db, parent))) || !parent.finishedAt ||
       parent.runtimeMode !== "legacy" || parent.contextSnapshot?.issueId !== issueId ||
       (parent.nativeIssueId !== null && parent.nativeIssueId !== issueId) ||
       adapterExecutionControls.has(parent.id) ||

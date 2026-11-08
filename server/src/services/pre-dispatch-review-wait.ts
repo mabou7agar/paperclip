@@ -73,6 +73,22 @@ export async function isCancelledQuotaWaitBeforeDispatchVerified(db: Db, run: Ru
   return Boolean(predecessor) && await hasNoRetainedDispatchEvidence(db, run);
 }
 
+/** A control-plane quota gate may renew the same authorized message once;
+ * cancellation alone never proves provider work was absent. */
+export async function isPhaseQuotaWaitBeforeDispatchVerified(db: Db, run: Run): Promise<boolean> {
+  const cancellation = readRunCancellation(run.resultJson);
+  const receipt = run.resultJson?.executionRecovery as Record<string, unknown> | undefined;
+  if (run.runtimeMode !== "legacy" || run.status !== "cancelled" || run.errorCode !== "phase_quota_cooldown" ||
+      receipt?.kind !== "ai_connection_wait" || receipt.providerWorkStarted !== false ||
+      cancellation?.source !== "control_plane" || cancellation.expected !== true ||
+      !run.finishedAt || typeof run.resultJson?.retryAt !== "string" ||
+      !Number.isFinite(Date.parse(run.resultJson.retryAt)) || Date.parse(run.resultJson.retryAt) <= run.finishedAt.getTime() ||
+      run.processPid !== null || run.processGroupId !== null || run.processStartedAt !== null ||
+      run.nativeIssueId !== null || run.nativeSessionId !== null || run.sessionIdAfter !== null ||
+      run.resultJson.workspaceRestoreFailure === "restore_unsafe_archive" || hasRequiredWorkspaceRecovery(run.resultJson)) return false;
+  return hasNoRetainedDispatchEvidence(db, run);
+}
+
 async function hasNoRetainedDispatchEvidence(db: Db, run: Run): Promise<boolean> {
   const [coordinator] = await db.select({ id: nativeRunFinalizations.runId }).from(nativeRunFinalizations).where(and(
     eq(nativeRunFinalizations.companyId, run.companyId), eq(nativeRunFinalizations.runId, run.id),

@@ -503,6 +503,41 @@ const support = await getEmbeddedPostgresTestSupport();
     await expect(dispatchExplicitRetry(f, scheduled.run)).rejects.toThrow("continuation_user_authorization_missing");
   });
 
+  it.each(["verified", "edited_comment", "provider_launch", "unknown_renewal", "unrelated_cancel"])(
+    "renews an explicit user quota wait exactly once with %s evidence", async mode => {
+      const f = await seedTimedOutExplicitTurn(), renewal = new Date(f.now.getTime() + 60_000);
+      const [parent] = await db.update(heartbeatRuns).set({ status: "cancelled", errorCode: mode === "unrelated_cancel" ? "cancelled" : "phase_quota_cooldown",
+        processPid: null, processGroupId: null, processStartedAt: null, nativeIssueId: null, nativeSessionId: null, sessionIdAfter: null,
+        resultJson: { ...(mode === "unknown_renewal" ? {} : { retryAt: renewal.toISOString() }),
+          executionRecovery: { kind: "ai_connection_wait", providerWorkStarted: false },
+          cancellation: { source: "control_plane", expected: true, initiator: { type: "system" }, reason: "Quota wait", recordedAt: f.now.toISOString() } },
+      }).where(eq(heartbeatRuns.id, f.parent.id)).returning();
+      if (mode === "edited_comment") await db.update(issueComments).set({ body: "Changed instruction" }).where(eq(issueComments.id, f.commentId));
+      if (mode === "provider_launch") await appendHeartbeatRunEvent(db, { companyId: f.companyId, runId: parent.id, agentId: f.agentId,
+        eventType: PROCESS_START_REQUESTED });
+      const hb = heartbeatService(db), opts = { now: f.now, retryReason: "ai_connection_pool_wait", wakeReason: "phase_quota_reset", maxAttempts: 1, delayMs: 60_000 };
+      const [first, second] = await Promise.all([hb.scheduleBoundedRetry(parent.id, opts), hb.scheduleBoundedRetry(parent.id, opts)]);
+      if (mode !== "verified") {
+        expect(first.outcome).not.toBe("scheduled");
+        expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, parent.id))).toHaveLength(0);
+        return;
+      }
+      expect(first.outcome).toBe("scheduled");
+      if (first.outcome !== "scheduled") return;
+      expect(second).toMatchObject({ outcome: "scheduled", run: { id: first.run.id } });
+      expect(first.run.scheduledRetryAt).toEqual(renewal);
+      expect(first.run.contextSnapshot?.explicitUserContinuation).toEqual({ previousRunId: parent.id, commentId: f.commentId });
+      await expect(dispatchExplicitRetry(f, first.run)).resolves.toMatchObject({ interruptedRunId: parent.id });
+      expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, parent.id))).toHaveLength(1);
+      expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, f.issueId))).toHaveLength(2);
+      await db.update(heartbeatRuns).set({ status: "cancelled", finishedAt: f.now, errorCode: "phase_quota_cooldown", resultJson: parent.resultJson })
+        .where(eq(heartbeatRuns.id, first.run.id));
+      await db.update(issues).set({ executionRunId: first.run.id }).where(eq(issues.id, f.issueId));
+      expect(await hb.scheduleBoundedRetry(first.run.id, opts)).toMatchObject({ outcome: "retry_exhausted" });
+      expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, first.run.id))).toHaveLength(0);
+    },
+  );
+
   it("waits for the parent adapter controller even when no environment lease remains", async () => {
     const f = await seedTimedOutExplicitTurn();
     const heartbeat = heartbeatService(db);
