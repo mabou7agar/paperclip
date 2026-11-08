@@ -11,6 +11,7 @@ import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } fro
 const execute = vi.hoisted(() => vi.fn());
 vi.mock("../adapters/index.ts", async () => ({ ...await vi.importActual<typeof import("../adapters/index.ts")>("../adapters/index.ts"),
   getServerAdapter: () => ({ supportsLocalAgentJwt: false, execute }) }));
+import { isBoundedTaskContinuationMonitor, setTaskMonitorSchema } from "../services/issue-monitors.js";
 import { monitoringService, monitoringAlertId, isMonitoringWake } from "../services/monitoring.js";
 import { recoveryService } from "../services/recovery/index.js";
 import { heartbeatService } from "../services/heartbeat.js";
@@ -29,6 +30,18 @@ describe("monitoring execution boundary", () => {
     for (const reason of ["issue_commented", "issue_assigned", "provider_quota", "execution_review_participant_recovery", "issue_blockers_resolved"])
       expect(isMonitoringWake({ source: "automation", reason, context: { source: "workspace.finalize" } })).toBe(false);
     expect(isMonitoringWake({ source: "on_demand", reason: "issue_monitor_due" })).toBe(false);
+  });
+  it("requires explicit purpose, job identity and finite bounds for continuations", () => {
+    const monitor = { kind: "task_continuation", serviceName: "Owned job", externalRef: "job-stage",
+      nextCheckAt: "2027-01-01T12:00:00.000Z", timeoutAt: "2027-01-01T13:00:00.000Z", maxAttempts: 1, notes: "Read terminal result only" };
+    expect(isBoundedTaskContinuationMonitor(monitor)).toBe(true);
+    expect(setTaskMonitorSchema.parse({ idempotencyKey: "job-stage", monitor }).monitor?.kind).toBe("task_continuation");
+    for (const key of ["serviceName", "externalRef", "timeoutAt", "maxAttempts"]) {
+      const invalid = { ...monitor, [key]: null };
+      expect(isBoundedTaskContinuationMonitor(invalid)).toBe(false);
+      expect(() => setTaskMonitorSchema.parse({ idempotencyKey: "job-stage", monitor: invalid })).toThrow();
+    }
+    expect(isBoundedTaskContinuationMonitor({ ...monitor, kind: "external_service" })).toBe(false);
   });
   it("keys incidents by company and actual state", () => {
     const input = { companyId: "one", issueId: "task", kind: "dependency_ready" as const, fingerprint: "unchanged" };

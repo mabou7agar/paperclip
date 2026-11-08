@@ -3,6 +3,7 @@ import type { Db } from "@paperclipai/db";
 import { monitoringPolicySchema, PROVIDER_QUOTA_MONITOR_SERVICE_NAME, type MonitoringObservation } from "@paperclipai/shared";
 import { monitoringRepository } from "../repositories/monitoring.js";
 import { logActivity, publishActivity } from "./activity-log.js";
+import { isBoundedTaskContinuationMonitor } from "./issue-monitors.js";
 
 export function isMonitoringWake(input: { source?: string | null; reason?: string | null; context?: Record<string, unknown> }) {
   if (input.source === "on_demand") return false;
@@ -52,8 +53,22 @@ export function monitoringService(db: Db) {
       // Never replace the independent once-only quota-renewal contract.
       const issue = await repository.issue(input.companyId, input.issueId);
       if (!issue) return false;
-      const monitor = (issue.executionPolicy as { monitor?: { serviceName?: string } } | null)?.monitor;
+      const monitor = (issue.executionPolicy as { monitor?: Record<string, unknown> } | null)?.monitor;
       if (input.reason === "issue_monitor_due" && monitor?.serviceName === PROVIDER_QUOTA_MONITOR_SERVICE_NAME) return false;
+      if (input.reason === "issue_monitor_due" && input.context?.source === "issue.monitor" &&
+          input.context?.monitorKind === "task_continuation") {
+        // Admission reads the live policy; queued dispatch reads the consumed
+        // monitor receipt. Never trust a purpose flag supplied by a wake alone.
+        const stored = monitor ?? (issue.executionState as { monitor?: Record<string, unknown> } | null)?.monitor;
+        if (isBoundedTaskContinuationMonitor(stored) &&
+            (issue.monitorNextCheckAt
+              ? input.context.nextCheckAt === issue.monitorNextCheckAt.toISOString()
+              : stored?.status === "triggered") &&
+            stored?.serviceName === input.context.serviceName &&
+            stored?.timeoutAt === input.context.timeoutAt &&
+            stored?.maxAttempts === input.context.maxAttempts &&
+            input.context.monitorAttemptCount === (issue.monitorNextCheckAt ? issue.monitorAttemptCount + 1 : issue.monitorAttemptCount)) return false;
+      }
       return observe({ companyId: input.companyId, issueId: issue.id, kind: "no_execution_path",
         fingerprint: JSON.stringify([input.reason, issue.status, issue.assigneeAgentId]) });
     },

@@ -1,4 +1,5 @@
 import { monitoringService } from "../monitoring.js";
+import { isBoundedTaskContinuationMonitor } from "../issue-monitors.js";
 import {
   issues,
   issueComments,
@@ -572,6 +573,7 @@ export function createHeartbeatScheduling(
     });
     const recoveryPolicy = monitorRecoveryPolicy(monitor);
     const monitorMetadata = {
+      monitorKind: monitor?.kind ?? null,
       serviceName: monitor?.serviceName ?? null,
       timeoutAt: monitor?.timeoutAt ?? null,
       maxAttempts: monitor?.maxAttempts ?? null,
@@ -937,8 +939,9 @@ export function createHeartbeatScheduling(
     let skipped = 0;
 
     for (const due of dueMonitors) {
-      // Provider renewal is a bounded execution continuation, not polling.
+      // Explicit work continuations retain all existing claim/attempt guards.
       if (parseObject(parseObject(due.executionPolicy).monitor).serviceName !== PROVIDER_QUOTA_MONITOR_SERVICE_NAME &&
+        !isBoundedTaskContinuationMonitor(parseObject(due.executionPolicy).monitor) &&
         await monitoringService(db).observe({ companyId: due.companyId, issueId: due.id, kind: "monitor_due",
           fingerprint: JSON.stringify([due.assigneeAgentId, due.monitorNextCheckAt?.toISOString(), due.monitorNotes]) })) {
         skipped += 1;

@@ -1,0 +1,27 @@
+meta {
+  name: Get Task Continuation
+  type: http
+  seq: 4
+}
+
+get {
+  url: {{baseUrl}}/api/issues/{{issueId}}
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{apiToken}}
+}
+
+tests {
+  test("task context retains bounded continuation metadata", function () {
+    expect(res.status).to.equal(200);
+    const monitor = res.body.executionPolicy?.monitor ?? res.body.executionState?.monitor;
+    if (monitor?.kind === "task_continuation") {
+      expect(monitor.serviceName).to.be.a("string");
+      expect(monitor.timeoutAt).to.be.a("string");
+      expect(monitor.maxAttempts).to.be.a("number");
+    }
+  });
+}
