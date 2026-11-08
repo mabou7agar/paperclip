@@ -174,6 +174,18 @@ export const heartbeatRuns = pgTable(
       table.companyId,
       table.createdAt.desc(),
     ),
+    // Legacy issue attribution participates in an OR with the top-level issueId.
+    // Index both arms so redaction reads never scan every large run context.
+    companyEmbeddedIssueIdx: index("heartbeat_runs_company_embedded_issue_idx").on(
+      table.companyId,
+      sql`(${table.contextSnapshot} -> 'paperclipIssue' ->> 'id')`,
+    ),
+    companyConnectionQuotaIdx: index("heartbeat_runs_company_connection_quota_idx").on(
+      table.companyId,
+      sql`(${table.contextSnapshot} -> 'aiConnection' ->> 'connectionId')`,
+      table.finishedAt.desc().nullsFirst(),
+      table.id.desc().nullsFirst(),
+    ),
     companyCtxIssueCreatedIdx: index("heartbeat_runs_company_ctx_issue_created_idx").on(
       table.companyId,
       sql`(${table.contextSnapshot} ->> 'issueId')`,

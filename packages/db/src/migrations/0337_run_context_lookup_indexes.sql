@@ -1,0 +1,4 @@
+-- paperclip:migration-safety-ignore large-create-index-not-concurrently: Drizzle runs migrations transactionally. Prebuild these exact indexes CONCURRENTLY on busy installations; IF NOT EXISTS then adopts them without rebuilding. Fresh installations have an empty run table.
+CREATE INDEX IF NOT EXISTS "heartbeat_runs_company_embedded_issue_idx" ON "heartbeat_runs" USING btree ("company_id",("context_snapshot" -> 'paperclipIssue' ->> 'id'));--> statement-breakpoint
+-- paperclip:migration-safety-ignore large-create-index-not-concurrently: Drizzle runs migrations transactionally. Prebuild these exact indexes CONCURRENTLY on busy installations; IF NOT EXISTS then adopts them without rebuilding. Fresh installations have an empty run table.
+CREATE INDEX IF NOT EXISTS "heartbeat_runs_company_connection_quota_idx" ON "heartbeat_runs" USING btree ("company_id",("context_snapshot" -> 'aiConnection' ->> 'connectionId'),"finished_at" DESC NULLS FIRST,"id" DESC NULLS FIRST);
