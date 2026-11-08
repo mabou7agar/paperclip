@@ -24,6 +24,7 @@ import { CONVERSATION_CONTINUATION_POLICY } from "./conversation-continuation.js
 import { buildExecutionContinuation } from "./execution-continuation.js";
 import { heartbeatService, persistHeartbeatRunProcessMetadata, type HeartbeatEnvironmentRuntime } from "./heartbeat.js";
 import { getExecutionBlocker } from "./execution-blocker.js";
+import { legacyExecutionNeedsReconciliationWithEvidence } from "./legacy-execution-recovery.js";
 import { createDurableChatWakeupRequest } from "./durable-chat-wakeup.js";
 import { recordNativeFinalizationFailure } from "./native-runtime/native-run-finalizer.js";
 const support = await getEmbeddedPostgresTestSupport();
@@ -874,6 +875,58 @@ const support = await getEmbeddedPostgresTestSupport();
     }).where(eq(heartbeatRuns.id, f.sourceRunId));
     return f;
   }
+
+  async function seedCancelledQuotaWait() {
+    const f = await seedCancelledReviewWait(), predecessorId = randomUUID();
+    await db.insert(heartbeatRuns).values({ id: predecessorId, companyId: f.companyId, agentId: f.agentId,
+      status: "cancelled", errorCode: "phase_quota_cooldown", contextSnapshot: { issueId: f.issueId },
+      resultJson: { executionRecovery: { kind: "ai_connection_wait", providerWorkStarted: false } },
+    });
+    await db.update(heartbeatRuns).set({ errorCode: "cancelled", retryOfRunId: predecessorId,
+      scheduledRetryReason: "ai_connection_pool_wait", scheduledRetryAttempt: 1,
+      scheduledRetryAt: new Date("2026-09-11T12:00:00Z"),
+      resultJson: { cancellation: { source: "control_plane", expected: true,
+        initiator: { type: "system" }, reason: "Correct unverified quota deadline", recordedAt: "2026-09-11T09:59:59Z" },
+        startupCancellation: { requestedAt: "2026-09-11T09:59:59Z", beforeNativeSelection: false } },
+    }).where(eq(heartbeatRuns.id, f.sourceRunId));
+    return f;
+  }
+
+  it("admits a cancelled, never-eligible quota wait only once for new owner input", async () => {
+    const f = await seedCancelledQuotaWait();
+    const [source] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.sourceRunId));
+    expect(await legacyExecutionNeedsReconciliationWithEvidence(db, source)).toBe(false);
+    expect(await db.transaction(tx => admitExplicitNativeContinuation({ ...f, db: tx as unknown as typeof db, actorType: "system" }))).toBeNull();
+    expect(await admit(f)).toMatchObject({ previousRunId: f.sourceRunId, commentId: f.commentId });
+    expect(await admit(f)).toBeNull();
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.sourceRunId)))[0]).toMatchObject({
+      status: "cancelled", resultJson: source.resultJson,
+    });
+  });
+
+  it.each(["launch", "provider", "cleanup", "late_cancel", "missing_parent", "process"])(
+    "retains a cancelled quota wait with contradictory %s evidence", async kind => {
+      const f = await seedCancelledQuotaWait();
+      if (kind === "launch" || kind === "provider") await appendHeartbeatRunEvent(db, {
+        companyId: f.companyId, agentId: f.agentId, runId: f.sourceRunId,
+        eventType: kind === "launch" ? PROCESS_START_REQUESTED : "provider.event",
+      });
+      if (kind === "cleanup") await db.insert(environmentLeases).values({ companyId: f.companyId,
+        heartbeatRunId: f.sourceRunId, provider: "local", status: "pending_cleanup" });
+      if (kind === "late_cancel") await db.update(heartbeatRuns).set({ scheduledRetryAt: new Date("2026-09-11T09:00:00Z") }).where(eq(heartbeatRuns.id, f.sourceRunId));
+      if (kind === "missing_parent") await db.update(heartbeatRuns).set({ retryOfRunId: null }).where(eq(heartbeatRuns.id, f.sourceRunId));
+      if (kind === "process") await db.update(heartbeatRuns).set({ processPid: process.pid }).where(eq(heartbeatRuns.id, f.sourceRunId));
+      try {
+        const [source] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.sourceRunId));
+        expect(await legacyExecutionNeedsReconciliationWithEvidence(db, source)).toBe(true);
+        expect(await admit(f)).toBeNull();
+      } finally {
+        // The suite also tests a company-wide cleanup sweep. This conflicting
+        // fixture must not become work owned by a later test's fake provider.
+        if (kind === "cleanup") await db.delete(environmentLeases).where(eq(environmentLeases.heartbeatRunId, f.sourceRunId));
+      }
+    },
+  );
 
   it("keeps provider diagnostics out of admission evidence and preserves absent results", async () => {
     const f = await seedCancelledReviewWait();

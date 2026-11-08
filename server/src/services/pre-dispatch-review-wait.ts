@@ -2,6 +2,8 @@ import { and, eq, inArray, isNotNull, or } from "drizzle-orm";
 import { environmentLeases, heartbeatRunEvents, heartbeatRuns, nativeRunFinalizations, type Db } from "@paperclipai/db";
 import { PROCESS_IDENTITY_RECORDED, PROCESS_START_REQUESTED } from "./native-local-process-stop.js";
 import { hasRemoteTerminationReceipt } from "./remote-execution-termination.js";
+import { readRunCancellation } from "./run-cancellation.js";
+import { hasRequiredWorkspaceRecovery } from "./workspace-restore-recovery-state.js";
 
 type Run = typeof heartbeatRuns.$inferSelect;
 type DispatchFields = "startedAt" | "runtimeModeResolvedAt" | "processPid" | "processGroupId" |
@@ -40,6 +42,38 @@ export function isPreDispatchReviewWait(
  * checked against the same evidence that gates explicit user admission. */
 export async function isPreDispatchReviewWaitVerified(db: Db, run: Run): Promise<boolean> {
   if (!isPreDispatchReviewWait(run)) return false;
+  return hasNoRetainedDispatchEvidence(db, run);
+}
+
+/** Cancelling a future quota wait does not stop a provider: that retry has
+ * never become eligible for dispatch. Missing PIDs alone are insufficient. */
+export function isCancelledQuotaWaitBeforeDispatch(run: Run): boolean {
+  const cancellation = readRunCancellation(run.resultJson);
+  const requestedAt = (run.resultJson?.startupCancellation as Record<string, unknown> | undefined)?.requestedAt;
+  return run.runtimeMode === "legacy" && run.status === "cancelled" && run.errorCode === "cancelled" &&
+    run.scheduledRetryReason === "ai_connection_pool_wait" && run.scheduledRetryAttempt > 0 &&
+    typeof run.retryOfRunId === "string" && run.startedAt === null && run.runtimeModeResolvedAt === null &&
+    run.executionStage === null && run.controllerBootId === null && run.controllerLeaseExpiresAt === null &&
+    run.processPid === null && run.processGroupId === null && run.processStartedAt === null &&
+    run.nativeIssueId === null && run.nativeSessionId === null && run.sessionIdAfter === null &&
+    run.finishedAt instanceof Date && run.scheduledRetryAt instanceof Date &&
+    run.finishedAt.getTime() < run.scheduledRetryAt.getTime() &&
+    cancellation?.expected === true && ["operator", "control_plane"].includes(cancellation.source) &&
+    Date.parse(cancellation.recordedAt) <= run.finishedAt.getTime() &&
+    typeof requestedAt === "string" && Date.parse(requestedAt) <= run.finishedAt.getTime() &&
+    run.resultJson?.workspaceRestoreFailure !== "restore_unsafe_archive" && !hasRequiredWorkspaceRecovery(run.resultJson);
+}
+
+export async function isCancelledQuotaWaitBeforeDispatchVerified(db: Db, run: Run): Promise<boolean> {
+  if (!isCancelledQuotaWaitBeforeDispatch(run)) return false;
+  const [predecessor] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+    eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.agentId, run.agentId),
+    eq(heartbeatRuns.id, run.retryOfRunId!),
+  )).limit(1);
+  return Boolean(predecessor) && await hasNoRetainedDispatchEvidence(db, run);
+}
+
+async function hasNoRetainedDispatchEvidence(db: Db, run: Run): Promise<boolean> {
   const [coordinator] = await db.select({ id: nativeRunFinalizations.runId }).from(nativeRunFinalizations).where(and(
     eq(nativeRunFinalizations.companyId, run.companyId), eq(nativeRunFinalizations.runId, run.id),
   )).limit(1);
