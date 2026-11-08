@@ -1,5 +1,5 @@
 /** Production monitor tool; timers and wake delivery belong to Paperclip. */
-const description = "Schedule, replace, or clear a one-shot task monitor. Omit taskId for your current task; other tasks must also be assigned to you and in progress or review. Supply a future nextCheckAt and notes describing the next check, or monitor: null to clear. A successful receipt reports the persisted monitor; a replay reports its current state without re-arming it. After scheduling your current task, end the turn with paperclip_finish: yielded and continuation.kind monitor. Paperclip will wake you with issue_monitor_due; do not sleep, poll, mark done, or use call_api for this wait.";
+const description = "Schedule, replace, or clear a one-shot task monitor. Omit taskId for your current task; other tasks must also be assigned to you and in progress or review. Supply a future nextCheckAt and notes describing the next check, or monitor: null to clear. A successful receipt reports the persisted monitor; a replay reports its current state without re-arming it. After scheduling your current task, end the turn with paperclip_finish: yielded and continuation.kind monitor. For an owned job result under alert-only monitoring, use kind task_continuation with serviceName, stable externalRef, timeoutAt and finite maxAttempts; this authorizes a result check, never re-execution. Paperclip will wake you with issue_monitor_due; do not sleep, poll, mark done, or use call_api for this wait.";
 
 export const setTaskMonitorInputSchema = {
   type: "object",
@@ -15,7 +15,7 @@ export const setTaskMonitorInputSchema = {
       properties: {
         nextCheckAt: { type: "string", description: "Future UTC timestamp for the next check. This is one shot, not a recurring interval." },
         notes: { type: "string", minLength: 1, maxLength: 500, description: "What to check on the next run; do not include secrets." },
-        kind: { type: ["string", "null"], enum: ["external_service", null] },
+        kind: { type: ["string", "null"], enum: ["external_service", "task_continuation", null] },
         serviceName: { type: ["string", "null"], minLength: 1, maxLength: 120 },
         externalRef: { type: ["string", "null"], minLength: 1, maxLength: 500 },
         timeoutAt: { type: ["string", "null"], description: "Optional deadline later than nextCheckAt." },
