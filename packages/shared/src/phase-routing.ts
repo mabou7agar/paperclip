@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { aiConnectionBindingSchema, isAiConnectionCompatible } from "./ai-connections.js";
 import { AGENT_ROLES } from "./constants.js";
+import { connectionUsageCapsSchema } from "./connection-usage-caps.js";
 
 export const EXECUTION_RESPONSIBILITIES = ["planning", "implementation", "review"] as const;
 export const executionResponsibilitySchema = z.enum(EXECUTION_RESPONSIBILITIES);
@@ -41,6 +42,7 @@ export const phaseRoutingSchema = z.object({
   /** Connection health checks do not run agents. Omitted/0 preserves a manual hold. */
   apiQuotaRecheckSeconds: z.number().int().min(0).max(86400).refine(v => v === 0 || v >= 300).optional(),
   apiQuotaRecheckOverrides: z.record(z.string().uuid(), z.number().int().min(0).max(86400).refine(v => v === 0 || v >= 300)).optional(),
+  connectionUsageCaps: z.record(z.string().uuid(), connectionUsageCapsSchema).optional(),
   unknownResetCooldownSeconds: z.number().int().min(0).max(86_400).refine(value => value === 0 || value >= 60, "Use 0 to wait for confirmation, or at least 60 seconds").default(3_600),
 }).strict();
 

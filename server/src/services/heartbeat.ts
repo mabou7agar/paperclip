@@ -1,3 +1,4 @@
+import { ConnectionUsageCapReached } from "./connection-usage-caps.js";
 import { selectHeartbeatEnvironment } from "./heartbeat/environment-selection.js";
 import { phaseRouteDispatchSchema, phaseRouteAdapterConfig, phaseRouteTaskKey, PHASE_QUOTA_RESET_WAKE_REASON } from "./phase-routing.js";
 import { executionPhaseForWorkMode } from "@paperclipai/shared";
@@ -2146,31 +2147,33 @@ export function heartbeatService(
       if (claimedAgentAdapter && claimedAgentAdapter !== agent.adapterType) {
         throw new Error("Agent adapter changed during startup; start a new turn with the updated agent.");
       }
-      if (phaseRoute && !phaseRoute.profile) {
-        if (!phaseRoute.retryAt) throw new ConfigurationIncompleteFailure(
-          phaseRoute.notes.join("; ") || "Configure the phase routing connection",
-          { configurationIncomplete: { reason: phaseRoute.waitReason === "quota_reset_unknown" ? "ai_connection_quota_reset_unknown" : "ai_connection_unavailable", actionUrl: `/agents/${agent.id}/runtime` } },
-        );
+      const waitForConnectionCapacity = async (retryAt: string, reason: string, notes: string[], usageCapWait = false) => {
         const now = new Date();
-        const reason = "All connections for this phase are on quota cooldown";
         const cancelled = await setRunStatusIfRunning(run.id, "cancelled", {
           finishedAt: now, error: reason, errorCode: "phase_quota_cooldown",
-          resultJson: { retryAt: phaseRoute.retryAt,
+          resultJson: { retryAt: retryAt, ...(usageCapWait?{connectionUsageCapWait:true}:{}),
             executionRecovery: { kind: "ai_connection_wait", providerWorkStarted: false },
             cancellation: { source: "control_plane", expected: true, initiator: { type: "system" }, reason, recordedAt: now.toISOString() },
           },
         });
         if (cancelled.updated) {
           await setWakeupStatus(run.wakeupRequestId, "cancelled", { finishedAt: now, error: reason });
-          await appendRunEvent(cancelled.run ?? run, { eventType: "lifecycle", stream: "system", level: "info", message: reason, payload: { phase: phaseRoute.phase, retryAt: phaseRoute.retryAt, notes: phaseRoute.notes } });
+          await appendRunEvent(cancelled.run ?? run, { eventType: "lifecycle", stream: "system", level: "info", message: reason, payload: { phase: phaseRoute?.phase, retryAt: retryAt, notes } });
           const retry = await scheduleBoundedRetryForRun(cancelled.run ?? run, agent, {
             now,
             retryReason: AI_CONNECTION_POOL_WAIT_RETRY_REASON, wakeReason: PHASE_QUOTA_RESET_WAKE_REASON,
-            maxAttempts: 1, delayMs: Math.max(1_000, Date.parse(phaseRoute.retryAt) - now.getTime()),
+            maxAttempts: 1, delayMs: Math.max(1_000, Date.parse(retryAt) - now.getTime()),
           });
           if (retry.outcome !== "scheduled") await releaseIssueExecutionAndPromote(cancelled.run ?? run, { suppressImmediateRecovery: true });
           await finalizeAgentStatus(agent.id, "cancelled");
         }
+      };
+      if (phaseRoute && !phaseRoute.profile) {
+        if (!phaseRoute.retryAt) throw new ConfigurationIncompleteFailure(
+          phaseRoute.notes.join("; ") || "Configure the phase routing connection",
+          { configurationIncomplete: { reason: phaseRoute.waitReason === "quota_reset_unknown" ? "ai_connection_quota_reset_unknown" : "ai_connection_unavailable", actionUrl: `/agents/${agent.id}/runtime` } },
+        );
+        await waitForConnectionCapacity(phaseRoute.retryAt,"All connections for this phase are on quota cooldown or configured usage caps",phaseRoute.notes,phaseRoute.waitReason==="usage_cap");
         return;
       }
       if (phaseRoute?.profile) {
@@ -3181,8 +3184,12 @@ export function heartbeatService(
       readFailureReportSecrets = () => collectRunFailureSecretValues(resolvedConfig.env, secretKeys);
       if (aiBinding) {
         try {
-          managedAiRuntime = await prepareManagedAiRuntime(db, { companyId: agent.companyId, agentId: agent.id, responsibleUserId, adapterType: agent.adapterType, binding: aiBinding, config: resolvedConfig });
+          managedAiRuntime = await prepareManagedAiRuntime(db, { companyId: agent.companyId, agentId: agent.id, responsibleUserId, adapterType: agent.adapterType, binding: aiBinding, config: resolvedConfig, enforceUsageCaps: !phaseRoute && !persistedNativeExecutionInput });
         } catch (error) {
+          if (error instanceof ConnectionUsageCapReached && error.status.retryAt && !persistedNativeExecutionInput) {
+            await waitForConnectionCapacity(error.status.retryAt,error.message,["The configured connection cap will renew automatically."],true);
+            return;
+          }
           // Only fresh executions can receive a pre-provider wait receipt. A
           // persisted native input may already have provider effects to recover.
           if (isAiConnectionBusy(error) && !persistedNativeExecutionInput) {

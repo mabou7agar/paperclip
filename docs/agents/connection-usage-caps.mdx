@@ -1,0 +1,20 @@
+---
+title: AI connection usage caps
+description: Shared rolling token and API cost caps with fallback routing and retained task context.
+---
+
+Company Settings → Default models by responsibility → AI connection usage caps configures optional token and USD caps for each AI connection. The windows are rolling five hours, 24 hours and seven days. Blank fields disable their cap; no numeric limits are enabled automatically. The same connection's usage is shared across every agent and grant. Agent routing overrides cannot raise or bypass these company-owned caps.
+
+Caps govern admission of new runs. Running provider work is allowed to finish and can exceed a threshold. This is an application usage control, not a guaranteed provider billing ceiling. Token totals include ordinary input, cache reads and output; cache writes are already part of input and are not counted twice. Subscription fees are excluded from API cost, while metered API and subscription overage charges count. Existing report-only usage-health alerts remain report-only.
+
+The control plane reads immutable connection attribution across agent charges, decision requests, fast responses and quota checks. Mirrored heartbeat usage is excluded once its ledger charge exists. Pending heartbeat usage remains visible. Migration 0340 archives connection attribution on cost events, outside their receipt fingerprint, so removing a source run cannot reset the cap. Historical attribution is backfilled only from matching, company-scoped source records. Unattributable historical usage and usage outside Paperclip cannot be inferred.
+
+Missing usage is never assumed to be free. The default `onUnknownUsage: "report"` retains report-only handling: known usage still triggers caps, while incomplete totals are displayed as an explicit lower bound and uncertainty. Enable **Hold this connection when usage or pricing is unknown** (`onUnknownUsage: "hold"`) to prevent new runs on that connection when the enabled metric cannot be measured. This applies independently to token counts and API pricing. Other eligible fallbacks remain available. Estimates retain their existing pricing provenance and are not represented as invoices.
+
+Routing preserves configured account priority, skips exhausted connections and selects the next authorized fallback. If all fallbacks are unavailable, it computes the earliest time any complete profile is eligible. Each connection must satisfy all its exceeded windows and its provider cooldown. A saved continuation retains its task, context and retry count and is promoted once through normal admission. No provider call is made merely to evaluate an application cap.
+
+Saving a cap change re-evaluates existing capacity waits. The execution-control sweep also reconciles these saved waits after late accounting or window expiry; unchanged limits create no agent wakes. Genuine credential, dependency, review and owner-approval gates remain enforced. Review participants and native session identity rules are unchanged.
+
+The existing versioned `PUT /api/v1/companies/:companyId/phase-routing` accepts `connectionUsageCaps`, keyed by connection UUID. `GET /api/v1/companies/:companyId/phase-routing/usage` returns the configured connection's window totals, availability and renewal timestamps. Both APIs require board/company access; viewing cap counters and changing settings require connection-management permission. Bruno examples are in `/bruno/Phase Routing`.
+
+On busy installations, add the nullable `cost_events.connection_id` archival column and prebuild the exact migration 0340 index concurrently before applying the transactional migration. No existing cost amount, receipt fingerprint or retry budget is changed.

@@ -5,6 +5,7 @@ import { phaseRoutingApi } from "@/api/phase-routing";
 import { useTranslation } from "@/i18n";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { ConnectionUsageCapsField } from "./ConnectionUsageCapsField";
 import {
   PhaseRoutingField,
   recommendedPhaseRouting,
@@ -33,6 +34,9 @@ export function CompanyPhaseRoutingSettings({
     onSuccess: (result) => {
       client.setQueryData(queryKey, result);
       setDraft(null);
+      void client.invalidateQueries({
+        queryKey: ["phase-routing-usage", companyId],
+      });
     },
   });
   return (
@@ -93,6 +97,11 @@ export function CompanyPhaseRoutingSettings({
             )}
             <p className="text-xs text-muted-foreground">{t("apiQuotaHelp")}</p>
           </fieldset>
+          <ConnectionUsageCapsField
+            companyId={companyId}
+            value={policy}
+            onChange={setDraft}
+          />
           {save.error && (
             <p role="alert" className="text-sm text-destructive">
               {save.error.message}

@@ -31,7 +31,14 @@ body:json {
     "roleResponsibilities": { "cto": "planning" },
     "unknownResetCooldownSeconds": 3600,
     "apiQuotaRecheckSeconds": 1800,
-    "apiQuotaRecheckOverrides": {}
+    "apiQuotaRecheckOverrides": {},
+    "connectionUsageCaps": {
+      "{{codexConnectionId}}": {
+        "rolling5h": {"tokens": 1000000},
+        "daily": {"tokens": 4000000},
+        "weekly": {"tokens": 20000000}
+      }
+    }
   }
 }
 

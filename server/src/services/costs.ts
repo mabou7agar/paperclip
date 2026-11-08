@@ -1,4 +1,5 @@
 import { usageHealthService } from "./usage-health.js";
+import { costConnectionAttribution } from "../repositories/cost-connection-attribution.js";
 import { receiptFingerprint } from "./receipt-fingerprint.js";
 import { agentAvatarUrl, resolveAgentAppearance, createCostEventSchema, createServiceCostEventSchema, normalizeCents, isUuidLike, type MoneyInput, type CostByUserReport } from "@paperclipai/shared";
 import { and, desc, eq, gte, inArray, isNotNull, isNull, lt, lte, ne, sql } from "drizzle-orm";
@@ -126,10 +127,12 @@ export async function createCostEventInTransaction(db: Db, companyId: string, da
     if (row.companyId !== companyId) throw unprocessable(`${label} does not belong to company`);
   }
   let subscriptionId: string | null = null;
+  let connectionId: string | null = null;
   if (values.heartbeatRunId) {
-    const [run] = await db.select({ agentId: heartbeatRuns.agentId, context: heartbeatRuns.contextSnapshot }).from(heartbeatRuns).where(eq(heartbeatRuns.id, values.heartbeatRunId));
+    const [run] = await db.select({ agentId: heartbeatRuns.agentId, context: sql<Record<string,unknown> | null>`${heartbeatRuns.contextSnapshot}->'aiConnection'` }).from(heartbeatRuns).where(eq(heartbeatRuns.id, values.heartbeatRunId));
     if (run.agentId !== values.agentId) throw unprocessable("Heartbeat run does not belong to agent");
-    const attribution = run.context?.aiConnection as { subscriptionId?: unknown; provider?: unknown } | undefined;
+    const attribution = run.context as { subscriptionId?: unknown; provider?: unknown; connectionId?:unknown } | null;
+    if(typeof attribution?.connectionId === "string" && isUuidLike(attribution.connectionId))connectionId=attribution.connectionId;
     if (SUBSCRIPTION_BILLING_TYPES.includes(values.billingType as typeof SUBSCRIPTION_BILLING_TYPES[number]) && attribution?.provider === values.provider && typeof attribution.subscriptionId === "string" && isUuidLike(attribution.subscriptionId)) {
       const [account] = await db.select({ id: aiSubscriptions.id }).from(aiSubscriptions).where(and(eq(aiSubscriptions.id, attribution.subscriptionId), eq(aiSubscriptions.companyId, companyId), eq(aiSubscriptions.provider, values.provider)));
       subscriptionId = account?.id ?? null;
@@ -137,7 +140,8 @@ export async function createCostEventInTransaction(db: Db, companyId: string, da
   }
   // Server-derived attribution stays outside the immutable receipt fingerprint;
   // replaying a receipt must not depend on later account metadata changes.
-  const [event] = await db.insert(costEvents).values({ ...values, subscriptionId, costCents: sql`${values.costCents}::numeric`, reportedCostCents: values.costCents, id: data.id, companyId, receiptHash }).returning();
+  if(!values.heartbeatRunId)connectionId = await costConnectionAttribution(db,companyId,values);
+  const [event] = await db.insert(costEvents).values({ ...values, subscriptionId, connectionId, costCents: sql`${values.costCents}::numeric`, reportedCostCents: values.costCents, id: data.id, companyId, receiptHash }).returning();
   await updateMonthlySpendProjections(db, companyId, event.agentId, values.costCents, event.occurredAt);
   // Separately reported charges linked to an already-accounted run contribute
   // to lifetime totals too. Before acknowledgement, accountRunCost includes

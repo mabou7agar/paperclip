@@ -14,6 +14,7 @@ import {
 } from "@paperclipai/shared";
 import { managedProviderRouting } from "./ai-provider-routing.js";
 import { aiConnectionService } from "./ai-connections.js";
+import { connectionUsageCapsService } from "./connection-usage-caps.js";
 import { subscriptionService } from "./subscriptions.js";
 import { refreshSubscriptionConnection } from "./subscription-refresh.js";
 import { secretService } from "./secrets.js";
@@ -189,6 +190,7 @@ export async function prepareManagedAiRuntime(
     allowUninstalledPersonal?: boolean;
     allowUninstalledShared?: boolean;
     allowLegacyValidation?: boolean;
+    enforceUsageCaps?: boolean;
     config: Record<string, unknown>;
   },
 ) {
@@ -222,6 +224,7 @@ export async function prepareManagedAiRuntime(
     runnerProvider: input.config.provider,
     acpxAgent: input.config.acpxAgent,
   });
+  if (input.enforceUsageCaps) await connectionUsageCapsService(db).assertAvailable(input.companyId,selection.connection.id);
   const subscriptionFile =
     selection.attribution.method === "subscription" &&
     input.binding.provider !== "anthropic";

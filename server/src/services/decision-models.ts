@@ -1,3 +1,4 @@
+import { connectionUsageCapsService } from "./connection-usage-caps.js";
 import { randomUUID } from "node:crypto";
 import { and, desc, eq, gte, lt, lte, or, sql } from "drizzle-orm";
 import {
@@ -201,6 +202,7 @@ export function decisionModelService(db: Db, options: { provider?: typeof runDec
         .where(and(eq(companySecrets.companyId, context.companyId), eq(companySecrets.id, credentialSnapshot.id))).for("share");
       if (!currentSecret || currentSecret.status !== "active" || currentSecret.version !== credentialSnapshot.version)
         return { reason: "connection_unavailable" as const };
+      if ((await connectionUsageCapsService(tx).check(context.companyId,current.connection.connection.id)).blocked) return { reason: "budget_blocked" as const };
       const budgets = budgetServiceInTransaction(tx, publications);
       const block = await budgets.getInvocationBlock(context.companyId, current.agentId, { projectId: current.projectId });
       const [company] = await tx.select({ status: companies.status }).from(companies).where(eq(companies.id, context.companyId));

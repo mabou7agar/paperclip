@@ -2875,6 +2875,7 @@ export type { AgentLifecycleRequest, AgentLifecycleResult } from "./types/agent-
 
 export * from "./fast-response.js";
 export * from "./phase-routing.js";
+export * from "./connection-usage-caps.js";
 
 export * from "./usage-health.js";
 export * from "./monitoring-policy.js";

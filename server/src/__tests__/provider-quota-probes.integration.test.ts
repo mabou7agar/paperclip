@@ -15,6 +15,7 @@ import { and, eq, sql } from "drizzle-orm";
 import {
   agents,
   companies,
+  costEvents,
   companyPhaseRouting,
   connectionGrants,
   createDb,
@@ -36,6 +37,10 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../services/ai-connections.js", () => ({
   aiConnectionService: () => mocks,
 }));
+import { connectionUsageCapsService } from "../services/connection-usage-caps.js";
+import { connectionUsageRepository } from "../repositories/connection-usage.js";
+import { connectionCapacityRecoveryService } from "../services/connection-capacity-recovery.js";
+import { phaseRoutingService } from "../services/phase-routing.js";
 import { providerQuotaProbeService } from "../services/provider-quota-probes.js";
 import { providerQuotaProbeRepository } from "../repositories/provider-quota-probes.js";
 import { providerQuotaRepository } from "../repositories/provider-quota.js";
@@ -222,6 +227,264 @@ const support = await getEmbeddedPostgresTestSupport();
           usage: { input_tokens: 14, output_tokens: 5 },
         }),
       );
+    it("shares account usage across agents and grants without double counting mirrored receipts or cache writes", async () => {
+      const f = await fixture();
+      await db
+        .update(heartbeatRuns)
+        .set({
+          status: "succeeded",
+          errorCode: null,
+          usageJson: {
+            inputTokens: 999,
+            cacheWriteTokens: 900,
+            cachedInputTokens: 100,
+            outputTokens: 999,
+            billingType: "metered_api",
+          },
+        })
+        .where(eq(heartbeatRuns.id, f.sourceId));
+      await db.insert(costEvents).values({
+        companyId: f.companyId,
+        agentId: f.agentId,
+        heartbeatRunId: f.sourceId,
+        connectionId: f.connectionId,
+        provider: "anthropic",
+        model: "test-model",
+        billingType: "metered_api",
+        costStatus: "reported",
+        inputTokens: 100,
+        cachedInputTokens: 200,
+        outputTokens: 10,
+        costCents: 25,
+        occurredAt: new Date(f.now.getTime() - 1000),
+      });
+      await db.insert(providerQuotaProbes).values({
+        companyId: f.companyId,
+        connectionId: f.connectionId,
+        grantId: randomUUID(),
+        model: "test-model",
+        startedAt: new Date(f.now.getTime() - 500),
+        nextCheckAt: f.now,
+        outcome: "available",
+        usage: {
+          inputTokens: 14,
+          outputTokens: 5,
+          cachedInputTokens: 0,
+          cacheWriteTokens: 0,
+        },
+      });
+      const secondAgent = randomUUID();
+      await db.insert(agents).values({
+        id: secondAgent,
+        companyId: f.companyId,
+        name: "Second worker",
+        role: "engineer",
+        adapterType: "codex_local",
+      });
+      await db.insert(costEvents).values({
+        companyId: f.companyId,
+        agentId: secondAgent,
+        connectionId: f.connectionId,
+        provider: "anthropic",
+        model: "test-model",
+        billingType: "metered_api",
+        costStatus: "reported",
+        inputTokens: 20,
+        outputTokens: 5,
+        costCents: 10,
+        occurredAt: new Date(f.now.getTime() - 1000),
+      });
+      const observations = await connectionUsageRepository(db).observations(
+        f.companyId,
+        f.connectionId,
+        new Date(f.now.getTime() - 86400000),
+        f.now,
+      );
+      expect(observations.reduce((n, r) => n + (r.tokens ?? 0), 0)).toBe(354);
+      expect(
+        await connectionUsageRepository(db).owns(randomUUID(), [
+          f.connectionId,
+        ]),
+      ).toBe(false);
+      const status = await connectionUsageCapsService(db).check(
+        f.companyId,
+        f.connectionId,
+        f.now,
+        { daily: { tokens: 300 } },
+      );
+      expect(status.blocked).toBe(true);
+      expect(status.windows[0].tokens).toBe(354);
+      expect(
+        (
+          await connectionUsageCapsService(db).check(
+            f.companyId,
+            f.connectionId,
+            f.now,
+            { daily: { apiCostUsd: "1" } },
+          )
+        ).windows[0].apiCostUsd,
+      ).toBeNull();
+      await db
+        .update(costEvents)
+        .set({ heartbeatRunId: null })
+        .where(eq(costEvents.companyId, f.companyId));
+      await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, f.sourceId));
+      expect(
+        (
+          await connectionUsageRepository(db).observations(
+            f.companyId,
+            f.connectionId,
+            new Date(f.now.getTime() - 86400000),
+            f.now,
+          )
+        ).reduce((n, r) => n + (r.tokens ?? 0), 0),
+      ).toBe(354);
+    });
+    it("skips a capped primary even with an agent override and keeps the selected fallback session identity stable", async () => {
+      const f = await fixture();
+      await db
+        .update(heartbeatRuns)
+        .set({
+          status: "succeeded",
+          errorCode: null,
+          usageJson: {
+            inputTokens: 100,
+            outputTokens: 1,
+            cachedInputTokens: 0,
+            billingType: "subscription_included",
+          },
+        })
+        .where(eq(heartbeatRuns.id, f.sourceId));
+      const backupId = randomUUID(),
+        selected = await mocks.select();
+      mocks.select.mockImplementation(async ({ binding }) =>
+        binding.connectionId === backupId
+          ? {
+              ...selected,
+              connection: { ...selected.connection, id: backupId },
+            }
+          : selected,
+      );
+      const primary = f.policy.planning[0],
+        backup = {
+          ...primary,
+          id: "backup",
+          binding: { ...primary.binding, connectionId: backupId },
+        };
+      const policy = {
+        ...f.policy,
+        planning: [primary, backup],
+        connectionUsageCaps: {
+          [f.connectionId]: { rolling5h: { tokens: 100 } },
+        },
+      };
+      await db
+        .update(companyPhaseRouting)
+        .set({ policy })
+        .where(eq(companyPhaseRouting.companyId, f.companyId));
+      const input = {
+        companyId: f.companyId,
+        agentId: f.agentId,
+        userId: "owner",
+        adapterType: "claude_local",
+        runtimeConfig: {
+          phaseRouting: {
+            ...f.policy,
+            planning: [primary, backup],
+            connectionUsageCaps: {},
+          },
+        },
+        workMode: "planning",
+        isConversation: false,
+        issueId: f.issueId,
+        now: f.now,
+      };
+      const first = await phaseRoutingService(db).resolve(input),
+        second = await phaseRoutingService(db).resolve(input);
+      expect(first?.profile?.id).toBe("backup");
+      expect(first?.connectionId).toBe(backupId);
+      expect(second).toEqual(first);
+      expect(mocks.credential).not.toHaveBeenCalled();
+    });
+    it("releases the same capacity continuation at renewal once and retains its retry count and context", async () => {
+      const f = await fixture();
+      await db
+        .update(heartbeatRuns)
+        .set({
+          errorCode: "phase_quota_cooldown",
+          resultJson: {
+            connectionUsageCapWait: true,
+            executionRecovery: { providerWorkStarted: false },
+          },
+        })
+        .where(eq(heartbeatRuns.id, f.sourceId));
+      await db.insert(costEvents).values({
+        companyId: f.companyId,
+        agentId: f.agentId,
+        connectionId: f.connectionId,
+        provider: "anthropic",
+        model: "test-model",
+        billingType: "subscription_included",
+        costStatus: "reported",
+        inputTokens: 100,
+        outputTokens: 0,
+        costCents: 0,
+        occurredAt: new Date(f.now.getTime() - 5 * 3600000 + 1000),
+      });
+      await db
+        .update(companyPhaseRouting)
+        .set({
+          policy: {
+            ...f.policy,
+            connectionUsageCaps: {
+              [f.connectionId]: { rolling5h: { tokens: 100 } },
+            },
+          },
+        })
+        .where(eq(companyPhaseRouting.companyId, f.companyId));
+      const retry = vi.fn(
+        async ({ expectedRunId }: { expectedRunId?: string }) => {
+          if (!expectedRunId) throw Error("Expected exact saved continuation");
+          const promoted = await db
+            .update(heartbeatRuns)
+            .set({ status: "queued" })
+            .where(
+              and(
+                eq(heartbeatRuns.id, expectedRunId),
+                eq(heartbeatRuns.status, "scheduled_retry"),
+              ),
+            )
+            .returning({ id: heartbeatRuns.id });
+          return {
+            outcome: promoted.length ? "promoted" : "already_promoted",
+          } as never;
+        },
+      );
+      const recovery = connectionCapacityRecoveryService(db, retry);
+      expect(await recovery.reconcile(f.companyId, f.now)).toEqual({
+        promoted: 0,
+      });
+      expect(retry).not.toHaveBeenCalled();
+      const due = new Date(f.now.getTime() + 1000);
+      const results = await Promise.all([
+        recovery.reconcile(f.companyId, due),
+        recovery.reconcile(f.companyId, due),
+      ]);
+      expect(results.reduce((n, r) => n + r.promoted, 0)).toBe(1);
+      expect(await recovery.reconcile(f.companyId, due)).toEqual({
+        promoted: 0,
+      });
+      const [wait] = await db
+        .select()
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, f.waitId));
+      expect(wait).toMatchObject({
+        id: f.waitId,
+        status: "queued",
+        scheduledRetryAttempt: 1,
+        contextSnapshot: { marker: "original-context" },
+      });
+    });
     it("checks an official Anthropic connection without requiring custom gateway metadata", async () => {
       const f = await fixture();
       const ai = { provider: "anthropic", method: "api_key" };
@@ -771,6 +1034,13 @@ const support = await getEmbeddedPostgresTestSupport();
             ...f.policy,
             apiQuotaRecheckSeconds: 900,
             apiQuotaRecheckOverrides: { [f.connectionId]: 1800 },
+            connectionUsageCaps: {
+              [f.connectionId]: {
+                rolling5h: { tokens: 1000000 },
+                daily: { apiCostUsd: "2.50" },
+                weekly: { tokens: 5000000 },
+              },
+            },
           };
         const saved = await curl("curl", [
           "--silent",
@@ -792,6 +1062,16 @@ const support = await getEmbeddedPostgresTestSupport();
           url,
         ]);
         expect(JSON.parse(read.stdout).policy.apiQuotaRecheckSeconds).toBe(900);
+        const counters = await curl("curl", [
+          "--silent",
+          "--show-error",
+          "--fail-with-body",
+          url + "/usage",
+        ]);
+        expect(JSON.parse(counters.stdout).connections[0]).toMatchObject({
+          connectionId: f.connectionId,
+          blocked: false,
+        });
         const bad = await curl("curl", [
           "--silent",
           "--show-error",

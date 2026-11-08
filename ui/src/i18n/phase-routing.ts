@@ -1,5 +1,13 @@
 export const phaseRoutingMessages = {
   en: {
+    connectionUsageCaps: "AI connection usage caps", connectionCapsHelp: "Shared across all agents using this connection. Leave a field blank to disable that cap. A capped connection yields to the next eligible fallback.",
+    capConnection: "AI connection", capRolling5h: "Rolling 5 hours", capDaily: "Rolling 24 hours (daily)", capWeekly: "Rolling 7 days (weekly)", capTokens: "Total tokens", capApiCost: "API cost cap (USD)", capUnlimited: "No cap", capUnknown: "Unknown", capAvailable: "Within caps", capWaiting: "Waiting until {{at}}", capUsage: "Saved status — recorded tokens: {{tokens}} · API cost (USD): {{cost}}.",
+    capHoldUnknown: "Hold this connection when usage or pricing is unknown", capAtLeast: "at least {{value}} (incomplete)", capUncertain: "Unknown usage is reported; known usage is below the cap.",
+    capInvalid: "Enter a positive whole token count or a positive USD amount with up to six decimal places; clear the field to disable it.",
+    capAccountsError: "Could not load AI connections.", capNoConnections: "Connect an AI account to configure its usage caps.", capUsageError: "Could not load recorded usage. Retry before relying on this status.",
+    capInFlightHelp: "Caps govern new runs; a run already in progress can add usage beyond the cap. Tokens include input, cache reads and output; cache writes are counted once within input. Subscription fees are excluded from API cost.",
+    capUnknownHelp: "Unknown usage or prices are reported by default. Enable the checkbox to hold this connection instead. Other eligible fallbacks can continue. If every fallback is unavailable, the task waits for renewal with its context retained.",
+
     apiQuotaChecks: "API quota recovery checks", apiQuotaEnabled: "Periodically recheck exhausted Claude-compatible Messages APIs",
     apiQuotaInterval: "Check interval (seconds)", apiQuotaHelp: "One short request per connection. Failures back off up to one day. Checks record token usage; only verified recovery releases an existing continuation. No agent wakes while quota is unchanged.",
     enabled: "Route models by responsibility",
@@ -16,6 +24,14 @@ export const phaseRoutingMessages = {
     companyTitle: "Default models by responsibility", loading: "Loading model defaults…", cancel: "Cancel", saving: "Saving…", saveDefaults: "Save model defaults",
   },
   ar: {
+    connectionUsageCaps: "حدود استخدام اتصال الذكاء الاصطناعي", connectionCapsHelp: "حدود مشتركة بين جميع الوكلاء الذين يستخدمون هذا الاتصال. اترك الحقل فارغاً لتعطيل الحد. عند بلوغ الحد يُستخدم البديل التالي المتاح.",
+    capConnection: "اتصال الذكاء الاصطناعي", capRolling5h: "آخر 5 ساعات", capDaily: "آخر 24 ساعة (يومي)", capWeekly: "آخر 7 أيام (أسبوعي)", capTokens: "إجمالي الرموز", capApiCost: "حد تكلفة API بالدولار", capUnlimited: "دون حد", capUnknown: "غير معروف", capAvailable: "ضمن الحدود", capWaiting: "انتظار حتى {{at}}", capUsage: "الحالة المحفوظة — الرموز المسجلة: {{tokens}} · تكلفة API بالدولار: {{cost}}.",
+    capHoldUnknown: "إيقاف هذا الاتصال عند عدم معرفة الاستخدام أو السعر", capAtLeast: "{{value}} على الأقل (غير مكتمل)", capUncertain: "يُبلّغ عن الاستخدام غير المعروف؛ الاستخدام المعروف دون الحد.",
+    capInvalid: "أدخل عدداً صحيحاً موجباً للرموز أو مبلغاً موجباً بالدولار حتى ست منازل عشرية؛ امسح الحقل لتعطيل الحد.",
+    capAccountsError: "تعذر تحميل اتصالات الذكاء الاصطناعي.", capNoConnections: "اربط حساب ذكاء اصطناعي لتهيئة حدود استخدامه.", capUsageError: "تعذر تحميل الاستخدام المسجل. أعد المحاولة قبل الاعتماد على هذه الحالة.",
+    capInFlightHelp: "تُفحص الحدود قبل التشغيل الجديد؛ قد يزيد التشغيل الجاري الاستخدام عن الحد. تشمل الرموز الإدخال وقراءات الذاكرة المؤقتة والإخراج؛ تُحسب كتابات الذاكرة مرة واحدة ضمن الإدخال. لا تُحتسب رسوم الاشتراك ضمن تكلفة API.",
+    capUnknownHelp: "يُبلّغ عن بيانات الاستخدام أو الأسعار غير المعروفة افتراضياً. فعّل الخيار لإيقاف هذا الاتصال بدلاً من المتابعة. يمكن للبدائل المتاحة المتابعة. إذا لم يتوفر أي بديل، تنتظر المهمة التجدد مع الاحتفاظ بسياقها.",
+
     apiQuotaChecks: "فحص استعادة حصة API", apiQuotaEnabled: "إعادة فحص اتصالات Messages المتوافقة مع Claude عند نفاد الحصة",
     apiQuotaInterval: "الفاصل بين الفحوصات بالثواني", apiQuotaHelp: "طلب قصير واحد لكل اتصال مع زيادة الانتظار عند الفشل حتى يوم. يُسجّل استهلاك الرموز وتُستأنف المتابعة الحالية بعد نجاح موثّق فقط، دون إيقاظ الوكلاء عند بقاء الحصة كما هي.",
     enabled: "توجيه النماذج حسب المسؤولية",

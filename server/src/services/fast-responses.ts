@@ -1,3 +1,4 @@
+import { connectionUsageCapsService } from "./connection-usage-caps.js";
 import { randomUUID } from "node:crypto";
 import { sanitizeQuarantinedCommentForHigherTrust } from "./source-trust.js";
 import {
@@ -831,6 +832,7 @@ export function fastResponseService(
             !(await fastResponseSourceCurrent(tx, request))
           )
             return null;
+          if ((await connectionUsageCapsService(tx).check(request.companyId,current.connection.connection.id)).blocked) return null;
           if (request.endpointId) await options.authorizeExternal!(tx, request);
           const [company] = await tx
             .select()

@@ -1,3 +1,5 @@
+import { connectionCapacityRecoveryService } from "./connection-capacity-recovery.js";
+import { connectionUsageCapsService } from "./connection-usage-caps.js";
 import { isDeepStrictEqual } from "node:util";
 import type { Db } from "@paperclipai/db";
 import { aiConnectionMetadataSchema } from "@paperclipai/shared";
@@ -55,6 +57,8 @@ export function providerQuotaProbeService(
             evidence.model === "unknown"
           )
             continue;
+          const caps=company.policy.connectionUsageCaps?.[connection.id];
+          if(caps && (await connectionUsageCapsService(db).check(company.companyId,connection.id,now,caps)).blocked)continue;
           try {
             const summary = (
               await accounts.list(company.companyId, evidence.responsibleUserId)
@@ -251,6 +255,7 @@ export function providerQuotaProbeService(
         if (owned)
           await repository.delivered(probe.id, probe.recoveryClaimId, clock());
       }
+      await connectionCapacityRecoveryService(db,retryNow).reconcile();
       return { checked, recovered };
     },
   };

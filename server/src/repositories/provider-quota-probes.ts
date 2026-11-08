@@ -213,5 +213,10 @@ export function providerQuotaProbeRepository(db: Db) {
             sql`${heartbeatRuns.createdAt} <= ${before.toISOString()}::timestamptz`,
           ),
         ),
+    capacityWaits: (companyId?:string) => db.select().from(heartbeatRuns).where(and(
+      companyId?eq(heartbeatRuns.companyId,companyId):undefined,
+      eq(heartbeatRuns.status,"scheduled_retry"),eq(heartbeatRuns.scheduledRetryReason,"ai_connection_pool_wait"),
+      sql`exists(select 1 from heartbeat_runs source where source.id=${heartbeatRuns.retryOfRunId} and source.company_id=${heartbeatRuns.companyId} and source.result_json->>'connectionUsageCapWait'='true')`,
+    )),
   };
 }

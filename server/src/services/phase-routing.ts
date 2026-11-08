@@ -11,6 +11,8 @@ import { AI_AUTH_ENV_KEYS, stripAiAuthBindings } from "./ai-connection-runtime.j
 import { providerQuotaRepository } from "../repositories/provider-quota.js";
 import { forbidden, HttpError, unprocessable } from "../errors.js";
 import { phaseRoutingSettingsRepository } from "../repositories/phase-routing-settings.js";
+import { connectionUsageRepository } from "../repositories/connection-usage.js";
+import { connectionUsageCapsService } from "./connection-usage-caps.js";
 
 export const PHASE_QUOTA_FALLBACK_RETRY_REASON = "phase_quota_fallback";
 export const PHASE_QUOTA_RESET_WAKE_REASON = "phase_quota_reset";
@@ -22,7 +24,7 @@ export const phaseRouteDispatchSchema = z.object({
   connectionId: z.string().nullable(),
   grantId: z.string().nullable(),
   retryAt: z.string().datetime().nullable(),
-  waitReason: z.literal("quota_reset_unknown").optional(),
+  waitReason: z.enum(["quota_reset_unknown","usage_cap"]).optional(),
   notes: z.array(z.string()),
 }).strict();
 export type PhaseRouteDispatch = z.infer<typeof phaseRouteDispatchSchema>;
@@ -85,6 +87,7 @@ export function phaseRoutingService(db: Db) {
     getCompanyDefaults: settings.get,
     async saveCompanyDefaults(input: { companyId: string; userId: string; policy: unknown }) {
       const policy = phaseRoutingSchema.parse(input.policy);
+      if (!await connectionUsageRepository(db).owns(input.companyId,Object.keys(policy.connectionUsageCaps??{}))) throw unprocessable("Usage caps must reference AI connections in this company");
       if (policy.enabled) for (const profile of configuredProfiles(policy)) {
         // Company defaults require company-wide installations. Per-agent
         // credentials can still be chosen in that agent's explicit override.
@@ -133,6 +136,7 @@ export function phaseRoutingService(db: Db) {
       const notes: string[] = taskProfiles ? [`Task-specific ${phase} chain for ${input.issueId}`] : [];
       const retryDates: Date[] = [];
       let unknownResetHeld = false;
+      let usageCapHeld = false;
       const previousIndex = afterProfileId ? profiles.findIndex(profile => profile.id === afterProfileId) : -1;
       if (afterProfileId && previousIndex < 0) return {
         phase, workMode, profile: null, connectionId: null, grantId: null, maxFallbackAttempts: profiles.length - 1,
@@ -161,10 +165,15 @@ export function phaseRoutingService(db: Db) {
           notes.push(`${profile.id}: quota exhausted; renewal date is unknown. Confirm quota restoration before retrying.`);
           continue;
         }
+        // Connection limits are company-owned even when the agent overrides its model chain.
+        const caps = companyPolicy.success ? companyPolicy.data.connectionUsageCaps?.[account.connection.id] : undefined;
+        const capacity = caps ? await connectionUsageCapsService(db).check(input.companyId,account.connection.id,now,caps) : null;
+        if(capacity?.blocked)usageCapHeld=true;
         const cooldown = quotaCooldownUntil(evidence, policy.data.unknownResetCooldownSeconds, now);
-        if (cooldown) {
-          retryDates.push(cooldown);
-          notes.push(`${profile.id}: quota cooldown until ${cooldown.toISOString()}`);
+        if (cooldown || capacity?.blocked) {
+          const next = new Date(Math.max(cooldown?.getTime()??0,capacity?.retryAt?Date.parse(capacity.retryAt):0));
+          retryDates.push(next);
+          notes.push(`${profile.id}: ${capacity?.blocked?"configured usage cap":"quota cooldown"} until ${next.toISOString()}`);
           continue;
         }
         return {
@@ -180,7 +189,7 @@ export function phaseRoutingService(db: Db) {
         phase, workMode, profile: null, connectionId: null, grantId: null,
         maxFallbackAttempts: profiles.length - 1,
         retryAt: retryDates.length ? new Date(Math.min(...retryDates.map(date => date.getTime()))).toISOString() : null,
-        ...(!retryDates.length && unknownResetHeld ? { waitReason: "quota_reset_unknown" as const } : {}),
+        ...(!retryDates.length && unknownResetHeld ? { waitReason: "quota_reset_unknown" as const } : retryDates.length && usageCapHeld ? {waitReason:"usage_cap" as const} : {}),
         notes,
       };
     },

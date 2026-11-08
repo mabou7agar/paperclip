@@ -1,3 +1,4 @@
+import { connectionCapacityRecoveryService } from "./services/connection-capacity-recovery.js";
 import { voiceSessionRoutes, voiceWebhookRoutes } from "./routes/voice-sessions.js";
 import { eq } from "drizzle-orm";
 import { chatEndpoints } from "@paperclipai/db";
@@ -939,7 +940,7 @@ export async function createApp(
   api.use(decisionModelRoutes(db));
   api.use(fastResponseRoutes(db));
   api.use(aiConnectionRoutes(db, { deploymentMode: opts.deploymentMode, deploymentExposure: opts.deploymentExposure, trustedLocalStdioRuntimeHost }));
-  api.use(phaseRoutingRoutes(db));
+  api.use(phaseRoutingRoutes(db,companyId=>connectionCapacityRecoveryService(db,connectionIntentHeartbeat.retryScheduledRetryNow).reconcile(companyId)));
   api.use(monitoringRoutes(db));
   api.use(
     toolAccessRoutes(db, {
