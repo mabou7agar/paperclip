@@ -87,7 +87,11 @@ export function providerQuotaProbeRepository(db: Db) {
             desc(providerQuotaProbes.id),
           )
           .limit(1);
-        if (last && last.nextCheckAt > input.now) return null;
+        if (last?.outcome === "available") {
+          // A stale caller cannot probe the failure already covered by success.
+          // A later failure starts a fresh base interval, not the old backoff.
+          if (last.startedAt >= source.finishedAt) return null;
+        } else if (last && last.nextCheckAt > input.now) return null;
         const failureCount =
           last?.outcome === "available"
             ? 0

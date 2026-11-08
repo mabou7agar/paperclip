@@ -570,6 +570,70 @@ const support = await getEmbeddedPostgresTestSupport();
         "unavailable",
       );
     });
+    it("starts a fresh base interval after recovery without replaying the already checked failure", async () => {
+      const f = await fixture(),
+        repo = providerQuotaProbeRepository(db);
+      const first = await repo.claim({
+        ...f,
+        sourceRunId: f.sourceId,
+        model: "test-model",
+        intervalSeconds: 1800,
+        now: f.now,
+      });
+      await db
+        .update(providerQuotaProbes)
+        .set({ nextCheckAt: new Date(f.now.getTime() + 86400000) })
+        .where(eq(providerQuotaProbes.id, first!.id));
+      await repo.complete(
+        first!.id,
+        {
+          outcome: "available",
+          usage: {
+            inputTokens: 14,
+            outputTokens: 5,
+            cachedInputTokens: 0,
+            cacheWriteTokens: 0,
+          },
+          retryAfterSeconds: null,
+        },
+        f.now,
+      );
+      expect(
+        await repo.claim({
+          ...f,
+          sourceRunId: f.sourceId,
+          model: "test-model",
+          intervalSeconds: 1800,
+          now: new Date(f.now.getTime() + 86400001),
+        }),
+      ).toBeNull();
+      const nextSource = randomUUID();
+      await db
+        .insert(heartbeatRuns)
+        .values({
+          id: nextSource,
+          companyId: f.companyId,
+          agentId: f.agentId,
+          status: "failed",
+          invocationSource: "assignment",
+          errorCode: "provider_quota",
+          responsibleUserId: "owner",
+          finishedAt: new Date(f.now.getTime() + 1),
+          contextSnapshot: {
+            aiConnection: { connectionId: f.connectionId, grantId: f.grantId },
+          },
+          usageJson: { model: "test-model" },
+        });
+      const next = await repo.claim({
+        ...f,
+        sourceRunId: nextSource,
+        model: "test-model",
+        intervalSeconds: 1800,
+        now: new Date(f.now.getTime() + 1800001),
+      });
+      expect(next).toMatchObject({ failureCount: 0 });
+      expect(next!.nextCheckAt.getTime()).toBe(f.now.getTime() + 3600001);
+    });
     it("keeps probe accounting after the original failed run is deleted", async () => {
       const f = await fixture(),
         request = vi.fn(async () => success()),
