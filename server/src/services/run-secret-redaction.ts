@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { and, eq, inArray, or, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { heartbeatRuns } from "@paperclipai/db";
 import { REDACTED_EVENT_VALUE } from "../redaction.js";
@@ -86,10 +86,15 @@ export function createRunSecretRedactionRegistry(db: Db) {
       .from(heartbeatRuns)
       .where(and(
         eq(heartbeatRuns.companyId, companyId),
-        or(
-          sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issueId}`,
-          sql`${heartbeatRuns.contextSnapshot} -> 'paperclipIssue' ->> 'id' = ${issueId}`,
-        ),
+        // Resolve indexed IDs before projecting the large toasted JSON. An OR
+        // can make PostgreSQL scan/decompress every run context on busy issues.
+        sql`${heartbeatRuns.id} in (
+          select r.id from heartbeat_runs r where r.company_id = ${companyId}
+            and r.context_snapshot ->> 'issueId' = ${issueId}
+          union
+          select r.id from heartbeat_runs r where r.company_id = ${companyId}
+            and r.context_snapshot -> 'paperclipIssue' ->> 'id' = ${issueId}
+        )`,
       ));
     return valuesForRuns(rows);
   }
