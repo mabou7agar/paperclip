@@ -4,7 +4,10 @@ import { aiConnectionMetadataSchema } from "@paperclipai/shared";
 import { providerQuotaProbeRepository } from "../repositories/provider-quota-probes.js";
 import { providerQuotaRepository } from "../repositories/provider-quota.js";
 import { aiConnectionService } from "./ai-connections.js";
-import { probeMessagesQuota } from "./api-quota-probe.js";
+import {
+  messagesQuotaDestination,
+  probeMessagesQuota,
+} from "./api-quota-probe.js";
 import { phaseRoutingService } from "./phase-routing.js";
 import { logActivity } from "./activity-log.js";
 import type { heartbeatService } from "./heartbeat.js";
@@ -38,13 +41,7 @@ export function providerQuotaProbeService(
           const meta = aiConnectionMetadataSchema.safeParse(
             connection.metadata,
           );
-          if (
-            !meta.success ||
-            meta.data.provider !== "anthropic" ||
-            meta.data.routing?.protocol !== "messages" ||
-            !meta.data.routing.baseUrl
-          )
-            continue;
+          if (!meta.success || !messagesQuotaDestination(meta.data)) continue;
           const evidence = await quota.latestEvidence(
             company.companyId,
             connection.id,
@@ -89,15 +86,10 @@ export function providerQuotaProbeService(
             const selectedMeta = aiConnectionMetadataSchema.safeParse(
               row.connection.config.ai,
             );
-            if (
-              !selectedMeta.success ||
-              selectedMeta.data.provider !== "anthropic" ||
-              selectedMeta.data.method !== "api_key" ||
-              selectedMeta.data.routing?.protocol !== "messages" ||
-              !selectedMeta.data.routing.baseUrl ||
-              evidence.model.length > 200
-            )
-              continue;
+            const destination = selectedMeta.success
+              ? messagesQuotaDestination(selectedMeta.data)
+              : null;
+            if (!destination || evidence.model.length > 200) continue;
             const claim = await repository.claim({
               companyId: company.companyId,
               connectionId: connection.id,
@@ -131,8 +123,7 @@ export function providerQuotaProbeService(
             checked++;
             const result = await probeMessagesQuota(
               {
-                baseUrl: selectedMeta.data.routing.baseUrl,
-                auth: selectedMeta.data.routing.auth,
+                ...destination,
                 credential,
                 model: evidence.model,
               },
@@ -190,10 +181,21 @@ export function providerQuotaProbeService(
       for (const pending of await repository.pendingRecoveries()) {
         const probe = await repository.claimRecovery(pending.id, clock());
         if (!probe?.recoveryClaimId) continue;
+        let owned = true;
         for (const wait of await repository.waits(
           probe.companyId,
           probe.startedAt,
         )) {
+          if (
+            !(await repository.renewRecovery(
+              probe.id,
+              probe.recoveryClaimId,
+              clock(),
+            ))
+          ) {
+            owned = false;
+            break;
+          }
           const issueId =
             wait.issueId ??
             (typeof wait.contextSnapshot?.issueId === "string"
@@ -228,6 +230,16 @@ export function providerQuotaProbeService(
             route.connectionId === probe.connectionId &&
             route.grantId === probe.grantId
           ) {
+            if (
+              !(await repository.renewRecovery(
+                probe.id,
+                probe.recoveryClaimId,
+                clock(),
+              ))
+            ) {
+              owned = false;
+              break;
+            }
             await retryNow({
               issueId,
               expectedRunId: wait.id,
@@ -236,7 +248,8 @@ export function providerQuotaProbeService(
             });
           }
         }
-        await repository.delivered(probe.id, probe.recoveryClaimId, clock());
+        if (owned)
+          await repository.delivered(probe.id, probe.recoveryClaimId, clock());
       }
       return { checked, recovered };
     },

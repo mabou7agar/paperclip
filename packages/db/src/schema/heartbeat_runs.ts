@@ -186,6 +186,17 @@ export const heartbeatRuns = pgTable(
       table.finishedAt.desc().nullsFirst(),
       table.id.desc().nullsFirst(),
     ),
+    companyQuotaReceiptIdx: index("heartbeat_runs_company_quota_receipt_idx").on(
+      table.companyId,
+      sql`(${table.contextSnapshot} -> 'aiConnection' ->> 'connectionId')`,
+      table.finishedAt.desc().nullsFirst(),
+      table.id.desc().nullsFirst(),
+    ).where(sql`(${table.errorCode} = 'provider_quota'
+      or (${table.errorCode} = 'acpx_turn_failed'
+        and ${table.contextSnapshot}->'aiConnection'->>'provider' = 'anthropic'
+        and ${table.resultJson}->'terminalSessionFailure'->>'category' = 'limit'
+        and coalesce(${table.resultJson}->'terminalSessionFailure'->>'title', '') ~* '(HTTP[[:space:]]+429|rejected[[:space:]]*[(]429[)])')
+      or ${table.resultJson}->>'errorFamily' = 'provider_quota')`),
     companyCtxIssueCreatedIdx: index("heartbeat_runs_company_ctx_issue_created_idx").on(
       table.companyId,
       sql`(${table.contextSnapshot} ->> 'issueId')`,

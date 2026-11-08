@@ -1,3 +1,4 @@
+import type { AiConnectionMetadata } from "@paperclipai/shared";
 import type {
   ApiQuotaProbeOutcome,
   ApiQuotaProbeUsage,
@@ -6,6 +7,16 @@ export type {
   ApiQuotaProbeOutcome,
   ApiQuotaProbeUsage,
 } from "../types/api-quota-probe.js";
+/** Provider selection authorizes the official origin when no custom route exists. */
+export function messagesQuotaDestination(metadata: AiConnectionMetadata) {
+  if (metadata.provider !== "anthropic" || metadata.method !== "api_key")
+    return null;
+  if (!metadata.routing)
+    return { baseUrl: "https://api.anthropic.com", auth: "api_key" as const };
+  return metadata.routing.protocol === "messages" && metadata.routing.baseUrl
+    ? { baseUrl: metadata.routing.baseUrl, auth: metadata.routing.auth }
+    : null;
+}
 const tokens = (v: unknown) =>
   typeof v === "number" && Number.isSafeInteger(v) && v >= 0 && v <= 2147483647
     ? v

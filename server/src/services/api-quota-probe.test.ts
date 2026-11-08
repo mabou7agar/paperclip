@@ -1,11 +1,72 @@
 import { expect, it, vi } from "vitest";
-import { probeMessagesQuota } from "./api-quota-probe.js";
+import {
+  messagesQuotaDestination,
+  probeMessagesQuota,
+} from "./api-quota-probe.js";
 const input = {
   baseUrl: "https://gateway.example",
   auth: "bearer" as const,
   credential: "test-key",
   model: "test-model",
 };
+it("uses the official Anthropic origin only for a standard API connection", async () => {
+  const destination = messagesQuotaDestination({
+    provider: "anthropic",
+    method: "api_key",
+  });
+  expect(destination).toEqual({
+    baseUrl: "https://api.anthropic.com",
+    auth: "api_key",
+  });
+  const request = vi.fn(
+    async () =>
+      new Response(
+        JSON.stringify({
+          type: "message",
+          content: [{ type: "text", text: "OK" }],
+        }),
+      ),
+  );
+  await probeMessagesQuota(
+    { ...input, ...destination! },
+    request as typeof fetch,
+  );
+  const [url, options] = request.mock.calls[0] as unknown as [URL, RequestInit];
+  expect(String(url)).toBe("https://api.anthropic.com/v1/messages");
+  expect(options).toMatchObject({ headers: { "x-api-key": "test-key" } });
+  expect(
+    messagesQuotaDestination({ provider: "anthropic", method: "subscription" }),
+  ).toBeNull();
+  expect(
+    messagesQuotaDestination({ provider: "openai", method: "api_key" }),
+  ).toBeNull();
+  expect(
+    messagesQuotaDestination({
+      provider: "anthropic",
+      method: "api_key",
+      routing: {
+        kind: "gateway",
+        protocol: "responses",
+        baseUrl: "https://custom.example",
+        auth: "bearer",
+        models: [],
+      },
+    }),
+  ).toBeNull();
+  expect(
+    messagesQuotaDestination({
+      provider: "anthropic",
+      method: "api_key",
+      routing: {
+        kind: "gateway",
+        protocol: "messages",
+        baseUrl: "https://custom.example",
+        auth: "bearer",
+        models: [],
+      },
+    }),
+  ).toEqual({ baseUrl: "https://custom.example", auth: "bearer" });
+});
 it("makes one bounded inference request without task context or cache controls", async () => {
   const request = vi.fn(
     async () =>

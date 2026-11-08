@@ -222,6 +222,96 @@ const support = await getEmbeddedPostgresTestSupport();
           usage: { input_tokens: 14, output_tokens: 5 },
         }),
       );
+    it("checks an official Anthropic connection without requiring custom gateway metadata", async () => {
+      const f = await fixture();
+      const ai = { provider: "anthropic", method: "api_key" };
+      const [connection] = await db
+        .update(toolConnections)
+        .set({ config: { ai } as never })
+        .where(eq(toolConnections.id, f.connectionId))
+        .returning();
+      const selected = await mocks.select();
+      mocks.select.mockResolvedValue({ ...selected, connection });
+      const request = vi.fn(async () => success()),
+        retry = vi.fn(async () => ({ outcome: "promoted" }) as never);
+      await providerQuotaProbeService(
+        db,
+        retry,
+        request as typeof fetch,
+        () => f.now,
+      ).sweep();
+      expect(request).toHaveBeenCalledTimes(1);
+      const [url, options] = request.mock.calls[0] as unknown as [
+        URL,
+        RequestInit,
+      ];
+      expect(String(url)).toBe("https://api.anthropic.com/v1/messages");
+      expect(options.headers).toMatchObject({ "x-api-key": "fixture-secret" });
+      expect(retry).toHaveBeenCalledTimes(1);
+    });
+    it("renews recovery ownership during a long batch and fences the replaced owner", async () => {
+      const f = await fixture(),
+        repository = providerQuotaProbeRepository(db);
+      const probe = await repository.claim({
+        companyId: f.companyId,
+        connectionId: f.connectionId,
+        grantId: f.grantId,
+        sourceRunId: f.sourceId,
+        model: "test-model",
+        intervalSeconds: 1800,
+        now: f.now,
+      });
+      await repository.complete(
+        probe!.id,
+        { outcome: "available", usage: null, retryAfterSeconds: null },
+        f.now,
+      );
+      const first = await repository.claimRecovery(probe!.id, f.now);
+      expect(
+        await repository.renewRecovery(
+          probe!.id,
+          first!.recoveryClaimId!,
+          new Date(f.now.getTime() + 100000),
+        ),
+      ).toBe(true);
+      expect(
+        await repository.claimRecovery(
+          probe!.id,
+          new Date(f.now.getTime() + 130000),
+        ),
+      ).toBeNull();
+      const replacement = await repository.claimRecovery(
+        probe!.id,
+        new Date(f.now.getTime() + 221000),
+      );
+      expect(replacement!.recoveryClaimId).not.toBe(first!.recoveryClaimId);
+      expect(
+        await repository.renewRecovery(
+          probe!.id,
+          first!.recoveryClaimId!,
+          new Date(f.now.getTime() + 222000),
+        ),
+      ).toBe(false);
+      expect(
+        await repository.renewRecovery(
+          probe!.id,
+          replacement!.recoveryClaimId!,
+          new Date(f.now.getTime() + 222000),
+        ),
+      ).toBe(true);
+      await repository.delivered(
+        probe!.id,
+        replacement!.recoveryClaimId!,
+        new Date(f.now.getTime() + 222000),
+      );
+      expect(
+        await repository.renewRecovery(
+          probe!.id,
+          replacement!.recoveryClaimId!,
+          new Date(f.now.getTime() + 223000),
+        ),
+      ).toBe(false);
+    });
     it("coalesces concurrent sweeps, restores the exact account and releases its saved continuation once", async () => {
       const f = await fixture(),
         request = vi.fn(async () => success()),
@@ -608,22 +698,20 @@ const support = await getEmbeddedPostgresTestSupport();
         }),
       ).toBeNull();
       const nextSource = randomUUID();
-      await db
-        .insert(heartbeatRuns)
-        .values({
-          id: nextSource,
-          companyId: f.companyId,
-          agentId: f.agentId,
-          status: "failed",
-          invocationSource: "assignment",
-          errorCode: "provider_quota",
-          responsibleUserId: "owner",
-          finishedAt: new Date(f.now.getTime() + 1),
-          contextSnapshot: {
-            aiConnection: { connectionId: f.connectionId, grantId: f.grantId },
-          },
-          usageJson: { model: "test-model" },
-        });
+      await db.insert(heartbeatRuns).values({
+        id: nextSource,
+        companyId: f.companyId,
+        agentId: f.agentId,
+        status: "failed",
+        invocationSource: "assignment",
+        errorCode: "provider_quota",
+        responsibleUserId: "owner",
+        finishedAt: new Date(f.now.getTime() + 1),
+        contextSnapshot: {
+          aiConnection: { connectionId: f.connectionId, grantId: f.grantId },
+        },
+        usageJson: { model: "test-model" },
+      });
       const next = await repo.claim({
         ...f,
         sourceRunId: nextSource,

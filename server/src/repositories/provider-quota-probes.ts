@@ -166,6 +166,19 @@ export function providerQuotaProbeRepository(db: Db) {
         )
         .returning()
         .then((rows) => rows[0] ?? null),
+    renewRecovery: (id: string, claimId: string, now: Date) =>
+      db
+        .update(providerQuotaProbes)
+        .set({ recoveryClaimExpiresAt: new Date(now.getTime() + 120000) })
+        .where(
+          and(
+            eq(providerQuotaProbes.id, id),
+            eq(providerQuotaProbes.recoveryClaimId, claimId),
+            isNull(providerQuotaProbes.recoveryDeliveredAt),
+          ),
+        )
+        .returning({ id: providerQuotaProbes.id })
+        .then((rows) => rows.length > 0),
     delivered: (id: string, claimId: string, now: Date) =>
       db
         .update(providerQuotaProbes)

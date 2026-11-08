@@ -2360,6 +2360,13 @@
       "when": 1794132208156,
       "tag": "0338_provider_quota_probes",
       "breakpoints": true
+    },
+    {
+      "idx": 339,
+      "version": "7",
+      "when": 1794138662481,
+      "tag": "0339_quota_receipt_lookup",
+      "breakpoints": true
     }
   ]
 }

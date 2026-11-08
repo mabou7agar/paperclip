@@ -51,7 +51,7 @@ export const providerQuotaProbes = pgTable(
       table.companyId,
       table.connectionId,
       table.grantId,
-      table.startedAt.desc(),
+      table.startedAt.desc().nullsFirst(),
     ),
     source: index("provider_quota_probes_source_idx").on(
       table.companyId,
