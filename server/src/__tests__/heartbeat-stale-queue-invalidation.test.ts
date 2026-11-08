@@ -589,6 +589,30 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(issue).toMatchObject({ status, assigneeAgentId: reassigned ? null : agentId });
   });
 
+  it("delivers an addressed CTO question once without taking worker ownership or losing context", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent({ agentName: "CTO", heartbeatConfig: { enabled: false } });
+    const workerId = randomUUID();
+    await db.insert(agents).values({ id: workerId, companyId, name: "Worker", role: "engineer", status: "idle", adapterType: "codex_local" });
+    const [issue] = await db.insert(issues).values({ companyId, title: "Worker needs a bounded planning answer", status: "in_review", assigneeAgentId: workerId }).returning();
+    const [interaction] = await db.insert(issueThreadInteractions).values({ companyId, issueId: issue.id,
+      kind: "ask_user_questions", createdByAgentId: workerId, addresseeAgentId: agentId,
+      effectiveResolverPolicy: "addressee_only", payload: { version: 1, questions: [] } }).returning();
+    const context = { source: "issue.interaction.created", interactionId: interaction.id,
+      interactionKind: interaction.kind, planningContext: "Keep the original bounded implementation and review constraints" };
+    const { runId } = await seedQueuedRun({ companyId, agentId, issueId: issue.id,
+      wakeReason: "interaction_pending", invocationSource: "automation", contextExtras: context });
+
+    await heartbeat.resumeQueuedRuns();
+    expect(await waitForCondition(async () => countExecuteCallsForRun(runId) === 1)).toBe(true);
+    await heartbeat.waitForRunExecutionDrain(runId);
+    await heartbeat.resumeQueuedRuns();
+    const run = await heartbeat.getRun(runId);
+    expect(run).toMatchObject({ status: "succeeded", contextSnapshot: { ...context, issueId: issue.id, wakeReason: "interaction_pending" } });
+    expect(countExecuteCallsForRun(runId)).toBe(1);
+    expect((await db.select().from(issues).where(eq(issues.id, issue.id)))[0]).toMatchObject({ status: "in_review", assigneeAgentId: workerId });
+    expect((await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, interaction.id)))[0].status).toBe("pending");
+  });
+
   it("cancels a resolved connection-intent wake parked before queued-run claim", async () => {
     const { companyId, agentId } = await seedCompanyAndAgent();
     const issueId = randomUUID();

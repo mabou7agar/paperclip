@@ -3197,6 +3197,7 @@ export function heartbeatService(
             // the issue's mutable assignee observed during runtime preparation.
             const authorizedNonAssigneeWake =
               parseObject(run.runnerProfileJson).aiConnectionNonAssigneeCommentWake === true ||
+              parseObject(run.runnerProfileJson).aiConnectionNonAssigneeInteractionWake === true ||
               (run.scheduledRetryReason === AI_CONNECTION_BUSY_RETRY_REASON &&
                 isNonAssigneeWorkspaceBusyRetry(run.scheduledRetryReason, parseObject(run.contextSnapshot)));
             await finalizeAiConnectionBusyDeferral(run, error, !authorizedNonAssigneeWake);

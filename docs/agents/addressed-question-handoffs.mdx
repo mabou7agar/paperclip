@@ -1,0 +1,32 @@
+---
+title: Addressed questions and task ownership
+---
+
+An agent can address an ordinary task question or confirmation to another agent
+without changing the task assignee. The existing creation path grants the
+recipient access and submits an `interaction_pending` wake. Deferred promotion,
+queued dispatch and resource-wait retries retain the original interaction ID,
+source run and task context.
+
+Dispatch validates the current persisted interaction: company, task, recipient,
+pending status, kind and resolver audience. A verified recipient can answer its
+card while a different agent owns implementation or review. This does not make
+the recipient the task owner, reviewer or approver. Governed tool/secret actions
+and human-only cards retain their existing authorization requirements.
+
+Resolved, superseded, deleted, readdressed or unauthorized cards cancel an old
+attention run with `issue_interaction_changed`, including at the final dispatch
+check and after a subscription wait. That cancellation is expected non-provider
+usage. Other pending cards, approvals, budget limits, dependencies, pause holds,
+terminal statuses and execution-reconciliation checks keep their existing gates.
+
+When a valid response arrives, the existing interaction continuation wakes the
+assignee using the saved task context. Do not repair this flow by reassigning the
+task, clearing review gates, resetting retries or periodically waking agents.
+Monitoring remains event driven and alert only; a polling Watchdog is unnecessary
+for delivering addressed questions.
+
+Historical requests whose queued runs were cancelled before provider execution
+can be resumed once after checking their current audience and blockers. Record a
+durable repair receipt before requesting a wake, retain the old cancellation and
+its context, and do not replay a repair receipt or a completed response.

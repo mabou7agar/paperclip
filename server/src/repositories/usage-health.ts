@@ -72,7 +72,7 @@ export function usageHealthRepository(db: Db) {
               or coalesce(r.usage_json->'sessionReused'='true'::jsonb,false)
               or (r.session_id_before is not null and r.session_id_before=r.session_id_after)) "sessionReused",
             (r.usage_json->'accountingProviderWorkStarted'='false'::jsonb or r.error_code in
-              ('phase_quota_cooldown','phase_route_unavailable','issue_dependencies_blocked','issue_terminal_status','issue_assignee_changed','issue_reassigned')) "expectedNoUsage",
+              ('phase_quota_cooldown','phase_route_unavailable','issue_dependencies_blocked','issue_terminal_status','issue_assignee_changed','issue_reassigned','issue_interaction_changed')) "expectedNoUsage",
             ${number(sql`r.usage_json->'inputTokens'`)} "inputTokens",
             ${number(sql`r.usage_json->'cachedInputTokens'`)} "cachedInputTokens",
             coalesce(${number(sql`r.usage_json->'cacheWriteTokens'`)},${number(sql`r.result_json->'usage'->'cachedWriteTokens'`)}) "cacheWriteTokens",

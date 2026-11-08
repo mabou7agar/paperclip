@@ -1,3 +1,4 @@
+import { addressedInteractionWakeState } from "../../../services/addressed-interaction-wake.js";
 import { hasConversationContinuationPolicy } from "../../../services/conversation-continuation.js";
 import { getExecutionBlocker } from "../../../services/execution-blocker.js";
 import { getNativeReviewAssignment } from "../../../services/native-runtime/native-review-participant.js";
@@ -365,11 +366,15 @@ export function createPostgresRunDispatchAdapter(
 
     facts.issueStatus = issue.status;
     facts.issueAssigneeAgentId = issue.assigneeAgentId;
+    facts.addressedInteractionWake = await addressedInteractionWakeState(dbOrTx as Db, {
+      companyId: input.companyId, issueId, agentId: input.agentId, contextSnapshot: input.contextSnapshot,
+    });
     facts.issueExecutionRunId = issue.executionRunId;
     facts.issueCheckoutRunId = issue.checkoutRunId;
     if (input.conversationContinuation) {
       facts.pendingResponse = await connectionContinuationPendingResponse(dbOrTx as unknown as Db,
-        issue, input.responsibleUserId, input.runId);
+        issue, input.responsibleUserId, input.runId,
+        facts.addressedInteractionWake === "pending" ? readNonEmptyString(input.contextSnapshot.interactionId) : null);
     }
     facts.reviewParticipant = await readNativeReviewParticipantFacts(dbOrTx, {
       companyId: input.companyId, issueId, agentId: input.agentId,
@@ -582,6 +587,9 @@ export function createPostgresRunDispatchAdapter(
             .then((rows) => Boolean(rows[0]))
         : false;
 
+    const addressedInteractionWake = issue ? await addressedInteractionWakeState(dbOrTx as Db, {
+      companyId: input.companyId, issueId, agentId: input.agentId, contextSnapshot: context,
+    }) : null;
     const retryReasonKind = classifyRetryReasonKind(retryReason);
     // Dependency edges can change after scheduled promotion without changing
     // the displayed status. Read them again under the queued/final issue lock.
@@ -598,13 +606,15 @@ export function createPostgresRunDispatchAdapter(
         unresolvedBlockerCount: readiness.unresolvedBlockerCount,
       } : null,
       pendingResponse: issue && (input.conversationContinuation || context.connectionIntentResolution === "existing_connection")
-        ? await connectionContinuationPendingResponse(dbOrTx as unknown as Db, issue, input.responsibleUserId, input.runId)
+        ? await connectionContinuationPendingResponse(dbOrTx as unknown as Db, issue, input.responsibleUserId, input.runId,
+            addressedInteractionWake === "pending" ? readNonEmptyString(context.interactionId) : null)
         : null,
       issueFound: issue !== null,
       issueStatus: issue?.status ?? null,
       issueAssigneeAgentId: issue?.assigneeAgentId ?? null,
       issueExecutionRunId: issue?.executionRunId ?? null,
       issueCheckoutRunId: issue?.checkoutRunId ?? null,
+      addressedInteractionWake,
       isResolvedInteractionContinuation,
       isConnectionContinuation: (isResolvedInteractionContinuation && context.interactionKind === "connection_intent")
         || context.source === "connection_tools.refreshed",
@@ -1074,14 +1084,15 @@ export function createPostgresRunDispatchAdapter(
       if (run.status !== input.expectedStatus) return { outcome: "lost_race" as const };
       const { issueId, facts, decision, executionBlocker } = await decideCurrentRunStaleness(tx, run, input.now);
       if (!decision.stale || !issueId) {
-        if (input.expectedStatus === "queued" && facts?.isInteractionWake) {
+        if (input.expectedStatus === "queued" && (facts?.isInteractionWake || facts?.addressedInteractionWake === "pending")) {
           // Preserve the authority accepted under the issue/run locks. Later
           // preflight reads can observe a reassignment; they must not turn an
           // assignee comment into a non-assignee subscription-wait exception.
           await tx.update(heartbeatRuns).set({
             runnerProfileJson: {
               ...parseObject(run.runnerProfileJson),
-              aiConnectionNonAssigneeCommentWake: facts.issueAssigneeAgentId !== run.agentId,
+              aiConnectionNonAssigneeCommentWake: facts.isInteractionWake && facts.issueAssigneeAgentId !== run.agentId,
+              aiConnectionNonAssigneeInteractionWake: facts.addressedInteractionWake === "pending" && facts.issueAssigneeAgentId !== run.agentId,
             },
           }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId)));
         }

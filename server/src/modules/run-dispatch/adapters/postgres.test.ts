@@ -14,6 +14,7 @@ import {
   issueDocuments,
   issueRelations,
   issueRecoveryActions,
+  issueThreadInteractions,
   issueTreeHolds,
   issues,
 } from "@paperclipai/db";
@@ -52,6 +53,7 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
   }, 20_000);
 
   afterEach(async () => {
+    await db.delete(issueThreadInteractions);
     await db.delete(environmentLeases);
     await db.delete(activityLog);
     await db.delete(issueDocuments);
@@ -155,6 +157,74 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
     });
     return runId;
   }
+
+  async function seedAddressedQuestion() {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const workerId = randomUUID(), issueId = randomUUID(), interactionId = randomUUID();
+    await seedAgent({ id: workerId, companyId, name: "Worker" });
+    await seedIssue({ companyId, issueId, status: "in_review", assigneeAgentId: workerId });
+    await db.insert(issueThreadInteractions).values({ id: interactionId, companyId, issueId,
+      kind: "ask_user_questions", status: "pending", createdByAgentId: workerId,
+      addresseeAgentId: agentId, effectiveResolverPolicy: "anyone", payload: { version: 1, questions: [] } });
+    const contextSnapshot = { issueId, interactionId, interactionKind: "ask_user_questions",
+      wakeReason: "interaction_pending", source: "issue.interaction.created", planningContextMarker: "preserved" };
+    const runId = await seedRun({ companyId, agentId, contextSnapshot });
+    return { companyId, agentId, workerId, issueId, interactionId, runId, contextSnapshot };
+  }
+
+  it("dispatches a directed question after queue promotion without changing ownership, context or retry count", async () => {
+    const f = await seedAddressedQuestion(), adapter = createPostgresRunDispatchAdapter(db);
+    expect(await adapter.cancelStaleQueuedRun({ ...f, expectedStatus: "queued", now: new Date() }))
+      .toMatchObject({ outcome: "not_stale" });
+    const [task] = await db.select().from(issues).where(eq(issues.id, f.issueId));
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.runId));
+    expect(task.assigneeAgentId).toBe(f.workerId);
+    expect(task.executionState).toBeNull();
+    expect(run.contextSnapshot).toEqual(f.contextSnapshot);
+    expect(run.scheduledRetryAttempt).toBe(0);
+    expect(run.runnerProfileJson).toMatchObject({ aiConnectionNonAssigneeInteractionWake: true });
+    await db.update(heartbeatRuns).set({ status: "scheduled_retry", scheduledRetryReason: "ai_connection_busy",
+      resultJson: { conversationContinuation: "continue_conversation_v1" },
+      contextSnapshot: f.contextSnapshot }).where(eq(heartbeatRuns.id, f.runId));
+    expect(await adapter.evaluateScheduledRetryGate({ companyId: f.companyId, runId: f.runId, retryReasonOverride: "ai_connection_busy", now: new Date() }))
+      .toMatchObject({ allowed: true });
+    const otherQuestion = randomUUID();
+    await db.insert(issueThreadInteractions).values({ id: otherQuestion, companyId: f.companyId, issueId: f.issueId,
+      kind: "request_confirmation", status: "pending", effectiveResolverPolicy: "human_only", payload: { version: 1, prompt: "Unrelated human decision" } });
+    expect(await adapter.evaluateScheduledRetryGate({ companyId: f.companyId, runId: f.runId, retryReasonOverride: "ai_connection_busy", now: new Date() }))
+      .toMatchObject({ allowed: false, errorCode: "issue_waiting_for_response" });
+    await db.delete(issueThreadInteractions).where(eq(issueThreadInteractions.id, otherQuestion));
+    await db.update(issueThreadInteractions).set({ status: "answered" }).where(eq(issueThreadInteractions.id, f.interactionId));
+    expect(await adapter.evaluateScheduledRetryGate({ companyId: f.companyId, runId: f.runId, retryReasonOverride: "ai_connection_busy", now: new Date() }))
+      .toMatchObject({ allowed: false, errorCode: "issue_interaction_changed" });
+  });
+
+  it.each(["resolved", "superseded", "readdressed", "human_only", "governed", "connection_authorization", "wrong_issue", "wrong_company", "deleted"])(
+    "revalidates %s questions at the final dispatch gate", async (change) => {
+      const f = await seedAddressedQuestion();
+      const adapter = createPostgresRunDispatchAdapter(db);
+      expect(await adapter.cancelStaleQueuedRun({ ...f, expectedStatus: "queued", now: new Date() })).toMatchObject({ outcome: "not_stale" });
+      if (change === "resolved" || change === "superseded") await db.update(issueThreadInteractions).set({ status: change }).where(eq(issueThreadInteractions.id, f.interactionId));
+      if (change === "readdressed") await db.update(issueThreadInteractions).set({ addresseeAgentId: f.workerId }).where(eq(issueThreadInteractions.id, f.interactionId));
+      if (change === "human_only") await db.update(issueThreadInteractions).set({ effectiveResolverPolicy: "human_only" }).where(eq(issueThreadInteractions.id, f.interactionId));
+      if (change === "governed" || change === "connection_authorization") {
+        await db.update(issueThreadInteractions).set({ kind: "request_confirmation", payload: sql`${JSON.stringify(change === "governed" ? { toolAction: {} } : { connectionAuthorization: {} })}::jsonb` }).where(eq(issueThreadInteractions.id, f.interactionId));
+        await db.update(heartbeatRuns).set({ contextSnapshot: { ...f.contextSnapshot, interactionKind: "request_confirmation" } }).where(eq(heartbeatRuns.id, f.runId));
+      }
+      if (change === "wrong_issue") {
+        const issueId = randomUUID();await seedIssue({ companyId: f.companyId, issueId, status: "in_review", assigneeAgentId: f.workerId });
+        await db.update(issueThreadInteractions).set({ issueId }).where(eq(issueThreadInteractions.id, f.interactionId));
+      }
+      if (change === "wrong_company") {
+        const other = await seedCompanyAndAgent();
+        await db.update(issueThreadInteractions).set({ companyId: other.companyId }).where(eq(issueThreadInteractions.id, f.interactionId));
+      }
+      if (change === "deleted") await db.delete(issueThreadInteractions).where(eq(issueThreadInteractions.id, f.interactionId));
+      await db.update(heartbeatRuns).set({ status: "running" }).where(eq(heartbeatRuns.id, f.runId));
+      expect(await adapter.cancelStaleQueuedRun({ ...f, expectedStatus: "running", now: new Date() }))
+        .toMatchObject({ outcome: "cancelled", errorCode: "issue_interaction_changed" });
+    },
+  );
 
   async function seedCleanupRetry(status: "scheduled_retry" | "queued" = "scheduled_retry") {
     const { companyId, agentId } = await seedCompanyAndAgent();
