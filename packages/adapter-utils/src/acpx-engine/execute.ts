@@ -3580,6 +3580,7 @@ async function emitAcpxFailure(input: {
 }
 
 function isResumeFailure(err: unknown): boolean {
+  if (err instanceof Error && err.name === "SessionResumeRequiredError") return false;
   const message = err instanceof Error ? err.message : String(err);
   return /resume|load|not found|no session|unknown session|conversation/i.test(message);
 }
@@ -4327,7 +4328,19 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
 
         const previousParams = parseObject(ctx.runtime.sessionParams);
         const canResume = isCompatibleSession(previousParams, prepared);
-        const resumeSessionId = canResume ? asString(previousParams.acpSessionId, "") || undefined : undefined;
+        const persistedRuntimeStore = createRuntimeStore({ stateDir: prepared.stateDir });
+        let resumeSessionId = canResume ? asString(previousParams.acpSessionId, "") || undefined : undefined;
+        // ACP also resumes its exact persisted key when the outer task-session
+        // row is absent. Repair that conversation's disposable-home index before
+        // the provider reads it, using the same account/config-scoped key.
+        if (!resumeSessionId && prepared.acpxAgent === "codex" && !prepared.remoteExecutionIdentity &&
+            asString(parseObject(ctx.config.managedAiConnection).sessionIdentity, "")) {
+          const retained = await persistedRuntimeStore.load(prepared.sessionKey);
+          if (retained && retained.acpxRecordId === prepared.sessionKey && retained.cwd === prepared.cwd &&
+              retained.agentCommand === (prepared.agentCommand ?? prepared.acpxAgent)) {
+            resumeSessionId = retained.acpSessionId;
+          }
+        }
         if (resumeSessionId && prepared.acpxAgent === "codex" && !prepared.remoteExecutionIdentity) {
           const sessionIdentity = asString(parseObject(ctx.config.managedAiConnection).sessionIdentity, "");
           if (sessionIdentity) await prepareManagedCodexSessionStorage({
@@ -4360,7 +4373,6 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         processIdentitySink.current = ctx.onSpawn;
         flushChildStderr(childStderrState);
         childStderrState.logPath = prepared.childStderrLogPath;
-        const persistedRuntimeStore = createRuntimeStore({ stateDir: prepared.stateDir });
         // Resume with this run's launch environment; keep it out of the saved
         // conversation record without mutating the live runtime's options.
         const runtimeStore = createEphemeralSessionEnvironmentStore(persistedRuntimeStore, prepared.env);
