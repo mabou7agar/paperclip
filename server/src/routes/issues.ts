@@ -14261,6 +14261,8 @@ export function issueRoutes(
             {
               errorCode: "issue_reassigned",
               resultJson: { reassignmentStopConfirmed: true, issueMutationStopId },
+              ...(actor.agentId && actor.runId === runToStopForReassignment.id
+                ? { acknowledgedHandoffStopId: issueMutationStopId } : {}),
               eventMessage: "run cancelled before issue reassignment",
               eventPayload: { issueId: existing.id },
             },

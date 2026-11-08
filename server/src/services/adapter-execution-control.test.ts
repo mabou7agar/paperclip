@@ -204,3 +204,31 @@ it.each(["replaced", "wrong_run", "wrong_promise", "throwing_reader"])("omits pe
   other.finish();
   adapterExecutionControls.delete(runId);
 });
+
+it("allows one cleanup window after an acknowledged handoff, without settling early", async () => {
+  vi.useFakeTimers();
+  const control = createAdapterExecutionControl();
+  const acknowledged = vi.fn(async () => true);
+  let done = false;
+  const pending = waitForAdapterStop(control.settled, 60_000, undefined, control, acknowledged)
+    .then(() => { done = true; });
+  await vi.advanceTimersByTimeAsync(60_001);
+  expect(acknowledged).toHaveBeenCalledTimes(1);
+  expect(done).toBe(false);
+  await vi.advanceTimersByTimeAsync(2_000);
+  control.finish();
+  await pending;
+  expect(done).toBe(true);
+});
+
+it.each([false, true])("never loops the cleanup grace period (acknowledged=%s)", async acknowledged => {
+  vi.useFakeTimers();
+  const control = createAdapterExecutionControl();
+  const proof = vi.fn(async () => acknowledged);
+  const failure = stopTimeout(waitForAdapterStop(control.settled, 60_000, undefined, control, proof));
+  await vi.advanceTimersByTimeAsync(acknowledged ? 120_001 : 60_001);
+  await failure;
+  expect(proof).toHaveBeenCalledTimes(1);
+  expect(vi.getTimerCount()).toBe(0);
+  control.finish();
+});

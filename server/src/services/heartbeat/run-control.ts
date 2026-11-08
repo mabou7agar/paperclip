@@ -239,6 +239,8 @@ export type CancelRunOptions = {
     terminationGraceMs?: number;
     /** Caller is immediately scheduling an explicit successor path. */
     suppressImmediateRecovery?: boolean;
+    /** Exact self-handoff may wait one extra cleanup window after durable Stop. */
+    acknowledgedHandoffStopId?: string;
   };
 
 /** Run control binds cancellation, resource release, and saved-input resumption. */
@@ -1064,7 +1066,18 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
               adapterType: agent?.adapterType,
               runtimeMode: run.runtimeMode,
               abortRequested: control.controller.signal.aborted,
-            }, control);
+            }, control, options.acknowledgedHandoffStopId ? async () => {
+              // Read only authoritative server receipts, never presentation JSON
+              // or provider output. An unrelated Stop cannot extend this wait.
+              const [acknowledged] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+                eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+                eq(heartbeatRuns.status, "cancelled"), eq(heartbeatRuns.errorCode, "issue_reassigned"),
+                sql`${heartbeatRuns.resultJson}->>'issueMutationStopId' = ${options.acknowledgedHandoffStopId}`,
+                sql`${heartbeatRuns.resultJson}->'executionCancellation'->>'state' = 'acknowledged'`,
+              )).limit(1);
+              if (acknowledged) logger.info({ runId: run.id }, "waiting for acknowledged handoff cleanup");
+              return Boolean(acknowledged);
+            } : undefined);
             const stopped = await getRun(run.id);
             if (stopped && isHeartbeatRunTerminalStatus(stopped.status)) {
               if (

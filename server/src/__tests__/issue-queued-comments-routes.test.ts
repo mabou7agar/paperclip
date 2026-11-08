@@ -31,6 +31,7 @@ import { issueThreadInteractionService } from "../services/issue-thread-interact
 import { remoteTerminationReceipt } from "../services/remote-execution-termination.js";
 import { initializeRunIdentity, reconcileSteeredIdentity } from "../services/run-identity.js";
 import { appendHeartbeatRunEvent } from "../services/heartbeat-run-events.js";
+import { adapterExecutionControls, createAdapterExecutionControl } from "../services/adapter-execution-control.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -65,6 +66,7 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
   const testProcesses = new Map<string, ChildProcess>();
 
   afterEach(async () => {
+    adapterExecutionControls.clear();
     for (const [id, child] of testProcesses) {
       runningProcesses.delete(id);
       child.kill();
@@ -275,6 +277,53 @@ describeEmbeddedPostgres("issue queued-comment routes", () => {
     await expect(issueService(db).update(seeded.issueId, { ...data, status: "done" }))
       .rejects.toMatchObject({ status: 403, details: { code: "agent_run_cancelled" } });
   });
+
+  it.each([0, 62_000])("commits a worker's CTO handoff after acknowledged Stop and %i ms cleanup", async cleanupDelayMs => {
+    const f = await seedQueue();
+    await db.delete(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, f.companyId));
+    const ctoId = randomUUID(), stageId = randomUUID();
+    await db.insert(agents).values({ id: ctoId, companyId: f.companyId, name: "CTO", role: "cto",
+      adapterType: "codex_local", status: "idle", runtimeConfig: { heartbeat: { wakeOnDemand: false } } });
+    await db.update(agents).set({ adapterType: "codex_local" }).where(eq(agents.id, f.agentId));
+    await db.update(heartbeatRuns).set({ runtimeMode: "legacy", runtimeModeResolvedAt: new Date() })
+      .where(eq(heartbeatRuns.id, f.runId));
+    const principal = { type: "agent", agentId: f.agentId, userId: null };
+    await db.update(issues).set({ responsibleUserId: "queue-owner", checkoutRunId: f.runId,
+      executionPolicy: { mode: "normal", stages: [{ id: stageId, type: "approval", approvalsNeeded: 1,
+        participants: [{ id: randomUUID(), type: "agent", agentId: ctoId, userId: null }] }], commentRequired: true },
+      executionState: { status: "changes_requested", currentStageId: stageId, currentStageIndex: 0,
+        currentStageType: "approval", currentParticipant: { type: "user", userId: "queue-owner", agentId: null },
+        returnAssignee: principal, completedStageIds: [], changesRequestedCount: 0,
+        lastDecisionOutcome: "changes_requested", lastDecisionId: randomUUID(), reviewRequest: null, monitor: null },
+    }).where(eq(issues.id, f.issueId));
+    const control = createAdapterExecutionControl();
+    adapterExecutionControls.set(f.runId, control);
+    control.controller.signal.addEventListener("abort", () => {
+      void (async () => {
+        await db.update(heartbeatRuns).set({ status: "cancelled", finishedAt: new Date(),
+          resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) ||
+            '{"executionCancellation":{"state":"acknowledged"}}'::jsonb`,
+        }).where(eq(heartbeatRuns.id, f.runId));
+        await db.update(issues).set({ checkoutRunId: null, executionRunId: null,
+          executionAgentNameKey: null, executionLockedAt: null }).where(eq(issues.id, f.issueId));
+        if (cleanupDelayMs) await new Promise(resolve => setTimeout(resolve, cleanupDelayMs));
+        control.finish();
+      })();
+    }, { once: true });
+    const response = await request(app(f.companyId, "queue-owner", { agentId: f.agentId, runId: f.runId }))
+      .patch(`/api/issues/${f.issueId}`).send({ status: "in_review", comment: "Both authorized receipts are saved; CTO acceptance is pending." });
+    expect(response.body).not.toHaveProperty("error");
+    expect(response.status).toBe(200);
+    const [updated] = await db.select().from(issues).where(eq(issues.id, f.issueId));
+    expect(updated).toMatchObject({ status: "in_review", assigneeAgentId: ctoId,
+      executionState: { status: "pending", currentStageId: stageId, returnAssignee: principal } });
+    await vi.waitFor(async () => {
+      const wakes = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, f.companyId));
+      expect(wakes).toHaveLength(1);
+      expect(wakes[0]).toMatchObject({ agentId: ctoId, status: "skipped" });
+    });
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, f.companyId))).toHaveLength(1);
+  }, 120_000);
 
   it.each(["questions", "verdicts"] as const)("rejects admitted %s responses after Stop revokes the run", async kind => {
     const seeded = await seedQueue();
