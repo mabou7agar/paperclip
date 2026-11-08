@@ -35,6 +35,14 @@ describe("classifyAdapterFailureForRecovery", () => {
     expect(classifyContinuationFailure(run as never).kind).toBe("default");
   });
 
+  it("never upgrades a control-plane backoff into a provider reset", () => {
+    const now = new Date("2026-07-15T20:00:00.000Z");
+    const retryAt = "2026-07-15T21:00:00.000Z";
+    expect(classifyAdapterFailureForRecovery({ errorCode: "provider_quota", error: "Weekly quota exhausted", resultJson: {
+      errorFamily: "provider_quota", providerQuotaResetSource: "backoff", retryNotBefore: retryAt,
+    } }, now)).toEqual({ kind: "provider_quota", retryAt: new Date(retryAt), parsedResetTime: false });
+  });
+
   it("uses a typed ACP quota reset without needing the provider's original message", () => {
     const now = new Date("2026-07-15T20:00:00.000Z");
     expect(classifyAdapterFailureForRecovery({

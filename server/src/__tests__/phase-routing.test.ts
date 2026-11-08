@@ -93,6 +93,26 @@ describe("phase routing", () => {
     expect(await service().resolve({ ...review, afterProfileId: api.id, afterPhase: "review" })).toMatchObject({ profile: null });
   });
 
+  it("holds an unknown API renewal and waits for the reported subscription renewal", async () => {
+    const api = { ...claude, id: "api", binding: { ...claude.binding, method: "api_key" as const } };
+    select.mockImplementation(async ({ binding }) => ({ connection: { id: binding.method }, grant: { id: "grant", kind: "organization" }, attribution: { provider: binding.provider, method: binding.method } }));
+    latestEvidence.mockImplementation(async (_company, id) => ({ status: "failed", finishedAt: now, result: id === "subscription"
+      ? { retryNotBefore: "2026-11-08T19:00:00Z", providerQuotaResetSource: "provider" }
+      : { retryNotBefore: "2026-11-07T11:00:00Z", providerQuotaResetSource: "backoff" } }));
+    const route = await service().resolve({ ...input, workMode: "standard", runtimeConfig: { executionResponsibility: "review",
+      phaseRouting: { ...policy, unknownResetCooldownSeconds: 0, review: [claude, api] } } });
+    expect(route).toMatchObject({ phase: "review", profile: null, retryAt: "2026-11-08T19:00:00.000Z" });
+    expect(route?.notes.join(" ")).toContain("renewal date is unknown");
+  });
+
+  it("holds all unknown renewals until confirmation without inventing a retry date", async () => {
+    latestEvidence.mockResolvedValue({ status: "failed", finishedAt: now, result: { providerQuotaResetSource: "backoff", retryNotBefore: "2026-11-07T11:00:00Z" } });
+    expect(await service().resolve({ ...input, runtimeConfig: { phaseRouting: { ...policy, unknownResetCooldownSeconds: 0 } } }))
+      .toMatchObject({ profile: null, retryAt: null, waitReason: "quota_reset_unknown" });
+    expect(phaseRoutingSchema.safeParse({ ...policy, unknownResetCooldownSeconds: 0 }).success).toBe(true);
+    expect(phaseRoutingSchema.safeParse({ ...policy, unknownResetCooldownSeconds: 1 }).success).toBe(false);
+  });
+
   it("fails closed when review is selected without a review chain", async () => {
     expect(await service().resolve({ ...input, workMode: "standard", runtimeConfig: { phaseRouting: policy, executionResponsibility: "review" } }))
       .toMatchObject({ phase: "review", profile: null, retryAt: null, maxFallbackAttempts: 0 });

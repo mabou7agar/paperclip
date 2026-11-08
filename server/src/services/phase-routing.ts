@@ -1,6 +1,6 @@
+import { reportedProviderQuotaReset, type ProviderQuotaResetEvidence } from "./provider-quota-reset.js";
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { extractClaudeRetryNotBefore } from "@paperclipai/adapter-claude-local/server";
 import type { Db } from "@paperclipai/db";
 import {
   ADAPTER_AGNOSTIC_KEYS, PHASE_ROUTING_ADAPTERS, executionPhaseForResponsibility, phaseRouteProfileSchema,
@@ -22,6 +22,7 @@ export const phaseRouteDispatchSchema = z.object({
   connectionId: z.string().nullable(),
   grantId: z.string().nullable(),
   retryAt: z.string().datetime().nullable(),
+  waitReason: z.literal("quota_reset_unknown").optional(),
   notes: z.array(z.string()),
 }).strict();
 export type PhaseRouteDispatch = z.infer<typeof phaseRouteDispatchSchema>;
@@ -57,18 +58,16 @@ export function phaseRouteTaskKey(taskKey: string | null, route: PhaseRouteDispa
 }
 
 export function quotaCooldownUntil(
-  evidence: { status: string; finishedAt: Date | null; result: Record<string, unknown> | null; error?: string | null; provider?: string | null } | null,
+  evidence: ProviderQuotaResetEvidence | null,
   unknownResetCooldownSeconds: number,
   now: Date,
 ): Date | null {
   if (!evidence || evidence.status === "succeeded" || !evidence.finishedAt) return null;
   const result = evidence.result ?? {};
-  const reset = result.providerQuotaRetryNotBefore ?? result.retryNotBefore ?? result.transientRetryNotBefore;
-  const parsedReset = typeof reset === "string" ? Date.parse(reset) : NaN;
-  const until = Number.isFinite(parsedReset)
-    ? new Date(parsedReset)
-    : (evidence.provider === "anthropic" ? extractClaudeRetryNotBefore({ errorMessage: evidence.error }, evidence.finishedAt) : null)
-      ?? new Date(evidence.finishedAt.getTime() + unknownResetCooldownSeconds * 1_000);
+  const backoff = result.providerQuotaResetSource === "backoff" && typeof result.quotaRecoveryBackoffNotBefore === "string"
+    ? new Date(result.quotaRecoveryBackoffNotBefore) : null;
+  const until = reportedProviderQuotaReset(evidence)
+    ?? (backoff && Number.isFinite(backoff.getTime()) ? backoff : new Date(evidence.finishedAt.getTime() + unknownResetCooldownSeconds * 1_000));
   return until.getTime() > now.getTime() ? until : null;
 }
 
@@ -133,6 +132,7 @@ export function phaseRoutingService(db: Db) {
       const afterProfileId = !input.afterPhase || input.afterPhase === phase ? input.afterProfileId : undefined;
       const notes: string[] = taskProfiles ? [`Task-specific ${phase} chain for ${input.issueId}`] : [];
       const retryDates: Date[] = [];
+      let unknownResetHeld = false;
       const previousIndex = afterProfileId ? profiles.findIndex(profile => profile.id === afterProfileId) : -1;
       if (afterProfileId && previousIndex < 0) return {
         phase, workMode, profile: null, connectionId: null, grantId: null, maxFallbackAttempts: profiles.length - 1,
@@ -155,7 +155,13 @@ export function phaseRoutingService(db: Db) {
             maxFallbackAttempts: profiles.length - 1, retryAt: null,
             notes: [`${profile.id}: ${error.message}`] };
         }
-        const cooldown = quotaCooldownUntil(await quota.latestEvidence(input.companyId, account.connection.id, now), policy.data.unknownResetCooldownSeconds, now);
+        const evidence = await quota.latestEvidence(input.companyId, account.connection.id, now);
+        if (evidence && evidence.status !== "succeeded" && policy.data.unknownResetCooldownSeconds === 0 && !reportedProviderQuotaReset(evidence)) {
+          unknownResetHeld = true;
+          notes.push(`${profile.id}: quota exhausted; renewal date is unknown. Confirm quota restoration before retrying.`);
+          continue;
+        }
+        const cooldown = quotaCooldownUntil(evidence, policy.data.unknownResetCooldownSeconds, now);
         if (cooldown) {
           retryDates.push(cooldown);
           notes.push(`${profile.id}: quota cooldown until ${cooldown.toISOString()}`);
@@ -174,6 +180,7 @@ export function phaseRoutingService(db: Db) {
         phase, workMode, profile: null, connectionId: null, grantId: null,
         maxFallbackAttempts: profiles.length - 1,
         retryAt: retryDates.length ? new Date(Math.min(...retryDates.map(date => date.getTime()))).toISOString() : null,
+        ...(!retryDates.length && unknownResetHeld ? { waitReason: "quota_reset_unknown" as const } : {}),
         notes,
       };
     },

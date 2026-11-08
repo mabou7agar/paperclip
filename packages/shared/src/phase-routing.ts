@@ -38,7 +38,7 @@ export const phaseRoutingSchema = z.object({
     implementation: phaseProfilesSchema.optional(),
     review: phaseProfilesSchema.optional(),
   }).strict()).optional(),
-  unknownResetCooldownSeconds: z.number().int().min(60).max(86_400).default(3_600),
+  unknownResetCooldownSeconds: z.number().int().min(0).max(86_400).refine(value => value === 0 || value >= 60, "Use 0 to wait for confirmation, or at least 60 seconds").default(3_600),
 }).strict();
 
 export type PhaseRouteProfile = z.infer<typeof phaseRouteProfileSchema>;

@@ -1,9 +1,30 @@
-import { and, desc, eq, or, sql } from "drizzle-orm";
-import { heartbeatRuns, type Db } from "@paperclipai/db";
+import { and, asc, desc, eq, or, sql } from "drizzle-orm";
+import { activityLog, heartbeatRuns, type Db } from "@paperclipai/db";
 
 /** Read immutable execution attribution, never an agent's mutable current account. */
 export function providerQuotaRepository(db: Db) {
   return {
+    async unlabelledRecoveryResets(companyId: string) {
+      const rows = await db.selectDistinctOn([heartbeatRuns.id], {
+        runId: heartbeatRuns.id, details: activityLog.details,
+      }).from(heartbeatRuns).leftJoin(activityLog, and(
+        eq(activityLog.companyId, companyId), eq(activityLog.runId, heartbeatRuns.id),
+        eq(activityLog.actorType, "system"), eq(activityLog.actorId, "recovery"),
+        eq(activityLog.action, "issue.monitor_scheduled"),
+        sql`${activityLog.details}->>'source' = 'recovery.provider_quota'`,
+      )).where(and(eq(heartbeatRuns.companyId, companyId),
+        sql`${heartbeatRuns.resultJson}->>'recoveryClassification' = 'provider_quota'`,
+        sql`${heartbeatRuns.resultJson}->>'providerQuotaResetSource' is null`,
+      )).orderBy(heartbeatRuns.id, asc(activityLog.createdAt), asc(activityLog.id));
+      return rows.map(row => ({ runId: row.runId, parsedResetTime: row.details?.parsedResetTime }));
+    },
+    async labelRecoveryReset(companyId: string, runId: string, source: "provider" | "backoff") {
+      return db.update(heartbeatRuns).set({ resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb)
+        || jsonb_build_object('providerQuotaResetSource',${source}::text)` })
+        .where(and(eq(heartbeatRuns.companyId,companyId),eq(heartbeatRuns.id,runId),
+          sql`${heartbeatRuns.resultJson}->>'providerQuotaResetSource' is null`))
+        .returning({ id: heartbeatRuns.id }).then(rows => rows.length > 0);
+    },
     async latestEvidence(companyId: string, connectionId: string, _now: Date) {
       return db.select({
         id: heartbeatRuns.id,

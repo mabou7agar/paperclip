@@ -229,6 +229,32 @@ async function eventually(check: () => Promise<boolean>, attempts = 200) {
     expect((await db.select().from(agents).where(eq(agents.id, agentId)))[0].adapterType).toBe("claude_local");
   }, 30_000);
 
+  it("holds undated exhausted connections across repeated scheduler sweeps without executing providers", async () => {
+    const { companyId, agentId, issueId } = await seed("planning");
+    await db.update(agents).set({ runtimeConfig: {
+      phaseRouting: { ...policy, unknownResetCooldownSeconds: 0 }, heartbeat: { wakeOnDemand: true },
+    } }).where(eq(agents.id, agentId));
+    for (const connectionId of [claudeId, codexId]) await db.insert(heartbeatRuns).values({
+      companyId, agentId, scopeKind: "issue", issueId, invocationSource: "assignment", status: "failed",
+      finishedAt: new Date(), errorCode: "provider_quota",
+      resultJson: { errorFamily: "provider_quota", providerQuotaResetSource: "backoff",
+        retryNotBefore: new Date(Date.now() + 3_600_000).toISOString() },
+      contextSnapshot: { issueId, aiConnection: { connectionId } },
+    });
+    await wake(agentId, issueId);
+    await eventually(async () => (await db.select().from(heartbeatRuns)).some(run => run.errorCode === "configuration_incomplete"));
+    for (let pass = 0; pass < 3; pass++) {
+      await heartbeat.promoteDueScheduledRetries(new Date(Date.now() + 86_400_000));
+      await heartbeat.resumeQueuedRuns();
+      await heartbeat.drainActiveRunExecutions();
+    }
+    expect(mocks.execute).not.toHaveBeenCalled();
+    const runs = await db.select().from(heartbeatRuns);
+    expect(runs.filter(run => run.status === "scheduled_retry")).toHaveLength(0);
+    const gate = runs.find(run => run.errorCode === "configuration_incomplete")!;
+    expect(gate.resultJson).toMatchObject({ configurationIncomplete: { reason: "ai_connection_quota_reset_unknown" } });
+  });
+
   it("falls back once after Claude quota and records a shared connection cooldown", async () => {
     const { companyId, agentId, issueId } = await seed("planning");
     mocks.execute.mockImplementation(async ctx => {

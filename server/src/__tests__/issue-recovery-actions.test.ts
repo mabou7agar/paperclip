@@ -1382,6 +1382,30 @@ describeEmbeddedPostgres("issue recovery actions", () => {
     expect(await db.select().from(issueRecoveryActions)).toHaveLength(0);
   });
 
+  it("holds unknown quota renewal without monitors or repeated wakes when configured", async () => {
+    const { companyId, coderId, sourceIssueId } = await seedCompany();
+    await db.update(agents).set({ runtimeConfig: { phaseRouting: { unknownResetCooldownSeconds: 0 } } })
+      .where(eq(agents.id, coderId));
+    await db.insert(heartbeatRuns).values({
+      id: randomUUID(), companyId, agentId: coderId, invocationSource: "manual", status: "failed",
+      error: "API Error: Request rejected (429) · api key 7天限额已用完", errorCode: "provider_quota",
+      resultJson: { executionRecovery: { kind: "bootstrap", providerWorkStarted: false } },
+      startedAt: new Date("2026-07-15T20:00:00Z"), finishedAt: new Date("2026-07-15T20:01:00Z"),
+      contextSnapshot: { issueId: sourceIssueId },
+    });
+    const enqueueWakeup = vi.fn(async () => null);
+    const recovery = recoveryService(db, { enqueueWakeup });
+    for (let pass = 0; pass < 2; pass++) {
+      const result = await recovery.reconcileStrandedAssignedIssues();
+      expect(result.providerQuotaMonitored).toBe(0);
+      expect(result.escalated).toBe(0);
+    }
+    const [issue] = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
+    expect(issue.executionPolicy?.monitor ?? null).toBeNull();
+    expect(await db.select().from(issueRecoveryActions)).toHaveLength(0);
+    expect(enqueueWakeup).not.toHaveBeenCalled();
+  });
+
   it("classifies model lookup failures as configuration incomplete without waking a recovery owner", async () => {
     const { companyId, coderId, sourceIssueId } = await seedCompany();
     const runId = randomUUID();

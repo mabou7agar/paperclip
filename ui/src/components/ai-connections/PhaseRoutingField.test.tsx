@@ -120,3 +120,13 @@ it("preserves API-configured task exceptions when company defaults are edited", 
   flushSync(() => add.click());
   expect(changed.mock.lastCall?.[0].taskOverrides).toEqual(taskOverrides);
 });
+
+
+it("allows holding unknown quota renewals with a zero cooldown", async () => {
+  mount(<PhaseRoutingField {...common} value={{ ...recommendedPhaseRouting(), unknownResetCooldownSeconds: 0 }} onChange={changed} />);
+  await settle();
+  const input = container.querySelector<HTMLInputElement>('input[type="number"]')!;
+  expect(input.value).toBe("0");
+  expect(input.min).toBe("0");
+  expect(container.textContent).toContain("0 waits for quota confirmation");
+});

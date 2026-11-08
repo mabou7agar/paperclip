@@ -1,3 +1,5 @@
+import { unknownQuotaResetBackoffSeconds } from "../provider-quota-reset.js";
+import { phaseRoutingSettingsRepository } from "../../repositories/phase-routing-settings.js";
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
 import { monitoringService } from "../monitoring.js";
 import { isAiAuthenticationBlocked } from "../ai-auth-failure.js";
@@ -661,6 +663,7 @@ export function classifyAdapterFailureForRecovery(
     return null;
 
   const persistedRetryAt =
+    readNonEmptyString(resultJson.quotaRecoveryBackoffNotBefore) ??
     readNonEmptyString(resultJson.retryNotBefore) ??
     readNonEmptyString(resultJson.transientRetryNotBefore) ??
     readNonEmptyString(resultJson.providerQuotaRetryNotBefore);
@@ -675,7 +678,7 @@ export function classifyAdapterFailureForRecovery(
     return {
       kind: "provider_quota",
       retryAt: parsedPersistedRetryAt,
-      parsedResetTime: true,
+      parsedResetTime: resultJson.providerQuotaResetSource !== "backoff",
     };
   }
 
@@ -2578,6 +2581,8 @@ export function recoveryService(
                   : recoveryCause === "configuration_incomplete"
                     ? readConfigurationIncompletePayload(input.latestRun)?.reason === "workspace_base_ref_unresolved"
                       ? "Check the starting branch and repository access, then repair the task’s branch and retry the original assignee."
+                      : readConfigurationIncompletePayload(input.latestRun)?.reason === "ai_connection_quota_reset_unknown"
+                      ? "Confirm quota restoration in Usage Health or provide a verified renewal time, then continue the same task."
                       : readConfigurationIncompletePayload(input.latestRun)?.reason === "ai_connection_unavailable"
                       ? "Reconnect the selected AI account or choose an available connection, then continue the task."
                       : readConfigurationIncompletePayload(input.latestRun)
@@ -2616,6 +2621,7 @@ export function recoveryService(
     const result = parseObject(latestRun?.resultJson);
     const context = parseObject(latestRun?.contextSnapshot);
     const raw =
+      result.quotaRecoveryBackoffNotBefore ??
       result.providerQuotaRetryNotBefore ??
       result.retryNotBefore ??
       result.transientRetryNotBefore ??
@@ -2639,6 +2645,11 @@ export function recoveryService(
     actionId: string;
     agentId: string;
   }) {
+    if (input.latestRun) {
+      const classification = classifyAdapterFailureForRecovery(input.latestRun);
+      if (classification?.kind === "provider_quota" && await holdUnknownQuotaReset(
+        input.issue.companyId, input.issue.id, input.agentId, input.latestRun, classification)) return null;
+    }
     const existing = await db
       .select()
       .from(heartbeatRuns)
@@ -4244,9 +4255,15 @@ export function recoveryService(
       classification.kind === "provider_quota"
         ? {
             errorFamily: "provider_quota",
-            retryNotBefore: classification.retryAt.toISOString(),
-            transientRetryNotBefore: classification.retryAt.toISOString(),
-            providerQuotaRetryNotBefore: classification.retryAt.toISOString(),
+            providerQuotaResetSource: classification.parsedResetTime ? "provider" : "backoff",
+            ...(classification.parsedResetTime ? {
+              retryNotBefore: classification.retryAt.toISOString(),
+              transientRetryNotBefore: classification.retryAt.toISOString(),
+              providerQuotaRetryNotBefore: classification.retryAt.toISOString(),
+            } : {
+              quotaRecoveryBackoffNotBefore: classification.retryAt.toISOString(),
+              retryNotBefore: null, transientRetryNotBefore: null, providerQuotaRetryNotBefore: null,
+            }),
           }
         : { errorFamily: "configuration_incomplete" };
     const errorCode = classification.kind;
@@ -4260,6 +4277,18 @@ export function recoveryService(
         recoveryClassification: errorCode,
       },
     };
+  }
+
+  async function holdUnknownQuotaReset(companyId: string, issueId: string, agentId: string,
+    latestRun: NonNullable<LatestIssueRun>, classification: Extract<NonNullable<AdapterFailureRecoveryClassification>, { kind: "provider_quota" }>) {
+    if (classification.parsedResetTime) return false;
+    const [companyPolicy, agent] = await Promise.all([
+      phaseRoutingSettingsRepository(db).get(companyId), getAgent(agentId),
+    ]);
+    if (unknownQuotaResetBackoffSeconds(companyPolicy, agent?.runtimeConfig) !== 0) return false;
+    await monitoringService(db).observe({ companyId, issueId, kind: "no_execution_path",
+      fingerprint: JSON.stringify(["provider_quota_reset_unknown", agentId, latestRun.id]) });
+    return true;
   }
 
   async function scheduleProviderQuotaRecoveryMonitor(input: {
@@ -4279,6 +4308,9 @@ export function recoveryService(
     const targetAgentId = getAdapterFailureRecoveryTargetAgentId(input.issue);
     if (!targetAgentId || input.latestRun.agentId !== targetAgentId)
       return null;
+
+    if (await holdUnknownQuotaReset(input.issue.companyId, input.issue.id, targetAgentId,
+      input.latestRun, input.classification)) return null;
 
     const previousPolicy = normalizeIssueExecutionPolicy(
       input.issue.executionPolicy ?? null,

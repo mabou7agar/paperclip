@@ -2149,7 +2149,7 @@ export function heartbeatService(
       if (phaseRoute && !phaseRoute.profile) {
         if (!phaseRoute.retryAt) throw new ConfigurationIncompleteFailure(
           phaseRoute.notes.join("; ") || "Configure the phase routing connection",
-          { configurationIncomplete: { reason: "ai_connection_unavailable", actionUrl: `/agents/${agent.id}/runtime` } },
+          { configurationIncomplete: { reason: phaseRoute.waitReason === "quota_reset_unknown" ? "ai_connection_quota_reset_unknown" : "ai_connection_unavailable", actionUrl: `/agents/${agent.id}/runtime` } },
         );
         const now = new Date();
         const reason = "All connections for this phase are on quota cooldown";

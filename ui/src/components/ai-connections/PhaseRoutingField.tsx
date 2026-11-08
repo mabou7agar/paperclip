@@ -102,7 +102,7 @@ export function PhaseRoutingField({ companyId, agentId, agentName, adapterType, 
       <Button variant="outline" size="sm" onClick={() => update(phase, [...(value[phase] ?? []), profileFor("codex_local", crypto.randomUUID())])}>{t("addFallback")}</Button>
     </fieldset>)}
     {enabled && value && <label className="block space-y-1 text-sm">{t("unknownCooldown")}
-      <Input type="number" min={60} max={86400} value={value.unknownResetCooldownSeconds} onChange={event => onChange({ ...value, unknownResetCooldownSeconds: Number(event.target.value) })} />
+      <Input type="number" min={0} max={86400} value={value.unknownResetCooldownSeconds} onChange={event => onChange({ ...value, unknownResetCooldownSeconds: Number(event.target.value) })} />
     </label>}
   </div>;
 }
