@@ -1,0 +1,11 @@
+---
+title: Task page performance
+---
+
+Task history retains all run metadata and comments. The task chat initially hydrates the most recent 20 runs, including current live output. Use **Load older run output** to retrieve another page without discarding earlier task records. Navigating to another task resets this output window. Legacy and native transcript transports share this selection.
+
+Persisted log hydration uses four concurrent readers and prioritizes current output. Completed logs are retained while their byte metadata is unchanged; a live update does not refetch every completed run. Explicit Retry or changed output metadata allows another read. Aborted reads never become completed cache entries.
+
+Measure task-detail latency, historical-log request counts and database query plans separately. A large fan-out of log reads can occupy database connections and CPU even when each query has an index. Server-Timing on the task detail response separates lookup, authorization, relations, recovery and other read phases.
+
+PostgreSQL already caches database pages in `shared_buffers` and the operating system cache. Operators may size this buffer against the database container's actual memory allowance and measured working set; it is not a replacement for request bounds or efficient queries. Changing `shared_buffers` requires a database restart. Preserve normal disk storage and WAL durability; RAM-only database storage is unnecessary for task-page acceleration.

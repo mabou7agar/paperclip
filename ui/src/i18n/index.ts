@@ -5,12 +5,13 @@ import { DEFAULT_LOCALE, i18nextResources, supportedLocales } from "./locales";
 import { usageHealthMessages } from "./usage-health";
 import { phaseRoutingMessages } from "./phase-routing";
 import { monitoringMessages } from "./monitoring";
+import { transcriptHistoryMessages } from "./transcript-history";
 
 const i18nextOptions: InitOptions = {
   resources: {
     ...i18nextResources,
-    en: { ...i18nextResources.en, phaseRouting: phaseRoutingMessages.en, usageHealth: usageHealthMessages.en, monitoring: monitoringMessages.en },
-    ar: { ...i18nextResources.ar, phaseRouting: phaseRoutingMessages.ar, usageHealth: usageHealthMessages.ar, monitoring: monitoringMessages.ar },
+    en: { ...i18nextResources.en, phaseRouting: phaseRoutingMessages.en, usageHealth: usageHealthMessages.en, monitoring: monitoringMessages.en, transcriptHistory: transcriptHistoryMessages.en },
+    ar: { ...i18nextResources.ar, phaseRouting: phaseRoutingMessages.ar, usageHealth: usageHealthMessages.ar, monitoring: monitoringMessages.ar, transcriptHistory: transcriptHistoryMessages.ar },
   },
   lng: DEFAULT_LOCALE,
   fallbackLng: DEFAULT_LOCALE,

@@ -30,6 +30,8 @@ import {
   type RunTranscriptSource,
 } from "@/components/transcript/useLiveRunTranscripts";
 import { useNativeRunTranscripts } from "@/components/transcript/useNativeRunTranscripts";
+import { useTranslation } from "@/i18n";
+import { MAX_ISSUE_CHAT_TRANSCRIPT_RUNS, resolveIssueChatTranscriptRuns } from "@/lib/issueChatTranscriptRuns";
 import { TaskChatLiveTail } from "@/components/task-chat/TaskChatLiveTail";
 import { TaskChatRunnerTurn } from "@/components/task-chat/TaskChatRunnerTurn";
 import {
@@ -881,7 +883,7 @@ export function TaskChatThread(props: TaskChatThreadProps) {
     ],
   );
 
-  // Every run we might need a transcript for (history + live), deduped by id.
+  // Keep all metadata, but hydrate older output only when requested.
   const runs = useMemo<RunTranscriptSource[]>(() => {
     const map = new Map<string, RunTranscriptSource>();
     for (const r of linkedRuns ?? []) {
@@ -918,9 +920,20 @@ export function TaskChatThread(props: TaskChatThreadProps) {
     return [...map.values()];
   }, [linkedRuns, liveRuns, activeRun]);
 
+  const { t: historyText } = useTranslation("transcriptHistory");
+  const [historyWindow, setHistoryWindow] = useState({ issueId, limit: MAX_ISSUE_CHAT_TRANSCRIPT_RUNS });
+  const historyLimit = historyWindow.issueId === issueId ? historyWindow.limit : MAX_ISSUE_CHAT_TRANSCRIPT_RUNS;
+  const transcriptRuns = useMemo(() => {
+    const selected = new Set(resolveIssueChatTranscriptRuns({
+      linkedRuns, liveRuns, activeRun, limit: historyLimit,
+    }).map(run => run.id));
+    return runs.filter(run => selected.has(run.id));
+  }, [runs, linkedRuns, liveRuns, activeRun, historyLimit]);
+  const olderRunCount = runs.length - transcriptRuns.length;
+
   const nativeRuns = useMemo(
-    () => runs.filter((run) => run.runtimeMode === "native"),
-    [runs],
+    () => transcriptRuns.filter((run) => run.runtimeMode === "native"),
+    [transcriptRuns],
   );
   const {
     transcriptByRun: nativeTranscriptByRun,
@@ -929,7 +942,7 @@ export function TaskChatThread(props: TaskChatThreadProps) {
     hydratedRunIds: hydratedNativeRunIds,
     retry: retryNativeEvents,
   } = useNativeRunTranscripts(nativeRuns);
-  const logRuns = useMemo(() => runs.filter((run) =>
+  const logRuns = useMemo(() => transcriptRuns.filter((run) =>
     run.runtimeMode !== "native" ||
     // Active runs still need the websocket log stream. Only settled native
     // history can skip the legacy transport when event history is available.
@@ -937,7 +950,7 @@ export function TaskChatThread(props: TaskChatThreadProps) {
     nativeTranscriptErrorsByRun.has(run.id) ||
     (hydratedNativeRunIds?.has(run.id) &&
       (nativeTranscriptByRun.get(run.id)?.length ?? 0) === 0)
-  ), [runs, nativeTranscriptErrorsByRun, hydratedNativeRunIds, nativeTranscriptByRun]);
+  ), [transcriptRuns, nativeTranscriptErrorsByRun, hydratedNativeRunIds, nativeTranscriptByRun]);
   const {
     transcriptByRun: logTranscriptByRun,
     isInitialHydrating: logsAreInitiallyHydrating,
@@ -2863,7 +2876,7 @@ export function TaskChatThread(props: TaskChatThreadProps) {
         comment.derivedCreatedByRunId,
       ]),
   );
-  const initialRuns = runs.filter((run) => {
+  const initialRuns = transcriptRuns.filter((run) => {
     if (
       !initialCommentWindow.current ||
       !isTerminalRunStatus(run.status) ||
@@ -2946,6 +2959,14 @@ export function TaskChatThread(props: TaskChatThreadProps) {
     void retryPlan();
   };
 
+  const historyHeader = olderRunCount > 0 ? <>
+    <Button variant="ghost" size="sm" data-testid="load-older-run-output"
+      onClick={() => setHistoryWindow({ issueId, limit: historyLimit + MAX_ISSUE_CHAT_TRANSCRIPT_RUNS })}>
+      {historyText("loadOlder", { count: olderRunCount })}
+    </Button>
+    {threadHeaderWithBlockers}
+  </> : threadHeaderWithBlockers;
+
   return (
     <TaskChatExpansionState.Provider value={expansionState.current}>
       <TaskChatScrollReady.Provider value={!historyPending || historyWaitExpired}>
@@ -3014,7 +3035,7 @@ export function TaskChatThread(props: TaskChatThreadProps) {
                       isMobile ? undefined : "min-h-0 flex-1 overflow-y-auto"
                     }
                   >
-                    {threadHeaderWithBlockers ? (
+                    {historyHeader ? (
                       <div
                         className={cn(
                           "mx-auto flex w-full max-w-(--tc-shell-max-w) flex-col gap-6 px-4",
@@ -3023,7 +3044,7 @@ export function TaskChatThread(props: TaskChatThreadProps) {
                         )}
                         data-testid="task-chat-thread-header"
                       >
-                        {threadHeaderWithBlockers}
+                        {historyHeader}
                       </div>
                     ) : null}
                     <div className="px-3 py-10 text-center text-sm text-muted-foreground">
@@ -3044,7 +3065,7 @@ export function TaskChatThread(props: TaskChatThreadProps) {
                   <TaskChatThreadView
                     items={items}
                     attachments={attachments}
-                    header={threadHeaderWithBlockers}
+                    header={historyHeader}
                     renderInteraction={renderInteraction}
                     renderBrief={renderBrief}
                     renderMessageActions={renderMessageActions}

@@ -25,6 +25,7 @@ const SOCKET_CONNECTING = 0;
 const SOCKET_OPEN = 1;
 const LOG_POLL_INTERVAL_MS = 2000;
 const LOG_READ_LIMIT_BYTES = 256_000;
+const MAX_CONCURRENT_LOG_READS = 4;
 // When realtime websocket updates are enabled, the frequent log poll is
 // redundant with the live stream; keep only a slow safety-net poll to cover
 // gaps and reconnects instead of polling every couple of seconds.
@@ -133,6 +134,7 @@ export function useLiveRunTranscripts({
   const [retryGeneration, setRetryGeneration] = useState(0);
   const retry = useCallback(() => {
     missingTerminalLogRunIdsRef.current.clear();
+    completedTerminalLogsRef.current.clear();
     setRetryGeneration((value) => value + 1);
   }, []);
   const seenChunkKeysRef = useRef(new Set<string>());
@@ -143,6 +145,7 @@ export function useLiveRunTranscripts({
   const pendingLogRowsByRunRef = useRef(new Map<string, string>());
   const logOffsetByRunRef = useRef(new Map<string, number>());
   const missingTerminalLogRunIdsRef = useRef(new Set<string>());
+  const completedTerminalLogsRef = useRef(new Map<string, number | null>());
   // PAP-462 B3: buffered runs that dropped out of the `runs` list, mapped to the
   // wall-clock deadline (ms) after which their buffer may be pruned. A run still
   // inside its grace window is retained across the empty poll; `pruneTick` fires
@@ -280,6 +283,9 @@ export function useLiveRunTranscripts({
         missingTerminalLogRunIdsRef.current.delete(runId);
       }
     }
+    for (const runId of completedTerminalLogsRef.current.keys()) {
+      if (!retainedRunIds.has(runId)) completedTerminalLogsRef.current.delete(runId);
+    }
     for (const runId of transcriptCacheRef.current.keys()) {
       if (!retainedRunIds.has(runId)) {
         transcriptCacheRef.current.delete(runId);
@@ -310,6 +316,8 @@ export function useLiveRunTranscripts({
       if (missingTerminalLogRunIdsRef.current.has(run.id) || inFlightRunIds.has(run.id)) {
         return;
       }
+      if (isTerminalStatus(run.status) && completedTerminalLogsRef.current.has(run.id)
+          && completedTerminalLogsRef.current.get(run.id) === runKnownLogBytes(run)) return;
       inFlightRunIds.add(run.id);
       const offset = logOffsetByRunRef.current.get(run.id) ?? resolveInitialLogOffset(run, logReadLimitBytes);
       try {
@@ -318,6 +326,7 @@ export function useLiveRunTranscripts({
           controller.signal,
         );
         if (cancelled) return;
+        if (isTerminalStatus(run.status)) completedTerminalLogsRef.current.set(run.id, runKnownLogBytes(run));
 
         setErrorsByRun((previous) => {
           if (!previous.has(run.id)) return previous;
@@ -367,7 +376,12 @@ export function useLiveRunTranscripts({
     };
 
     const readAll = async () => {
-      await Promise.all(readableRuns.map((run) => readRunLog(run)));
+      // Let current output load first; historical reads share a bounded queue.
+      const pending = [...readableRuns].sort((a, b) => Number(b.status === "running") - Number(a.status === "running"));
+      let next = 0;
+      await Promise.all(Array.from({ length: Math.min(MAX_CONCURRENT_LOG_READS, pending.length) }, async () => {
+        while (!cancelled && next < pending.length) await readRunLog(pending[next++]);
+      }));
     };
 
     void readAll();

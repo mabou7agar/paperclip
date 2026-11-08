@@ -497,6 +497,23 @@ describe.each(["legacy", "native"] as const)("%s task history readiness", (runti
   );
 });
 
+it("bounds historical output, loads another page on demand, and resets on task navigation", () => {
+  const linkedRuns = Array.from({ length: 142 }, (_, index) => ({
+    runId: `history-${index}`, status: "succeeded", agentId: "agent",
+    adapterType: "codex_local", createdAt: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(), startedAt: null,
+  }));
+  const props = { comments: [], onAdd: async () => {}, linkedRuns };
+  render(<TaskChatThread {...props} issueId="task-one" />);
+  expect(transcriptHookRuns.legacy.at(-1)).toHaveLength(20);
+  expect(transcriptHookRuns.legacy.at(-1)).toContainEqual(expect.objectContaining({ id: "history-141" }));
+  expect(container.textContent).toContain("122 remaining");
+  act(() => container.querySelector<HTMLButtonElement>('[data-testid="load-older-run-output"]')!.click());
+  expect(transcriptHookRuns.legacy.at(-1)).toHaveLength(40);
+  expect(container.textContent).toContain("102 remaining");
+  render(<TaskChatThread {...props} issueId="task-two" />);
+  expect(transcriptHookRuns.legacy.at(-1)).toHaveLength(20);
+});
+
 it("preserves the typed disposition notice through the task-chat adapter", () => {
   render(<TaskChatThread comments={[{
     id: "typed-recovery", companyId: "company", issueId: "issue", authorType: "system", authorAgentId: null, authorUserId: null,
