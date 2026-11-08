@@ -2718,6 +2718,25 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             sql`select id from issues where id = ${issueId} and company_id = ${agent.companyId} for update`,
           );
 
+          // A concrete child-terminal event is consumed once, including after
+          // its follow-up finishes. The issue lock fences concurrent delivery.
+          // Skipped admission remains eligible when its real blocker changes.
+          if (reason === "issue_children_completed" && opts.idempotencyKey &&
+              readNonEmptyString(enrichedContextSnapshot.completedChildIssueId)) {
+            const [delivered] = await tx.select({ id: agentWakeupRequests.id })
+              .from(agentWakeupRequests).where(and(
+                eq(agentWakeupRequests.companyId, agent.companyId),
+                eq(agentWakeupRequests.agentId, agentId),
+                eq(agentWakeupRequests.idempotencyKey, opts.idempotencyKey),
+                sql`${agentWakeupRequests.payload}->>'issueId' = ${issueId}`,
+                ne(agentWakeupRequests.status, "skipped"),
+                // Native status commits persist an intent before dispatch.
+                // Only its real admission receipt means the event was consumed.
+                sql`${agentWakeupRequests.requestedByActorId} is distinct from 'native-status-committer'`,
+              )).limit(1);
+            if (delivered) return { kind: "skipped" as const };
+          }
+
           if (executionWaitRequestId) {
             const [pending] = await tx.select().from(agentWakeupRequests).where(and(
               eq(agentWakeupRequests.id, executionWaitRequestId), eq(agentWakeupRequests.companyId, agent.companyId),

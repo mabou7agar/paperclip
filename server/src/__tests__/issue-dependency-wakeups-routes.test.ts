@@ -347,6 +347,7 @@ describe("issue dependency wakeups in issue routes", () => {
       title: "Last child",
       description: null,
       status: "done",
+      updatedAt: new Date("2026-04-18T12:05:00.000Z"),
       priority: "medium",
       parentId: "parent-1",
       assigneeAgentId: "agent-1",
@@ -395,6 +396,7 @@ describe("issue dependency wakeups in issue routes", () => {
         "agent-9",
         expect.objectContaining({
           reason: "issue_children_completed",
+          idempotencyKey: "issue-child-terminal:parent-1:child-1:2026-04-18T12:05:00.000Z",
           payload: expect.objectContaining({
             issueId: "parent-1",
             completedChildIssueId: "child-1",

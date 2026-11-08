@@ -15712,6 +15712,7 @@ export function issueRoutes(
               source: "automation",
               triggerDetail: "system",
               reason: "issue_children_completed",
+              idempotencyKey: `issue-child-terminal:${parent.id}:${issue.id}:${new Date(issue.updatedAt).toISOString()}`,
               payload: {
                 issueId: parent.id,
                 completedChildIssueId: issue.id,
@@ -19087,6 +19088,7 @@ export function issueRoutes(
               source: "automation",
               triggerDetail: "system",
               reason: "issue_children_completed",
+              idempotencyKey: `issue-child-terminal:${parent.id}:${currentIssue.id}:${new Date(currentIssue.updatedAt).toISOString()}`,
               payload: {
                 issueId: parent.id,
                 completedChildIssueId: currentIssue.id,

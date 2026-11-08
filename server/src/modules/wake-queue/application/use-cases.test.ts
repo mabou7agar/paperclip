@@ -808,6 +808,44 @@ function createFakeAdmissionHelpers(
 }
 
 describe("admitWakeBehindIssueExecution", () => {
+  it("keeps the triage completion receipt separate from an unrelated deferred comment", async () => {
+    const writer = createFakeAdmissionWriter();
+    const reader = createFakeAdmissionReader({ findExistingDeferredWake: vi.fn(async () => ({
+      id: "pending-comment", payload: {}, deferredContext: {}, coalescedCount: 0,
+    })) });
+    const admit = createAdmitWakeBehindIssueExecution({ reader, writer, helpers: createFakeAdmissionHelpers() });
+    await admit(SCOPE, admissionInput({
+      activeExecutionRun: { ...ACTIVE_EXECUTION_RUN, contextSnapshot: { dependencyBlockedInteraction: true } },
+      contextSnapshot: { wakeReason: "issue_children_completed", completedChildIssueId: "child-1" },
+      idempotencyKey: "child-terminal-event",
+    }));
+    expect(reader.findExistingDeferredWake).not.toHaveBeenCalled();
+    expect(writer.mergeIntoExistingDeferredWake).not.toHaveBeenCalled();
+    expect(writer.insertNewDeferredWake).toHaveBeenCalledWith(SCOPE,
+      expect.objectContaining({ idempotencyKey: "child-terminal-event" }));
+  });
+
+  it.each([
+    { activeBlocked: true, incomingBlocked: false, childId: "child-1", status: "running", deferred: true },
+    { activeBlocked: true, incomingBlocked: true, childId: "child-1", status: "running", deferred: false },
+    { activeBlocked: false, incomingBlocked: false, childId: "child-1", status: "running", deferred: false },
+    { activeBlocked: true, incomingBlocked: false, childId: null, status: "running", deferred: false },
+    { activeBlocked: true, incomingBlocked: false, childId: "child-1", status: "queued", deferred: false },
+  ])("preserves a ready child's result behind running dependency triage: %j", async (test) => {
+    const writer = createFakeAdmissionWriter();
+    const reader = createFakeAdmissionReader();
+    const admit = createAdmitWakeBehindIssueExecution({ reader, writer, helpers: createFakeAdmissionHelpers() });
+    const result = await admit(SCOPE, admissionInput({
+      activeExecutionRun: { ...ACTIVE_EXECUTION_RUN, status: test.status,
+        contextSnapshot: { dependencyBlockedInteraction: test.activeBlocked } },
+      contextSnapshot: { wakeReason: "issue_children_completed",
+        completedChildIssueId: test.childId, dependencyBlockedInteraction: test.incomingBlocked },
+    }));
+    expect(result.kind).toBe(test.deferred ? "deferred" : "coalesced");
+    expect(writer.insertNewDeferredWake).toHaveBeenCalledTimes(test.deferred ? 1 : 0);
+    expect(writer.coalesceIntoActiveExecutionRun).toHaveBeenCalledTimes(test.deferred ? 0 : 1);
+  });
+
   it.each(["running", "queued"])(
     "keeps a dedicated durable continuation separate from a %s execution and an existing deferred wake",
     async (status) => {

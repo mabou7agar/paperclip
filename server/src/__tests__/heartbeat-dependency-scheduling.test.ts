@@ -55,6 +55,19 @@ vi.mock("../adapters/index.ts", async () => {
   };
 });
 
+// These journeys exercise queue admission and release, not disk skill import.
+// Keep an unrelated asynchronous inventory scan from racing fixture teardown.
+vi.mock("../services/company-skills.js", async () => {
+  const actual = await vi.importActual<typeof import("../services/company-skills.js")>("../services/company-skills.js");
+  return {
+    ...actual,
+    companySkillService: (...args: Parameters<typeof actual.companySkillService>) => ({
+      ...actual.companySkillService(...args),
+      listRuntimeSkillEntries: async () => [],
+    }),
+  };
+});
+
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
 
@@ -80,7 +93,7 @@ async function ensureIssueRelationsTable(db: ReturnType<typeof createDb>) {
   `));
 }
 
-async function waitForCondition(fn: () => Promise<boolean>, timeoutMs = 3_000) {
+async function waitForCondition(fn: () => Promise<boolean>, timeoutMs = 10_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await fn()) return true;
@@ -798,7 +811,56 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     expect(noActiveRuns).toBe(true);
   });
 
-  it("defers issue_blockers_resolved as a follow-up when the same issue is already running", async () => {
+  it("resumes normal work once after a child completes during the parent's restricted triage turn", async () => {
+    const companyId = randomUUID(), agentId = randomUUID(), blockerId = randomUUID(), issueId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "Triage handoff", issuePrefix: "TH", requireBoardApprovalForNewAgents: false });
+    await db.insert(agents).values({ id: agentId, companyId, name: "Coordinator", role: "engineer", status: "active",
+      adapterType: "codex_local", adapterConfig: {}, runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } }, permissions: {} });
+    await db.insert(issues).values([
+      { id: blockerId, companyId, title: "Child", status: "in_progress", priority: "medium" },
+      { id: issueId, companyId, title: "Parent", status: "blocked", priority: "medium", assigneeAgentId: agentId, responsibleUserId: "responsible-user" },
+    ]);
+    await db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: issueId, type: "blocks" });
+    const commentId = randomUUID();
+    await db.insert(issueComments).values({ id: commentId, companyId, issueId, authorType: "user", authorUserId: "responsible-user", body: "Triage the pending child." });
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    mockAdapterExecute.mockImplementationOnce(async () => {
+      await gate;
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null, summary: "Triage finished", provider: "test", model: "test-model" };
+    });
+    const triage = await heartbeat.wakeup(agentId, { source: "on_demand", triggerDetail: "manual", reason: "issue_commented",
+      payload: { issueId, commentId }, contextSnapshot: { issueId, wakeReason: "issue_commented" } });
+    try {
+      expect(triage).not.toBeNull();
+      expect(await waitForCondition(async () => mockAdapterExecute.mock.calls.length === 1, 10_000)).toBe(true);
+      await db.update(issues).set({ status: "done", updatedAt: new Date() }).where(eq(issues.id, blockerId));
+      const request = { source: "automation" as const, triggerDetail: "system" as const, reason: "issue_children_completed",
+        idempotencyKey: `child-terminal:${issueId}:${blockerId}`, payload: { issueId, completedChildIssueId: blockerId },
+        contextSnapshot: { issueId, wakeReason: "issue_children_completed", completedChildIssueId: blockerId } };
+      await heartbeat.wakeup(agentId, request);
+      await heartbeat.wakeup(agentId, request);
+      expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+      const deferred = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, request.idempotencyKey));
+      expect(deferred).toHaveLength(1);
+      expect(deferred[0]!.status).toBe("deferred_issue_execution");
+      release();
+      expect(await waitForCondition(async () => {
+        const runs = await db.select().from(heartbeatRuns).where(sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`);
+        return runs.length === 2 && runs.every(r => r.status === "succeeded");
+      }, 15_000)).toBe(true);
+      const runs = await db.select().from(heartbeatRuns).where(sql`${heartbeatRuns.contextSnapshot}->>'issueId' = ${issueId}`);
+      expect(runs.find(r => r.id === triage!.id)?.contextSnapshot).toMatchObject({ dependencyBlockedInteraction: true });
+      const resumed = runs.find(r => r.id !== triage!.id)!;
+      expect(resumed.contextSnapshot?.dependencyBlockedInteraction).not.toBe(true);
+      expect(resumed.contextSnapshot?.completedChildIssueId).toBe(blockerId);
+      await heartbeat.wakeup(agentId, request);
+      expect(mockAdapterExecute).toHaveBeenCalledTimes(2);
+      expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, request.idempotencyKey))).toHaveLength(1);
+    } finally { release(); }
+  });
+
+  it.each(["issue_blockers_resolved", "issue_children_completed"])("defers %s behind running dependency triage without duplicate wakes", async (reason) => {
     const companyId = randomUUID();
     const agentId = randomUUID();
     const blockerId = randomUUID();
@@ -835,7 +897,8 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       invocationSource: "on_demand",
       contextSnapshot: {
         issueId: blockedIssueId,
-        wakeReason: "manual_test_active_run",
+        wakeReason: "issue_commented",
+        dependencyBlockedInteraction: true,
       },
     });
     await db.insert(issues).values([
@@ -869,11 +932,11 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       processGroupId: null,
     });
 
-    const idempotencyKey = `issue_blockers_resolved:${blockedIssueId}:${blockerId}`;
-    const wake = await heartbeat.wakeup(agentId, {
-      source: "automation",
-      triggerDetail: "system",
-      reason: "issue_blockers_resolved",
+    const idempotencyKey = `${reason}:${blockedIssueId}:${blockerId}`;
+    const request = {
+      source: "automation" as const,
+      triggerDetail: "system" as const,
+      reason,
       payload: {
         issueId: blockedIssueId,
         resolvedBlockerIssueId: blockerId,
@@ -881,12 +944,13 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       idempotencyKey,
       contextSnapshot: {
         issueId: blockedIssueId,
-        wakeReason: "issue_blockers_resolved",
+        wakeReason: reason,
+        completedChildIssueId: blockerId,
         resolvedBlockerIssueId: blockerId,
       },
-    });
-
-    expect(wake).toBeNull();
+    };
+    expect(await heartbeat.wakeup(agentId, request)).toBeNull();
+    expect(await heartbeat.wakeup(agentId, request)).toBeNull();
 
     const wakeRequests = await db
       .select({

@@ -806,11 +806,21 @@ export function createAdmitWakeBehindIssueExecution(deps: {
         wakeCommentId: input.wakeCommentId,
         forceFreshSession: input.forceFreshSession,
       });
+    // A dependency-triage prompt cannot consume a child's terminal result:
+    // its immutable instructions forbid normal work. Admission has already
+    // re-read dependency readiness and marks incoming blocked interactions.
+    // Keep the newly ready child event behind that turn instead of merging it
+    // into a context the running provider has already read.
+    const leavesDependencyTriage =
+      parseObject(input.activeExecutionRun.contextSnapshot).dependencyBlockedInteraction === true &&
+      input.contextSnapshot.dependencyBlockedInteraction !== true &&
+      input.contextSnapshot.wakeReason === "issue_children_completed" &&
+      Boolean(readNonEmptyString(input.contextSnapshot.completedChildIssueId));
     const shouldQueueFollowupForRunningWake =
-      deps.helpers.shouldQueueFollowupForRunningIssueWake({
+      (leavesDependencyTriage || deps.helpers.shouldQueueFollowupForRunningIssueWake({
         contextSnapshot: input.contextSnapshot,
         wakeCommentId: input.wakeCommentId,
-      }) &&
+      })) &&
       input.activeExecutionRun.status === "running" &&
       isSameExecutionAgent;
     const availableActiveExecutionRun = isSameExecutionAgent
@@ -875,7 +885,7 @@ export function createAdmitWakeBehindIssueExecution(deps: {
     // existing deferred wake, so the coalesce path (the common path) never
     // pays for this query.
     const existingDeferred =
-      (interactionReceipt || input.allowRunCoalescing === false)
+      (interactionReceipt || leavesDependencyTriage || input.allowRunCoalescing === false)
         ? null
         : await deps.reader.findExistingDeferredWake(scope, {
             companyId: input.companyId,
