@@ -1,3 +1,4 @@
+import { codexShellEnvironmentKeys } from "@paperclipai/adapter-utils/codex-shell-environment";
 import { createProviderStoppedBoundary } from "@paperclipai/adapter-utils/provider-stopped-boundary";
 import { createUsageCheckpointLog } from "@paperclipai/adapter-utils/usage-checkpoint";
 import fs from "node:fs/promises";
@@ -1232,15 +1233,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       );
       const args = execArgs.args;
       const pricingContext = execArgs.fastModeApplied ? { serviceTier: "fast" } : undefined;
-      if (ctx.agentIdentity) {
-        const identityNames = ["PAPERCLIP_AGENT_KEY_ID", "PAPERCLIP_AGENT_PUBLIC_KEY", "PAPERCLIP_AGENT_PRIVATE_KEY"];
-        const shellKeys = [...new Set([
-          "PATH", "HOME", "LANG", "LANGUAGE", "LC_ALL", "LC_CTYPE", "TZ", "TMPDIR", "TEMP", "TMP", "CODEX_HOME",
-          // Keep Codex's default secret-name exclusions except for the scoped
-          // Paperclip API token used by the agent skill. Never include host env.
-          ...Object.keys(env).filter(key => key === "PAPERCLIP_API_KEY" || !/key|secret|token/i.test(key)),
-          ...identityNames,
-        ])];
+      if (ctx.agentIdentity || env.PAPERCLIP_GITHUB_BROKER_TOKEN) {
+        const shellKeys = codexShellEnvironmentKeys(env);
         args.unshift("-c", "features.shell_snapshot=false", "-c", 'shell_environment_policy.inherit="all"', "-c", "shell_environment_policy.ignore_default_excludes=true",
           "-c", `shell_environment_policy.include_only=${JSON.stringify(shellKeys)}`);
       }

@@ -159,7 +159,7 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
         engine: "cli",
         // External CODEX_HOME (outside the managed company tree) so no managed
         // seeding rewrites auth.json before teardown; equals the shared host home.
-        env: { CODEX_HOME: sharedHostHome, ...(input.withIdentity ? { MY_SERVICE_TOKEN: "assigned-tool-token" } : {}) },
+        env: { CODEX_HOME: sharedHostHome, ...(input.withIdentity ? { MY_SERVICE_TOKEN: "assigned-tool-token", PAPERCLIP_GITHUB_BROKER_TOKEN: "scoped-broker-token", PAPERCLIP_GITHUB_BRIDGE_TOKEN: "scoped-bridge-token" } : {}) },
       },
       context: {
         paperclipWorkspace: {
@@ -197,13 +197,14 @@ describe("codex execute — outbound auth copy-back restore contribution", () =>
     const policy = commandArgs.find(arg => arg.startsWith("shell_environment_policy.include_only="));
     const keys = JSON.parse(policy!.slice(policy!.indexOf("=") + 1));
     expect(keys).toEqual(expect.arrayContaining([
-      "PAPERCLIP_API_KEY", "PAPERCLIP_AGENT_PRIVATE_KEY",
+      "PAPERCLIP_API_KEY", "PAPERCLIP_AGENT_PRIVATE_KEY", "PAPERCLIP_GITHUB_BROKER_TOKEN", "PAPERCLIP_GITHUB_BRIDGE_TOKEN",
     ]));
     expect(keys).not.toContain("MY_SERVICE_TOKEN");
     expect(keys).not.toContain("DATABASE_URL");
     expect(keys).not.toContain("HOST_DATABASE_PASSWORD");
     expect(commandArgs.join(" ")).not.toContain("assigned-run-token");
     expect(commandArgs.join(" ")).not.toContain("assigned-tool-token");
+    expect(commandArgs.join(" ")).not.toContain("scoped-broker-token");
   });
 
   it("collects stopped-provider instruction edits before a throwing remote restore", async () => {

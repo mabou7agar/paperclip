@@ -1,3 +1,4 @@
+import { codexShellEnvironmentKeys } from "../codex-shell-environment.js";
 import { cancellableSandboxStartup } from "./startup-cancellation.js";
 import { withAdapterExecutionPhase, type AdapterExecutionPhase } from "../execution-phase.js";
 import fs from "node:fs/promises";
@@ -2080,13 +2081,8 @@ async function buildRuntime(input: {
   if (acpxAgent === "codex") {
     const codexStartupConfig = buildCodexStartupConfig({
       existingConfig: env.CODEX_CONFIG,
-      ...(input.ctx.agentIdentity ? { identityEnvironmentKeys: [...new Set([
-        "PATH", "HOME", "LANG", "TMPDIR", "CODEX_HOME",
-        "PAPERCLIP_AGENT_KEY_ID", "PAPERCLIP_AGENT_PUBLIC_KEY", "PAPERCLIP_AGENT_PRIVATE_KEY",
-        // Preserve Codex's default secret-name exclusions. The short-lived
-        // Paperclip API token is required by the agent skill's Bash/curl calls.
-        ...Object.keys(env).filter(key => key === "PAPERCLIP_API_KEY" || !/key|secret|token/i.test(key)),
-      ])] } : {}),
+      ...(input.ctx.agentIdentity || env.PAPERCLIP_GITHUB_BROKER_TOKEN
+        ? { identityEnvironmentKeys: codexShellEnvironmentKeys(env) } : {}),
       requestedModel,
       requestedThinkingEffort,
       fastMode,

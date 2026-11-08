@@ -567,17 +567,26 @@ describe("shared ACPX engine runtime behavior", () => {
   });
 
   it("keeps identity and scoped API access without exposing configured service tokens to Codex shells", async () => {
-    const { meta } = await runExecutor({ agent: "codex", env: { MY_SERVICE_TOKEN: "assigned-tool-token" } }, {
+    const { meta } = await runExecutor({ agent: "codex", env: { MY_SERVICE_TOKEN: "assigned-tool-token", PAPERCLIP_GITHUB_BROKER_TOKEN: "scoped-broker-token", PAPERCLIP_GITHUB_BRIDGE_TOKEN: "scoped-bridge-token" } }, {
       authToken: "assigned-run-token",
       agentIdentity: { keyId: "sha256:test", publicKeyPem: "public", privateKeyPem: "private" },
     });
     const config = JSON.parse(String((meta[0]?.env as Record<string, string>).CODEX_CONFIG));
     expect(config.shell_environment_policy.include_only).toEqual(expect.arrayContaining([
-      "PAPERCLIP_API_KEY", "PAPERCLIP_AGENT_PRIVATE_KEY",
+      "PAPERCLIP_API_KEY", "PAPERCLIP_AGENT_PRIVATE_KEY", "PAPERCLIP_GITHUB_BROKER_TOKEN", "PAPERCLIP_GITHUB_BRIDGE_TOKEN",
     ]));
     expect(config.shell_environment_policy.include_only).not.toContain("MY_SERVICE_TOKEN");
     expect(JSON.stringify(config)).not.toContain("assigned-run-token");
     expect(JSON.stringify(config)).not.toContain("assigned-tool-token");
+    expect(JSON.stringify(config)).not.toContain("scoped-broker-token");
+    expect(JSON.stringify(config)).not.toContain("scoped-bridge-token");
+  });
+
+  it("forwards the managed GitHub capability without an agent signing identity", async () => {
+    const { meta } = await runExecutor({ agent: "codex", env: { PAPERCLIP_GITHUB_BROKER_TOKEN: "scoped-broker-token" } });
+    const config = JSON.parse(String((meta[0]?.env as Record<string, string>).CODEX_CONFIG));
+    expect(config.shell_environment_policy.include_only).toContain("PAPERCLIP_GITHUB_BROKER_TOKEN");
+    expect(JSON.stringify(config)).not.toContain("scoped-broker-token");
   });
 
   it("forwards arbitrary Codex model IDs verbatim without picker-dependent session config", async () => {
