@@ -8,4 +8,19 @@ Persisted log hydration uses four concurrent readers and prioritizes current out
 
 Measure task-detail latency, historical-log request counts and database query plans separately. A large fan-out of log reads can occupy database connections and CPU even when each query has an index. Server-Timing on the task detail response separates lookup, authorization, relations, recovery and other read phases.
 
+History summaries and execution projections expand each large JSON value once
+inside the database before extracting display fields. The repository projection
+uses an empty JSON path and an optimizer barrier to avoid repeated decompression
+of the same toasted value. This preserves SQL NULL, JSON null, scalar and nested
+field behavior. The optimization changes reads only: saved context, native
+sessions, retry counters, older runs, credential visibility and execution guards
+retain their existing behavior. No response or execution-state cache is added.
+
+Compare the complete history response and execution projections against the
+previous reader in a read-only, repeatable-read transaction. Check compressed
+fixtures, legacy activity-linked runs, cross-company access, scheduled retries,
+cleanup holds and credential-name visibility. Measure the full API and page as
+well as individual query plans; a faster isolated query is not proof of a fast
+page under concurrent load.
+
 PostgreSQL already caches database pages in `shared_buffers` and the operating system cache. Operators may size this buffer against the database container's actual memory allowance and measured working set; it is not a replacement for request bounds or efficient queries. Changing `shared_buffers` requires a database restart. Preserve normal disk storage and WAL durability; RAM-only database storage is unnecessary for task-page acceleration.

@@ -1,3 +1,4 @@
+import { projectJsonb } from "../repositories/jsonb-projection.js";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import {
   heartbeatRuns,
@@ -28,10 +29,10 @@ const executionRunColumns = {
   scheduledRetryReason: heartbeatRuns.scheduledRetryReason,
   startedAt: heartbeatRuns.startedAt,
   status: heartbeatRuns.status,
-  contextSnapshot: sql<Record<string, unknown>>`jsonb_build_object(
-    'issueId', ${heartbeatRuns.contextSnapshot}->'issueId',
-    'failureRetriesBeforeAiConnectionWait', ${heartbeatRuns.contextSnapshot}->'failureRetriesBeforeAiConnectionWait',
-    'failureRetriesBeforeWorkspaceWait', ${heartbeatRuns.contextSnapshot}->'failureRetriesBeforeWorkspaceWait')`,
+  contextSnapshot: projectJsonb(heartbeatRuns.contextSnapshot, (value) => sql<Record<string, unknown>>`jsonb_build_object(
+    'issueId', ${value}->'issueId',
+    'failureRetriesBeforeAiConnectionWait', ${value}->'failureRetriesBeforeAiConnectionWait',
+    'failureRetriesBeforeWorkspaceWait', ${value}->'failureRetriesBeforeWorkspaceWait')`),
 };
 type Run = Pick<typeof heartbeatRuns.$inferSelect, keyof typeof executionRunColumns>;
 type Coordinator = typeof nativeRunFinalizations.$inferSelect;
