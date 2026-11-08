@@ -1,3 +1,4 @@
+import { addressedInteractionWakeContext } from "../../../services/addressed-interaction-wake.js";
 import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -174,6 +175,8 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
 
   it("dispatches a directed question after queue promotion without changing ownership, context or retry count", async () => {
     const f = await seedAddressedQuestion(), adapter = createPostgresRunDispatchAdapter(db);
+    expect(await addressedInteractionWakeContext(db, { companyId: f.companyId, issueId: f.issueId,
+      agentId: f.agentId, contextSnapshot: f.contextSnapshot })).toMatchObject({ id: f.interactionId, kind: "ask_user_questions" });
     expect(await adapter.cancelStaleQueuedRun({ ...f, expectedStatus: "queued", now: new Date() }))
       .toMatchObject({ outcome: "not_stale" });
     const [task] = await db.select().from(issues).where(eq(issues.id, f.issueId));
@@ -195,6 +198,8 @@ describeEmbeddedPostgres("run-dispatch postgres adapter", () => {
       .toMatchObject({ allowed: false, errorCode: "issue_waiting_for_response" });
     await db.delete(issueThreadInteractions).where(eq(issueThreadInteractions.id, otherQuestion));
     await db.update(issueThreadInteractions).set({ status: "answered" }).where(eq(issueThreadInteractions.id, f.interactionId));
+    expect(await addressedInteractionWakeContext(db, { companyId: f.companyId, issueId: f.issueId,
+      agentId: f.agentId, contextSnapshot: f.contextSnapshot })).toBeNull();
     expect(await adapter.evaluateScheduledRetryGate({ companyId: f.companyId, runId: f.runId, retryReasonOverride: "ai_connection_busy", now: new Date() }))
       .toMatchObject({ allowed: false, errorCode: "issue_interaction_changed" });
   });

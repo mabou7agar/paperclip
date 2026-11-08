@@ -31,3 +31,10 @@ Historical requests whose queued runs were cancelled before provider execution
 can be resumed once after checking their current audience and blockers. Record a
 durable repair receipt before requesting a wake, retain the old cancellation and
 its context, and do not replay a repair receipt or a completed response.
+
+The runtime supplies a server-verified addressed-card context in both fresh and
+resumed task instructions, including current question/option IDs and the response
+endpoint. The Paperclip skill treats this as a card-only attention turn: no
+checkout, task reassignment, child-task creation or implementation. A comment
+alone does not resolve a question. The existing response-delivery outbox resumes
+the original assignee after the response is saved.

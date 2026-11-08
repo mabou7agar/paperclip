@@ -1,3 +1,4 @@
+import { addressedInteractionWakeContext } from "../addressed-interaction-wake.js";
 import { spekoToolsForSession } from "../voice/speko-agent-tools.js";
 import { githubConfiguredInstructionSources } from "../chat-github-review-policy.js";
 import { CONFIGURED_ENVIRONMENT_KEYS } from "../../vendor/paperclip-runner/index.js";
@@ -2739,6 +2740,9 @@ export async function buildPaperclipWakePayload(input: {
             ),
           }
         : null,
+    addressedInteraction: issueId && input.agentId ? await addressedInteractionWakeContext(input.db, {
+      companyId: input.companyId, issueId, agentId: input.agentId, contextSnapshot: input.contextSnapshot,
+    }) : null,
     interactionKind,
     interactionStatus,
     interactionId,

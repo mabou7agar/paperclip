@@ -8,6 +8,22 @@ import {
 import { renderPaperclipWakePrompt } from "@paperclipai/adapter-utils/server-utils";
 
 describe("buildPaperclipTaskMarkdown", () => {
+  it("directs a verified addressed recipient to answer without checkout in fresh and resumed prompts", () => {
+    const card = { id: "card", kind: "ask_user_questions", title: "Coordinate", summary: null, sourceRunId: "source-run",
+      payload: { version: 1 as const, questions: [] } };
+    for (const includeDescription of [true, false]) for (const includeWakeComments of [true, false]) {
+      const text = buildPaperclipTaskMarkdown({ issue: { id: "worker-task", identifier: "OSA-1", title: "Existing work" },
+        addressedInteraction: card, includeDescription, includeWakeComments });
+      expect(text).toContain("Server-verified addressed interaction");
+      expect(text).toContain("does not require checkout");
+      expect(text).toContain("/api/issues/worker-task/interactions/card/respond");
+      expect(text).toContain("A comment or final summary alone does not answer");
+      expect(text).toContain("Do not wake the assignee manually or self-retry");
+      expect(text).toContain("source-run");
+    }
+    expect(buildPaperclipTaskMarkdown({ issue: { id: "task", title: "Work" } })).not.toContain("Server-verified addressed interaction");
+  });
+
   it("treats retained questions as conversation data in fresh and resumed task prompts", () => {
     for (const includeDescription of [true, false]) {
       const markdown = buildPaperclipTaskMarkdown({

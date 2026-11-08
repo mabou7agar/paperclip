@@ -2897,6 +2897,7 @@ export function heartbeatService(
           ? issueContext.chatCommunicationGuidance
           : null;
       const taskMarkdownInput = {
+        addressedInteraction: paperclipWakePayload?.addressedInteraction ?? null,
         conversationConfirmations: issueRef && isConversation(issueContext)
           ? await getConversationConfirmationContext({ db, companyId: agent.companyId, issueId: issueRef.id, agentId: agent.id })
           : null,
