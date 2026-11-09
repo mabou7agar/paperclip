@@ -17,7 +17,8 @@ export async function recordTaskCompletionReceipt(db: Db, task: Issue): Promise<
   const parent = await repository.task(db, task.companyId, task.parentId);
   // Open parents retain the existing child-completion protocol. A closed
   // delegator still needs a receipt, not another execution of its old task.
-  if (parent?.status !== "done" || !parent.assigneeAgentId || parent.conversationAgentId || parent.assigneeAgentId === task.assigneeAgentId) return null;
+  if (parent?.status !== "done" || !parent.assigneeAgentId || parent.conversationAgentId ||
+      ["onboarding_first_task", "task_watchdog"].includes(parent.originKind) || parent.assigneeAgentId === task.assigneeAgentId) return null;
   const key = `task-completion:${task.id}:${task.statusVersion}:${parent.assigneeAgentId}`;
   const existing = await repository.byKey(db, task.companyId, key);
   if (existing) return existing;
@@ -49,7 +50,8 @@ export async function readCompletionReceipt(db: Db, input: {
       !task.parentId || task.parentId !== wake.payload.completionReceiptParentId || Number(task.statusVersion) !== wake.payload.completionReceiptVersion ||
       input.contextSnapshot.completionReceiptVersion !== wake.payload.completionReceiptVersion) return null;
   const parent = await repository.task(db, input.companyId, task.parentId);
-  if (parent?.status !== "done" || parent.assigneeAgentId !== input.agentId || parent.conversationAgentId || task.assigneeAgentId === input.agentId ||
+  if (parent?.status !== "done" || parent.assigneeAgentId !== input.agentId || parent.conversationAgentId ||
+      ["onboarding_first_task", "task_watchdog"].includes(parent.originKind) || task.assigneeAgentId === input.agentId ||
       wake.idempotencyKey !== `task-completion:${task.id}:${task.statusVersion}:${input.agentId}`) return null;
   const ack = typeof wake.payload.completionAcknowledgementCommentId === "string" ? wake.payload.completionAcknowledgementCommentId : undefined;
   if (ack && !includeAcknowledged) return null;

@@ -63,6 +63,14 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(await issueService(db).getWakeableParentAfterChildCompletion(f.parent.id)).toMatchObject({ id: f.parent.id, assigneeAgentId: f.brain });
   });
 
+  it("keeps onboarding and watchdog parent notifications on their existing paths", async () => {
+    for (const originKind of ["onboarding_first_task", "task_watchdog"]) {
+      const f = await seed(); await db.update(issues).set({ originKind }).where(eq(issues.id, f.parent.id));
+      await f.finish(); expect(await f.receipts()).toHaveLength(0);
+      if (originKind === "onboarding_first_task") expect(await issueService(db).getWakeableParentAfterChildCompletion(f.parent.id)).toMatchObject({ onboardingCompletion: true });
+    }
+  });
+
   it("waits for the same worker run to settle before handing off its final evidence", async () => {
     const f = await seed(), sourceRunId = randomUUID();
     await db.insert(heartbeatRuns).values({ id: sourceRunId, companyId: f.companyId, agentId: f.worker, status: "running", invocationSource: "on_demand", contextSnapshot: { issueId: f.child.id } });
