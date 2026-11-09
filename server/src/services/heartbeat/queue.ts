@@ -238,6 +238,7 @@ export class ChatControlRecoveryUnresolvedError extends Error {
 
 const RUNNING_ISSUE_WAKE_REASONS_REQUIRING_FOLLOWUP = new Set([
   CHAT_COMPLETION_WAKE_REASON,
+  TASK_COMPLETION_RECEIPT_REASON,
   "approval_approved",
   ISSUE_BLOCKERS_RESOLVED_WAKE_REASON,
   "issue_recovery_action_restored",
@@ -4664,6 +4665,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           reason: candidate.reason,
           payload,
           idempotencyKey: candidate.idempotencyKey,
+          ...(candidate.reason === TASK_COMPLETION_RECEIPT_REASON ? { allowRunCoalescing: false } : {}),
           requestedByActorType: "system",
           requestedByActorId: dispatchActorId,
           ...(completedOnboardingGuard ? { issueStateGuard: completedOnboardingGuard } : {}),

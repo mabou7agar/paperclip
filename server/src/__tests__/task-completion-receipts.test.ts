@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { agents, authUsers, agentWakeupRequests, companies, createDb, heartbeatRuns, issueComments, issues } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { issueService } from "../services/issues.js";
-import { heartbeatService } from "../services/heartbeat.js";
+import { heartbeatService, shouldQueueFollowupForRunningIssueWake } from "../services/heartbeat.js";
 import { completionReceiptHttpMutationAllowed, completionReceiptSourceReady, reconcileTaskCompletionReceipt, taskCompletionReceiptState } from "../services/task-completion-receipts.js";
 import { PaperclipRunnerToolAuthority } from "../services/native-runtime/paperclip-runner-tool-authority.js";
 
@@ -55,6 +55,11 @@ const support = await getEmbeddedPostgresTestSupport();
     const f = await seed();
     await expect(db.transaction(async tx => { await issueService(tx as unknown as typeof db).update(f.child.id, { status: "done" }, tx); throw Error("rollback"); })).rejects.toThrow("rollback");
     expect(await f.receipts()).toHaveLength(0);
+  });
+
+  it("keeps new completion input for a fresh recipient turn instead of absorbing it into an active turn", () => {
+    expect(shouldQueueFollowupForRunningIssueWake({ contextSnapshot: { wakeReason: "task_completion_receipt" }, wakeCommentId: null })).toBe(true);
+    expect(shouldQueueFollowupForRunningIssueWake({ contextSnapshot: { wakeReason: "issue_comment_mentioned" }, wakeCommentId: null })).toBe(false);
   });
 
   it("retains the ordinary open-parent protocol", async () => {
