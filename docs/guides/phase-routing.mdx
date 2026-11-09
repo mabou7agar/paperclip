@@ -199,3 +199,13 @@ session, scheduling, company-scoping and quota tests before deployment.
 Claude calendar reset hints with an explicit timezone (for example `Nov 8, 7pm (UTC)`) are honored for new runs and historical quota receipts. Historical hints are anchored to the original failure time; reading them never edits provider receipts or extends the once-only renewal budget. Unrecognized hints retain the configured unknown-reset cooldown.
 
 Multiple accounts for the same harness can occupy separate levels, such as a Claude subscription followed by a Claude Messages API connection. Choose the API account explicitly: a responsible-user binding follows that user’s provider default, even when its wire method is labeled `api_key`. Quota receipts are scoped to the selected connection. To prioritize subscriptions, place all eligible subscription levels before a paid API level in each responsibility chain.
+
+### Managed Codex ACP returns
+
+A managed Codex return keeps its original account-scoped storage coordinates
+before telemetry creates a disposable configuration view. The existing verified
+index repair relocates only that session's immutable rollout path into retained
+storage. This carries forward saved sessions from earlier releases without
+changing their ID, history, model, credential binding or session-key format.
+Caller-owned homes and remote confinement retain their existing behavior.
+Unknown or unproven state still stops for repair; it never starts fresh or retries.

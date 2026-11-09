@@ -473,6 +473,8 @@ interface AcpxPreparedRuntime {
   workspaceRepoUrl: string;
   workspaceRepoRef: string;
   env: Record<string, string>;
+  /** Proven local managed storage paths only; never credentials or launch env. */
+  managedCodexSessionEnv?: Readonly<Record<"HOME" | "CODEX_HOME" | "CODEX_SQLITE_HOME", string>>;
   loggedEnv: Record<string, string>;
   stateDir: string;
   permissionMode: "approve-all" | "approve-reads" | "deny-all";
@@ -2122,6 +2124,16 @@ async function buildRuntime(input: {
   if (acpxAgent === "codex" && managedSessionIdentity && !executionTargetIsRemote) {
     await prepareManagedCodexSessionStorage({ stateDir, sessionIdentity: managedSessionIdentity, env });
   }
+  // Skills/telemetry decorate CODEX_HOME below. Retain only the proven managed
+  // storage coordinates, so a later resume repairs the immutable rollout index
+  // through the original credential home rather than a disposable launch view.
+  const managedHome = env.HOME;
+  const managedCodexHome = env.CODEX_HOME;
+  const managedSqliteHome = env.CODEX_SQLITE_HOME;
+  const managedCodexSessionEnv = acpxAgent === "codex" && managedSessionIdentity && !executionTargetIsRemote
+    && managedHome && managedCodexHome === path.join(managedHome, "provider") && managedSqliteHome
+    ? { HOME: managedHome, CODEX_HOME: managedCodexHome, CODEX_SQLITE_HOME: managedSqliteHome }
+    : undefined;
   if (input.ctx.observability) {
     applyObservabilityEnvironment(env, input.ctx.observability);
   }
@@ -2718,6 +2730,7 @@ async function buildRuntime(input: {
     workspaceRepoUrl,
     workspaceRepoRef,
     env: runtimeEnv,
+    managedCodexSessionEnv,
     loggedEnv,
     stateDir,
     permissionMode,
@@ -4530,10 +4543,10 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
             resumeSessionId = retained.acpSessionId;
           }
         }
-        if (resumeSessionId && prepared.acpxAgent === "codex" && !prepared.remoteExecutionIdentity) {
+        if (resumeSessionId && prepared.acpxAgent === "codex" && !prepared.remoteExecutionIdentity && prepared.managedCodexSessionEnv) {
           const sessionIdentity = asString(parseObject(ctx.config.managedAiConnection).sessionIdentity, "");
           if (sessionIdentity) await prepareManagedCodexSessionStorage({
-            stateDir: prepared.stateDir, sessionIdentity, env: { ...prepared.env }, resumeSessionId,
+            stateDir: prepared.stateDir, sessionIdentity, env: { ...prepared.managedCodexSessionEnv }, resumeSessionId,
           });
         }
         // Borrow the warm entry without removing it, so an overlapping run of the
