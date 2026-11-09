@@ -89,9 +89,11 @@ selector chooses the next eligible profile. One activity-log diagnostic is claim
 atomically across concurrent resolution and server restart. It never writes a
 provider quota failure, changes a shared account cooldown, invokes the primary,
 or schedules a retry. Other tasks and child tasks keep their ordinary chains.
-Saving or removing only drill task exceptions rechecks capacity waits for those
+Saving or removing only the drill field rechecks capacity waits for those
 tasks only; it does not signal company-wide provider-health probes or wake other
-tasks. Ordinary shared-policy changes retain their normal recovery notification.
+tasks. Chain edits and ordinary shared-policy changes retain their normal recovery
+notification. The previous policy and this notification scope are read and saved
+under the same policy-row transaction.
 
 The deadline bounds first activation. A previously accepted diagnostic remains
 valid for the original nonterminal task, so a long implementation does not change

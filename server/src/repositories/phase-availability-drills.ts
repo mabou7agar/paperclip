@@ -2,12 +2,14 @@ import { and, eq, isNull, sql } from "drizzle-orm";
 import { activityLog, heartbeatRuns, issues, type Db } from "@paperclipai/db";
 import type { PhaseAvailabilityDrill } from "@paperclipai/shared";
 
+export type AvailabilityDrillDb = Db | Parameters<Parameters<Db["transaction"]>[0]>[0];
+
 const action = "phase_routing.controlled_availability_fault";
 const sameDrill = (details: Record<string, unknown> | null, drill: PhaseAvailabilityDrill) =>
   details?.phase === drill.phase && details?.profileId === drill.profileId && details?.expiresAt === drill.expiresAt;
 
 /** The activity primary key is the durable one-use claim, including across restarts. */
-export function phaseAvailabilityDrillRepository(db: Db) {
+export function phaseAvailabilityDrillRepository(db: AvailabilityDrillDb) {
   return {
     async isUnusedId(id: string) {
       return !(await db.select({ id: activityLog.id }).from(activityLog).where(eq(activityLog.id, id)).limit(1)).length;

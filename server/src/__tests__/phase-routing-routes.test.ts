@@ -7,7 +7,15 @@ import { ZodError } from "zod";
 import { phaseRoutingSchema } from "@paperclipai/shared";
 
 const mocks = vi.hoisted(() => ({ get: vi.fn(), save: vi.fn(), company: vi.fn(), manage: vi.fn(), activity: vi.fn(), saved: vi.fn() }));
-vi.mock("../services/phase-routing.js", () => ({ phaseRoutingService: () => ({ getCompanyDefaults: mocks.get, saveCompanyDefaults: mocks.save }) }));
+vi.mock("../services/phase-routing.js", async () => {
+  const { phaseRoutingDrillChangeScope } = await import("../services/phase-availability-drills.js");
+  return { phaseRoutingService: () => ({ getCompanyDefaults: mocks.get,
+    saveCompanyDefaultsWithScope: async (input: { policy: typeof policy }) => {
+      const saved = await mocks.save(input);
+      const issueIds = phaseRoutingDrillChangeScope(await mocks.get(), saved);
+      return { policy: saved, scope: issueIds ? { issueIds } : undefined };
+    } }) };
+});
 vi.mock("../services/companies.js", () => ({ companyService: () => ({ getById: mocks.company }) }));
 vi.mock("../routes/ai-connections.js", () => ({ canManageAiConnections: mocks.manage }));
 vi.mock("../services/activity-log.js", () => ({ logActivity: mocks.activity }));
@@ -30,6 +38,7 @@ beforeEach(() => {
   mocks.save.mockImplementation(async input => input.policy);
   mocks.company.mockResolvedValue({ id: "company" });
   mocks.manage.mockResolvedValue(true);
+  mocks.saved.mockResolvedValue(undefined);
 });
 
 describe("versioned phase routing API", () => {

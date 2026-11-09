@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
 import { activityLog, agents, agentTaskSessions, companies, createDb, heartbeatRuns, issues } from "@paperclipai/db";
 import { phaseRoutingSchema, type PhaseAvailabilityDrill } from "@paperclipai/shared";
@@ -8,6 +8,8 @@ import { phaseAvailabilityDrillRepository } from "../repositories/phase-availabi
 import { phaseAvailabilityDrillService, phaseRoutingDrillChangeScope } from "../services/phase-availability-drills.js";
 import { phaseRoutingSettingsRepository } from "../repositories/phase-routing-settings.js";
 import { providerQuotaProbeRepository } from "../repositories/provider-quota-probes.js";
+vi.mock("../services/ai-connections.js", () => ({ aiConnectionService: () => ({ select: async () => ({}) }) }));
+import { phaseRoutingService } from "../services/phase-routing.js";
 
 describe("board-owned task availability drills", () => {
   let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>, db: ReturnType<typeof createDb>;
@@ -84,6 +86,16 @@ describe("board-owned task availability drills", () => {
     drill = { ...drill, id: randomUUID() };
     await expect(validate(previous)).rejects.toThrow("unassigned");
   });
+  it("computes the policy notification scope from its locked transactional previous state", async () => {
+    const next = policy(), initial = { ...next, taskOverrides: undefined };
+    await phaseRoutingSettingsRepository(db).save(companyId, initial);
+    const service = phaseRoutingService(db);
+    const saved = await service.saveCompanyDefaultsWithScope({ companyId, userId: "fixture", policy: next });
+    expect(saved.scope).toEqual({ issueIds: [issueId] });
+    const changed = { ...next, unknownResetCooldownSeconds: 7200 };
+    expect((await service.saveCompanyDefaultsWithScope({ companyId, userId: "fixture", policy: changed })).scope).toBeUndefined();
+    expect(await service.saveCompanyDefaults({ companyId, userId: "fixture", policy: changed })).toEqual(changed);
+  });
   it("refuses a non-primary profile or an absent fallback", async () => {
     drill.profileId = "codex";
     await expect(validate()).rejects.toThrow("primary profile");
@@ -119,6 +131,8 @@ describe("board-owned task availability drills", () => {
     expect(phaseRoutingDrillChangeScope(before, next)).toEqual([issueId]);
     expect(phaseRoutingDrillChangeScope(next, before)).toEqual([issueId]);
     expect(phaseRoutingDrillChangeScope(next, next)).toBeNull();
+    expect(phaseRoutingDrillChangeScope(next, { ...next, taskOverrides: { [issueId]: {
+      ...next.taskOverrides![issueId], planning: [next.planning[1], next.planning[0]] } } })).toBeNull();
     expect(phaseRoutingDrillChangeScope(before, { ...next, planning: [{ ...next.planning[0], model: "different" }, next.planning[1]] })).toBeNull();
     const otherId = randomUUID();
     await db.insert(issues).values({ id: otherId, companyId, title: "Unrelated wait", status: "blocked" });

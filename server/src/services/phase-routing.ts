@@ -13,7 +13,7 @@ import { forbidden, HttpError, unprocessable } from "../errors.js";
 import { phaseRoutingSettingsRepository } from "../repositories/phase-routing-settings.js";
 import { connectionUsageRepository } from "../repositories/connection-usage.js";
 import { connectionUsageCapsService } from "./connection-usage-caps.js";
-import { phaseAvailabilityDrillService } from "./phase-availability-drills.js";
+import { phaseAvailabilityDrillService, phaseRoutingDrillChangeScope } from "./phase-availability-drills.js";
 import { canonicalJson } from "@paperclipai/shared/portability-hash";
 
 export const PHASE_QUOTA_FALLBACK_RETRY_REASON = "phase_quota_fallback";
@@ -85,9 +85,7 @@ export function phaseRoutingService(db: Db) {
   const accounts = aiConnectionService(db);
   const quota = providerQuotaRepository(db);
   const settings = phaseRoutingSettingsRepository(db);
-  return {
-    getCompanyDefaults: settings.get,
-    async saveCompanyDefaults(input: { companyId: string; userId: string; policy: unknown }) {
+  async function saveCompanyDefaultsWithScope(input: { companyId: string; userId: string; policy: unknown }) {
       const policy = phaseRoutingSchema.parse(input.policy);
       if (!await connectionUsageRepository(db).owns(input.companyId,Object.keys(policy.connectionUsageCaps??{}))) throw unprocessable("Usage caps must reference AI connections in this company");
       if (policy.enabled) for (const profile of configuredProfiles(policy)) {
@@ -96,14 +94,20 @@ export function phaseRoutingService(db: Db) {
         await accounts.select({ companyId: input.companyId, agentId: "company-defaults",
           userId: input.userId, adapterType: profile.adapterType, binding: profile.binding, model: profile.model });
       }
-      if (Object.values(policy.taskOverrides ?? {}).some(task => task.availabilityDrill)) {
-        return db.transaction(async tx => {
-          const scoped = phaseRoutingSettingsRepository(tx);
-          await phaseAvailabilityDrillService(tx).validateNew(input.companyId, policy, await scoped.get(input.companyId));
-          return scoped.save(input.companyId, policy);
-        });
-      }
-      return settings.save(input.companyId, policy);
+      return db.transaction(async tx => {
+        const scoped = phaseRoutingSettingsRepository(tx);
+        const previous = await scoped.getForUpdate(input.companyId);
+        await phaseAvailabilityDrillService(tx).validateNew(input.companyId, policy, previous);
+        await scoped.save(input.companyId, policy);
+        const issueIds = phaseRoutingDrillChangeScope(previous, policy);
+        return { policy, scope: issueIds ? { issueIds } : undefined };
+      });
+  }
+  return {
+    getCompanyDefaults: settings.get,
+    saveCompanyDefaultsWithScope,
+    async saveCompanyDefaults(input: { companyId: string; userId: string; policy: unknown }) {
+      return (await saveCompanyDefaultsWithScope(input)).policy;
     },
     async validateConfiguration(input: {
       companyId: string; agentId: string; userId: string | null; isBoard: boolean;

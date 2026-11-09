@@ -97,34 +97,66 @@ async function eventually(check: () => Promise<boolean>, attempts = 1200) {
   }
   const success = (sessionId = randomUUID()): AdapterExecutionResult => ({ exitCode: 0, signal: null, timedOut: false, errorMessage: null, summary: "Finished fake run", provider: "test", model: "test", sessionId, sessionParams: { sessionId } });
 
-  it("resumes an activated task fallback after its arming deadline without quota failure or retry", async () => {
+  it.each([false, true])("uses controlled task availability and preserves fallback session (retained activation: %s)", async retained => {
     const { companyId, agentId, issueId } = await seed("planning");
-    const drill = { id: randomUUID(), phase: "planning" as const, profileId: "claude", expiresAt: new Date(Date.now() - 1_000).toISOString() };
+    const drill = { id: randomUUID(), phase: "planning" as const, profileId: "claude", expiresAt: new Date(Date.now() + (retained ? -1_000 : 600_000)).toISOString() };
     await phaseRoutingSettingsRepository(db).save(companyId, phaseRoutingSchema.parse({ ...policy,
       taskOverrides: { [issueId]: { availabilityDrill: drill } } }));
-    await db.insert(activityLog).values({ id: drill.id, companyId, actorType: "system", actorId: "phase-routing",
+    if (retained) await db.insert(activityLog).values({ id: drill.id, companyId, actorType: "system", actorId: "phase-routing",
       action: "phase_routing.controlled_availability_fault", entityType: "issue", entityId: issueId,
       details: { ...drill, synthetic: true, providerWorkStarted: false, sharedQuotaChanged: false },
       createdAt: new Date(Date.parse(drill.expiresAt) - 1_000) });
-    const sessionId = randomUUID();
+    const sessionId = randomUUID(), blockerId = randomUUID();
+    let turns = 0;
     mocks.execute.mockImplementation(async ctx => {
       expect(ctx.config.model).toBe("codex-test");
+      if (++turns === 1) {
+        // A completed planning turn must publish its real wait disposition;
+        // leaving an actionable task untouched correctly invokes repair.
+        await db.insert(issues).values({ id: blockerId, companyId, title: "Delegated implementation", status: "todo", responsibleUserId: "user" });
+        await db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: issueId, type: "blocks" });
+        await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, issueId));
+      } else {
+        expect(ctx.runtime.sessionParams).toMatchObject({ sessionId });
+        await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      }
       return success(sessionId);
     });
     for (let turn = 0; turn < 2; turn++) {
+      if (turn) await db.update(issues).set({ status: "done" }).where(eq(issues.id, blockerId));
       await wake(agentId, issueId);
       await eventually(async () => mocks.execute.mock.calls.length === turn + 1);
       await heartbeat.drainActiveRunExecutions();
     }
     const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId));
-    expect(runs).toHaveLength(2);
-    expect(runs.every(run => run.status === "succeeded" && !run.retryOfRunId && !run.scheduledRetryAt)).toBe(true);
+    expect(mocks.execute).toHaveBeenCalledTimes(2);
+    expect(runs.filter(run => run.status === "succeeded")).toHaveLength(2);
+    expect(runs.every(run => (run.status === "succeeded" || (run.status === "cancelled" && run.errorCode === "issue_terminal_status"))
+      && !run.retryOfRunId && !run.scheduledRetryAt)).toBe(true);
+    expect(runs.some(run => run.contextSnapshot?.wakeReason === "issue_disposition_repair")).toBe(false);
     expect(runs.find(run => run.sessionIdBefore === sessionId)?.sessionIdAfter).toBe(sessionId);
     const claims = await db.select().from(activityLog).where(eq(activityLog.id, drill.id));
     expect(claims).toHaveLength(1);
     expect(await providerQuotaRepository(db).latestEvidence(companyId, claudeId, new Date(), grantId)).toBeNull();
     expect(await providerQuotaRepository(db).latestEvidence(companyId, codexId, new Date(), grantId)).toBeNull();
     expect((await phaseRoutingSettingsRepository(db).get(companyId))?.planning[0].id).toBe("claude");
+  }, 60_000);
+
+  it("fails closed for expired controlled task availability without invoking Claude or retrying", async () => {
+    const { companyId, agentId, issueId } = await seed("planning");
+    const drill = { id: randomUUID(), phase: "planning" as const, profileId: "claude", expiresAt: new Date(Date.now() - 1_000).toISOString() };
+    await phaseRoutingSettingsRepository(db).save(companyId, phaseRoutingSchema.parse({ ...policy,
+      taskOverrides: { [issueId]: { availabilityDrill: drill } } }));
+    await wake(agentId, issueId);
+    await eventually(async () => (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId)))
+      .some(run => !["queued", "running"].includes(run.status)));
+    await heartbeat.drainActiveRunExecutions();
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId));
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ status: "failed", errorCode: "configuration_incomplete", scheduledRetryAt: null, retryOfRunId: null });
+    expect(runs[0].error).toContain("activation deadline expired");
+    expect(mocks.execute).not.toHaveBeenCalled();
+    expect(await db.select().from(activityLog).where(eq(activityLog.id, drill.id))).toHaveLength(0);
   }, 60_000);
 
   it("routes a standard CTO to worker to Tech Lead review and back without repeating work", async () => {

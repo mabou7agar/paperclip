@@ -9,7 +9,6 @@ import { companyService } from "../services/companies.js";
 import { phaseRoutingService } from "../services/phase-routing.js";
 import { logActivity } from "../services/activity-log.js";
 import { connectionUsageCapsService } from "../services/connection-usage-caps.js";
-import { phaseRoutingDrillChangeScope } from "../services/phase-availability-drills.js";
 
 export function phaseRoutingRoutes(
   db: Db,
@@ -57,8 +56,7 @@ export function phaseRoutingRoutes(
       if (!(await companies.getById(companyId)))
         throw notFound("Company not found");
       const actor = getActorInfo(req);
-      const previous = await service.getCompanyDefaults(companyId);
-      const policy = await service.saveCompanyDefaults({
+      const { policy, scope } = await service.saveCompanyDefaultsWithScope({
         companyId,
         userId: actor.actorId,
         policy: req.body,
@@ -83,8 +81,7 @@ export function phaseRoutingRoutes(
         },
       });
       res.json({ policy });
-      const issueIds = phaseRoutingDrillChangeScope(previous, policy);
-      if (onPolicySaved) void onPolicySaved(companyId, issueIds ? { issueIds } : undefined).catch(() => undefined);
+      if (onPolicySaved) void onPolicySaved(companyId, scope).catch(() => undefined);
     },
   );
   return router;

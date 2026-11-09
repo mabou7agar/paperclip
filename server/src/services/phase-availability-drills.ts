@@ -1,6 +1,5 @@
 import type { PhaseAvailabilityDrill, PhaseRouting } from "@paperclipai/shared";
-import type { Db } from "@paperclipai/db";
-import { phaseAvailabilityDrillRepository } from "../repositories/phase-availability-drills.js";
+import { phaseAvailabilityDrillRepository, type AvailabilityDrillDb } from "../repositories/phase-availability-drills.js";
 import { unprocessable } from "../errors.js";
 import { canonicalJson } from "@paperclipai/shared/portability-hash";
 
@@ -14,12 +13,17 @@ export function phaseRoutingDrillChangeScope(previous: PhaseRouting | null, next
   if (canonicalJson(oldShared) !== canonicalJson(newShared)) return null;
   const changed = [...new Set([...Object.keys(before), ...Object.keys(after)])]
     .filter(id => canonicalJson(before[id] ?? null) !== canonicalJson(after[id] ?? null));
-  return changed.length && changed.every(id => before[id]?.availabilityDrill || after[id]?.availabilityDrill)
+  const withoutDrill = (entry: typeof before[string] | undefined) => {
+    const { availabilityDrill: _drill, ...profiles } = entry ?? {};
+    return profiles;
+  };
+  return changed.length && changed.every(id => (before[id]?.availabilityDrill || after[id]?.availabilityDrill)
+    && canonicalJson(withoutDrill(before[id])) === canonicalJson(withoutDrill(after[id])))
     ? changed : null;
 }
 
 /** A controlled eligibility fault exercises fallback without forging quota evidence. */
-export function phaseAvailabilityDrillService(db: Db) {
+export function phaseAvailabilityDrillService(db: AvailabilityDrillDb) {
   const repository = phaseAvailabilityDrillRepository(db);
   return {
     async validateNew(companyId: string, policy: PhaseRouting, previous: PhaseRouting | null, now = new Date()) {

@@ -12,22 +12,17 @@ auth:bearer {
   token: {{boardToken}}
 }
 body:json {
-  {
-    "enabled": true,
-    "planning": [
-      {"id":"claude","adapterType":"claude_local","model":"claude-opus-5-5","binding":{"mode":"responsible_user","provider":"anthropic","method":"subscription"}},
-      {"id":"astra","adapterType":"codex_local","model":"gpt-6-astra","binding":{"mode":"responsible_user","provider":"openai","method":"subscription"}}
-    ],
-    "implementation": [{"id":"sol","adapterType":"codex_local","model":"gpt-6.1-sol","binding":{"mode":"responsible_user","provider":"openai","method":"subscription"}}],
-    "taskOverrides": {
-      "{{taskId}}": {
-        "availabilityDrill": {"id":"{{drillId}}","phase":"planning","profileId":"claude","expiresAt":"{{drillExpiresAt}}"}
-      }
-    }
-  }
+  {{completeCompanyPolicyWithDrill}}
 }
+
 docs {
-  GET the current complete policy and preserve all its fields before using this PUT replacement.
+  DO NOT SEND a partial example policy. This request intentionally requires a complete JSON variable;
+  an unset variable is invalid JSON and cannot overwrite the policy.
+  First run Get Company Defaults. Set completeCompanyPolicyWithDrill to the entire response.policy,
+  preserving every field and existing task exception. Merge ONLY this field at taskOverrides[taskId]:
+  {"availabilityDrill":{"id":"<fresh UUID>","phase":"planning","profileId":"<existing primary id>","expiresAt":"<UTC deadline>"}}
+  Do not replace the company policy with this fragment. Keep planning, implementation, review, role
+  responsibility maps, usage caps, quota settings and other exceptions from the GET response.
   Use a fresh drill UUID and an expiry within 30 minutes. taskId must identify an unassigned,
   unstarted backlog task in the company. After saving, assign/start that task normally.
   The primary profile is unavailable only for this exact task and phase. The ordinary fallback
