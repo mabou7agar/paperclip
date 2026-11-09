@@ -1744,6 +1744,10 @@ describe("resolveClaudeAcpBillingIdentity", () => {
     ).toEqual({ provider: "anthropic", biller: "anthropic", billingType: "api" });
   });
 
+  it("uses explicit Messages routing for bearer-authenticated API usage", () => {
+    expect(resolveClaudeAcpBillingIdentity({ config: { managedAiRouting: {kind:"gateway",protocol:"messages",auth:"bearer"}, env: {ANTHROPIC_AUTH_TOKEN:"test-opaque-token"} } })).toEqual({provider:"anthropic",biller:"unknown",billingType:"api"});
+  });
+
   it("classifies Bedrock auth as metered_api billed to aws_bedrock", () => {
     expect(
       resolveClaudeAcpBillingIdentity({ config: { env: { CLAUDE_CODE_USE_BEDROCK: "1" } } }),

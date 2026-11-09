@@ -1,3 +1,4 @@
+import { projectJsonb } from "../repositories/jsonb-projection.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
 import { skillAccessService } from "./skill-access.js";
 import { credentialAccessConnectionNameSql } from "./credential-access-visibility.js";
@@ -46,117 +47,116 @@ export function normalizeActivityLimit(limit: number | undefined) {
 export function activityService(db: Db) {
   const scheduledLivenessBackfills = new Set<string>();
   const issueIdAsText = sql<string>`${issues.id}::text`;
-  const summarizedUsageJson = sql<Record<string, unknown> | null>`
+  const summarizedUsageJson = projectJsonb(heartbeatRuns.usageJson, (value) => sql<Record<string, unknown> | null>`
     case
-      when ${heartbeatRuns.usageJson} is null then null
+      when ${value} is null then null
       else jsonb_strip_nulls(jsonb_build_object(
-        'inputTokens', coalesce(${heartbeatRuns.usageJson} -> 'inputTokens', ${heartbeatRuns.usageJson} -> 'input_tokens'),
-        'input_tokens', coalesce(${heartbeatRuns.usageJson} -> 'input_tokens', ${heartbeatRuns.usageJson} -> 'inputTokens'),
-        'outputTokens', coalesce(${heartbeatRuns.usageJson} -> 'outputTokens', ${heartbeatRuns.usageJson} -> 'output_tokens'),
-        'output_tokens', coalesce(${heartbeatRuns.usageJson} -> 'output_tokens', ${heartbeatRuns.usageJson} -> 'outputTokens'),
+        'inputTokens', coalesce(${value} -> 'inputTokens', ${value} -> 'input_tokens'),
+        'input_tokens', coalesce(${value} -> 'input_tokens', ${value} -> 'inputTokens'),
+        'outputTokens', coalesce(${value} -> 'outputTokens', ${value} -> 'output_tokens'),
+        'output_tokens', coalesce(${value} -> 'output_tokens', ${value} -> 'outputTokens'),
         'cachedInputTokens', coalesce(
-          ${heartbeatRuns.usageJson} -> 'cachedInputTokens',
-          ${heartbeatRuns.usageJson} -> 'cached_input_tokens',
-          ${heartbeatRuns.usageJson} -> 'cache_read_input_tokens'
+          ${value} -> 'cachedInputTokens',
+          ${value} -> 'cached_input_tokens',
+          ${value} -> 'cache_read_input_tokens'
         ),
         'cached_input_tokens', coalesce(
-          ${heartbeatRuns.usageJson} -> 'cached_input_tokens',
-          ${heartbeatRuns.usageJson} -> 'cachedInputTokens',
-          ${heartbeatRuns.usageJson} -> 'cache_read_input_tokens'
+          ${value} -> 'cached_input_tokens',
+          ${value} -> 'cachedInputTokens',
+          ${value} -> 'cache_read_input_tokens'
         ),
         'cache_read_input_tokens', coalesce(
-          ${heartbeatRuns.usageJson} -> 'cache_read_input_tokens',
-          ${heartbeatRuns.usageJson} -> 'cached_input_tokens',
-          ${heartbeatRuns.usageJson} -> 'cachedInputTokens'
+          ${value} -> 'cache_read_input_tokens',
+          ${value} -> 'cached_input_tokens',
+          ${value} -> 'cachedInputTokens'
         ),
-        'billingType', coalesce(${heartbeatRuns.usageJson} -> 'billingType', ${heartbeatRuns.usageJson} -> 'billing_type'),
-        'billing_type', coalesce(${heartbeatRuns.usageJson} -> 'billing_type', ${heartbeatRuns.usageJson} -> 'billingType'),
+        'billingType', coalesce(${value} -> 'billingType', ${value} -> 'billing_type'),
+        'billing_type', coalesce(${value} -> 'billing_type', ${value} -> 'billingType'),
         'costUsd', coalesce(
-          ${heartbeatRuns.usageJson} -> 'costUsd',
-          ${heartbeatRuns.usageJson} -> 'cost_usd',
-          ${heartbeatRuns.usageJson} -> 'total_cost_usd'
+          ${value} -> 'costUsd',
+          ${value} -> 'cost_usd',
+          ${value} -> 'total_cost_usd'
         ),
         'cost_usd', coalesce(
-          ${heartbeatRuns.usageJson} -> 'cost_usd',
-          ${heartbeatRuns.usageJson} -> 'costUsd',
-          ${heartbeatRuns.usageJson} -> 'total_cost_usd'
+          ${value} -> 'cost_usd',
+          ${value} -> 'costUsd',
+          ${value} -> 'total_cost_usd'
         ),
         'total_cost_usd', coalesce(
-          ${heartbeatRuns.usageJson} -> 'total_cost_usd',
-          ${heartbeatRuns.usageJson} -> 'cost_usd',
-          ${heartbeatRuns.usageJson} -> 'costUsd'
+          ${value} -> 'total_cost_usd',
+          ${value} -> 'cost_usd',
+          ${value} -> 'costUsd'
         )
       ))
     end
-  `.as("usageJson");
+  `).as("usageJson");
   // A denied user needs the selected connection's name to repair their task.
   // Other readers need the connection's existing human sharing permission.
-  // A malformed present Stop receipt must stay unconfirmed, not disappear.
-  const summarizedResultJson = (viewerUserId: string | null) => sql<Record<string, unknown> | null>`
+  const summarizedResultJson = (viewerUserId: string | null) => projectJsonb(heartbeatRuns.resultJson, (value) => sql<Record<string, unknown> | null>`
     case
-      when ${heartbeatRuns.resultJson} is null then null
+      when ${value} is null then null
       else jsonb_strip_nulls(jsonb_build_object(
-        'conversationReset', ${heartbeatRuns.resultJson} -> 'conversationReset',
-        'executionCancellation', case when ${heartbeatRuns.resultJson} ? 'executionCancellation'
+        'conversationReset', ${value} -> 'conversationReset',
+        'executionCancellation', case when ${value} ? 'executionCancellation'
           then jsonb_build_object('state', case
-            when jsonb_typeof(${heartbeatRuns.resultJson} -> 'executionCancellation') = 'object'
-              and ${heartbeatRuns.resultJson} #>> '{executionCancellation,state}' in ('requested', 'acknowledged')
-            then ${heartbeatRuns.resultJson} #>> '{executionCancellation,state}' else 'unknown' end) end,
+            when jsonb_typeof(${value} -> 'executionCancellation') = 'object'
+              and ${value} #>> '{executionCancellation,state}' in ('requested', 'acknowledged')
+            then ${value} #>> '{executionCancellation,state}' else 'unknown' end) end,
         'nativeCancellation', case
-          when jsonb_typeof(${heartbeatRuns.resultJson} -> 'nativeCancellation') = 'object'
-            and ${heartbeatRuns.resultJson} #>> '{nativeCancellation,schema}' = 'paperclip.native-cancellation.v1'
-            and ${heartbeatRuns.resultJson} #>> '{nativeCancellation,runId}' = ${heartbeatRuns.id}::text
-            and ${heartbeatRuns.resultJson} #>> '{nativeCancellation,companyId}' = ${heartbeatRuns.companyId}::text
-            and ${heartbeatRuns.resultJson} #>> '{nativeCancellation,dispatchState}' in ('pending', 'acknowledged')
+          when jsonb_typeof(${value} -> 'nativeCancellation') = 'object'
+            and ${value} #>> '{nativeCancellation,schema}' = 'paperclip.native-cancellation.v1'
+            and ${value} #>> '{nativeCancellation,runId}' = ${heartbeatRuns.id}::text
+            and ${value} #>> '{nativeCancellation,companyId}' = ${heartbeatRuns.companyId}::text
+            and ${value} #>> '{nativeCancellation,dispatchState}' in ('pending', 'acknowledged')
           then jsonb_build_object('schema', 'paperclip.native-cancellation.v1',
             'runId', ${heartbeatRuns.id}, 'companyId', ${heartbeatRuns.companyId},
-            'dispatchState', ${heartbeatRuns.resultJson} #>> '{nativeCancellation,dispatchState}') end,
+            'dispatchState', ${value} #>> '{nativeCancellation,dispatchState}') end,
         'configurationIncomplete', case
-          when ${heartbeatRuns.resultJson} -> 'configurationIncomplete' ->> 'reason' = 'workspace_base_ref_unresolved'
+          when ${value} -> 'configurationIncomplete' ->> 'reason' = 'workspace_base_ref_unresolved'
           then jsonb_build_object('reason', 'workspace_base_ref_unresolved')
           when ${heartbeatRuns.errorCode} = 'configuration_incomplete'
-          and (${heartbeatRuns.resultJson} #>> '{configurationIncomplete,selectionFailure}' = 'ai_connection_credential_not_shared'
+          and (${value} #>> '{configurationIncomplete,selectionFailure}' = 'ai_connection_credential_not_shared'
             or ${heartbeatRuns.error} = 'This credential is not shared with the responsible user')
           then jsonb_build_object(
-            'selectionFailure', case when ${heartbeatRuns.resultJson} #>> '{configurationIncomplete,selectionFailure}' = 'ai_connection_credential_not_shared'
+            'selectionFailure', case when ${value} #>> '{configurationIncomplete,selectionFailure}' = 'ai_connection_credential_not_shared'
               then 'ai_connection_credential_not_shared' end,
             'credentialAccess', jsonb_build_object(
               'connectionName', ${credentialAccessConnectionNameSql(viewerUserId)}
             )
           ) end,
-        'workspaceRestoreFailure', case when ${heartbeatRuns.resultJson} ->> 'workspaceRestoreFailure'
+        'workspaceRestoreFailure', case when ${value} ->> 'workspaceRestoreFailure'
           in (${workspaceRestoreFailureCodesSql})
-          then ${heartbeatRuns.resultJson} -> 'workspaceRestoreFailure' end,
-        'workspaceRestorePath', case when length(${heartbeatRuns.resultJson} ->> 'workspaceRestorePath') <= 180
-          then ${heartbeatRuns.resultJson} -> 'workspaceRestorePath' end,
-        'finalResponseRecorded', case when jsonb_typeof(${heartbeatRuns.resultJson} -> 'finalResponseRecorded') = 'boolean'
-          then ${heartbeatRuns.resultJson} -> 'finalResponseRecorded' end,
-        'billingType', coalesce(${heartbeatRuns.resultJson} -> 'billingType', ${heartbeatRuns.resultJson} -> 'billing_type'),
-        'billing_type', coalesce(${heartbeatRuns.resultJson} -> 'billing_type', ${heartbeatRuns.resultJson} -> 'billingType'),
+          then ${value} -> 'workspaceRestoreFailure' end,
+        'workspaceRestorePath', case when length(${value} ->> 'workspaceRestorePath') <= 180
+          then ${value} -> 'workspaceRestorePath' end,
+        'finalResponseRecorded', case when jsonb_typeof(${value} -> 'finalResponseRecorded') = 'boolean'
+          then ${value} -> 'finalResponseRecorded' end,
+        'billingType', coalesce(${value} -> 'billingType', ${value} -> 'billing_type'),
+        'billing_type', coalesce(${value} -> 'billing_type', ${value} -> 'billingType'),
         'costUsd', coalesce(
-          ${heartbeatRuns.resultJson} -> 'costUsd',
-          ${heartbeatRuns.resultJson} -> 'cost_usd',
-          ${heartbeatRuns.resultJson} -> 'total_cost_usd'
+          ${value} -> 'costUsd',
+          ${value} -> 'cost_usd',
+          ${value} -> 'total_cost_usd'
         ),
         'cost_usd', coalesce(
-          ${heartbeatRuns.resultJson} -> 'cost_usd',
-          ${heartbeatRuns.resultJson} -> 'costUsd',
-          ${heartbeatRuns.resultJson} -> 'total_cost_usd'
+          ${value} -> 'cost_usd',
+          ${value} -> 'costUsd',
+          ${value} -> 'total_cost_usd'
         ),
         'total_cost_usd', coalesce(
-          ${heartbeatRuns.resultJson} -> 'total_cost_usd',
-          ${heartbeatRuns.resultJson} -> 'cost_usd',
-          ${heartbeatRuns.resultJson} -> 'costUsd'
+          ${value} -> 'total_cost_usd',
+          ${value} -> 'cost_usd',
+          ${value} -> 'costUsd'
         ),
-        'stopReason', ${heartbeatRuns.resultJson} -> 'stopReason',
-        'effectiveTimeoutSec', ${heartbeatRuns.resultJson} -> 'effectiveTimeoutSec',
-        'effectiveTimeoutMs', ${heartbeatRuns.resultJson} -> 'effectiveTimeoutMs',
-        'timeoutConfigured', ${heartbeatRuns.resultJson} -> 'timeoutConfigured',
-        'timeoutSource', ${heartbeatRuns.resultJson} -> 'timeoutSource',
-        'timeoutFired', ${heartbeatRuns.resultJson} -> 'timeoutFired'
+        'stopReason', ${value} -> 'stopReason',
+        'effectiveTimeoutSec', ${value} -> 'effectiveTimeoutSec',
+        'effectiveTimeoutMs', ${value} -> 'effectiveTimeoutMs',
+        'timeoutConfigured', ${value} -> 'timeoutConfigured',
+        'timeoutSource', ${value} -> 'timeoutSource',
+        'timeoutFired', ${value} -> 'timeoutFired'
       ))
     end
-  `.as("resultJson");
+  `).as("resultJson");
 
   function countValue(value: unknown) {
     const parsed = Number(value ?? 0);
@@ -478,11 +478,15 @@ export function activityService(db: Db) {
           continuationAttempt: heartbeatRuns.continuationAttempt,
           lastUsefulActionAt: heartbeatRuns.lastUsefulActionAt,
           nextAction: heartbeatRuns.nextAction,
-          wakeCommentIds: sql<string[] | null>`${heartbeatRuns.contextSnapshot} -> 'wakeCommentIds'`,
-          queuedCommentSourceWakeIds: sql<string[] | null>`${heartbeatRuns.contextSnapshot} -> 'queuedCommentSourceWakeIds'`,
-          wakeCommentId: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'wakeCommentId'`,
-          contextCommentId: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'commentId'`,
-          contextIssueId: sql<string | null>`${heartbeatRuns.contextSnapshot} ->> 'issueId'`,
+          commentContext: projectJsonb(heartbeatRuns.contextSnapshot, (value) => sql<{
+            wakeCommentIds: string[] | null; queuedCommentSourceWakeIds: string[] | null; wakeCommentId: string | null;
+            contextCommentId: string | null; contextIssueId: string | null;
+          }>`jsonb_build_object(
+            'wakeCommentIds', ${value} -> 'wakeCommentIds',
+            'queuedCommentSourceWakeIds', ${value} -> 'queuedCommentSourceWakeIds',
+            'wakeCommentId', ${value} ->> 'wakeCommentId',
+            'contextCommentId', ${value} ->> 'commentId',
+            'contextIssueId', ${value} ->> 'issueId')`),
         })
         .from(heartbeatRuns)
         .innerJoin(
@@ -516,9 +520,9 @@ export function activityService(db: Db) {
         .orderBy(desc(heartbeatRuns.createdAt), desc(heartbeatRuns.id));
       const runs = await (limit === undefined ? runsQuery : runsQuery.limit(limit));
 
-      if (runs.length === 0) return runs;
+      if (runs.length === 0) return [];
       const runIds = runs.map((run) => run.runId);
-      if (runIds.length === 0) return runs;
+      if (runIds.length === 0) return [];
 
       const exhaustionRowsQuery = db
         .select({
@@ -583,7 +587,7 @@ export function activityService(db: Db) {
         }
       }
 
-      return runs.map((run) => {
+      return runs.map(({ commentContext, ...run }) => {
         const leaseRow = leaseByRunId.get(run.runId);
         const leaseMetadata = leaseRow?.lease.metadata ?? null;
         const workspacePath =
@@ -594,6 +598,7 @@ export function activityService(db: Db) {
               : null;
         return {
           ...run,
+          ...commentContext,
           resultJson: run.resultJson ? {
             ...run.resultJson,
             ...(Object.hasOwn(run.resultJson, "workspaceRestorePath") ? {

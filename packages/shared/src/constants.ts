@@ -417,6 +417,14 @@ export const ISSUE_RECOVERY_ACTION_OWNER_TYPES = [
 ] as const;
 export type IssueRecoveryActionOwnerType = (typeof ISSUE_RECOVERY_ACTION_OWNER_TYPES)[number];
 
+/**
+ * Wake reason for an agent whose child or blocker stalled on a recovery action
+ * that needs the board. Woken once per stall (one recovery action).
+ */
+export const ISSUE_BLOCKER_STALLED_WAKE_REASON = "issue_blocker_stalled" as const;
+export const ISSUE_BLOCKER_STALL_RELATIONS = ["child", "blocker"] as const;
+export type IssueBlockerStallRelation = (typeof ISSUE_BLOCKER_STALL_RELATIONS)[number];
+
 export const ISSUE_RECOVERY_ACTION_OUTCOMES = [
   "restored",
   "handed_back",
@@ -537,7 +545,7 @@ export type IssueExecutionStageType = (typeof ISSUE_EXECUTION_STAGE_TYPES)[numbe
 export const ISSUE_MONITOR_SCHEDULED_BY = ["assignee", "board"] as const;
 export type IssueMonitorScheduledBy = (typeof ISSUE_MONITOR_SCHEDULED_BY)[number];
 
-export const ISSUE_EXECUTION_MONITOR_KINDS = ["external_service"] as const;
+export const ISSUE_EXECUTION_MONITOR_KINDS = ["external_service", "task_continuation"] as const;
 export type IssueExecutionMonitorKind = (typeof ISSUE_EXECUTION_MONITOR_KINDS)[number];
 
 export const PROVIDER_QUOTA_MONITOR_SERVICE_NAME = "AI provider quota";

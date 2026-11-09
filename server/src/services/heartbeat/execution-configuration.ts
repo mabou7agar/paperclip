@@ -16,6 +16,7 @@ import { createAgentIdentityRedactor } from "../agent-identity-redaction.js";
 import { agentIdentityService, supportsManagedAgentIdentity } from "../agent-identity.js";
 import { readAiConnectionConfigurationFailure, readAiCredentialAccessFailure } from "../ai-connection-configuration-failure.js";
 import { AI_AUTH_ENV_KEYS, isAiConnectionBusy, prepareManagedAiRuntime, stripAiAuthBindings } from "../ai-connection-runtime.js";
+import { ConnectionUsageCapReached } from "../connection-usage-caps.js";
 import { managedAiSessionIdentityCompatible } from "../ai-connection-session.js";
 import type { companySkillService } from "../company-skills.js";
 import { connectionIntentService } from "../connection-intents.js";
@@ -74,6 +75,7 @@ export interface HeartbeatExecutionConfigurationInput {
   config: {
     sourceWorkspaceConfig: Record<string, unknown>;
     aiBinding: AiConnectionBinding | undefined;
+    phaseRouted?: boolean;
   };
   policy: Pick<HeartbeatWorkspacePreparationInput["policy"],
     "trustPreset" | "useIsolatedTaskDirectory" | "requestedExecutionWorkspaceMode"> & { explicitTaskDirectory: boolean };
@@ -84,6 +86,7 @@ export interface HeartbeatExecutionConfigurationInput {
     companySkills: Pick<ReturnType<typeof companySkillService>, "withRuntimeSkillEntries">;
     appendRunEvent: ReturnType<typeof createHeartbeatLifecycle>["appendRunEvent"];
     finalizeAiConnectionBusyDeferral: ReturnType<typeof createHeartbeatRetries>["finalizeAiConnectionBusyDeferral"];
+    waitForConnectionCapacity?: (retryAt: string, reason: string, notes: string[], usageCapWait?: boolean) => Promise<void>;
   };
   // The executor must observe these before a later preparation step can throw.
   onFailureSecretsResolved: (readSecrets: () => string[]) => void;
@@ -206,9 +209,17 @@ export async function prepareHeartbeatExecutionConfiguration(db: Db, input: Hear
   onFailureSecretsResolved(() => collectRunFailureSecretValues(resolvedConfig.env, secretKeys));
   if (aiBinding) {
     try {
-      managedAiRuntime = await time("configuration_ai_runtime", () => prepareManagedAiRuntime(db, { companyId: agent.companyId, agentId: agent.id, responsibleUserId, adapterType: agent.adapterType, binding: aiBinding, config: resolvedConfig }));
+      managedAiRuntime = await time("configuration_ai_runtime", () => prepareManagedAiRuntime(db, {
+        companyId: agent.companyId, agentId: agent.id, responsibleUserId, adapterType: agent.adapterType,
+        binding: aiBinding, config: resolvedConfig, enforceUsageCaps: !input.config.phaseRouted && !persistedNativeExecutionInput,
+      }));
       onManagedAiRuntimeAcquired(managedAiRuntime);
     } catch (error) {
+      if (error instanceof ConnectionUsageCapReached && error.status.retryAt && !persistedNativeExecutionInput && input.services.waitForConnectionCapacity) {
+        await input.services.waitForConnectionCapacity(error.status.retryAt, error.message,
+          ["The configured connection cap will renew automatically."], true);
+        return { prepared: false as const };
+      }
       // Only fresh executions can receive a pre-provider wait receipt. A
       // persisted native input may already have provider effects to recover.
       if (isAiConnectionBusy(error) && !persistedNativeExecutionInput) {
@@ -216,6 +227,7 @@ export async function prepareHeartbeatExecutionConfiguration(db: Db, input: Hear
         // the issue's mutable assignee observed during runtime preparation.
         const authorizedNonAssigneeWake =
           parseObject(run.runnerProfileJson).aiConnectionNonAssigneeCommentWake === true ||
+          parseObject(run.runnerProfileJson).aiConnectionNonAssigneeInteractionWake === true ||
           (run.scheduledRetryReason === AI_CONNECTION_BUSY_RETRY_REASON &&
             isNonAssigneeWorkspaceBusyRetry(run.scheduledRetryReason, parseObject(run.contextSnapshot)));
         await finalizeAiConnectionBusyDeferral(run, error, !authorizedNonAssigneeWake);

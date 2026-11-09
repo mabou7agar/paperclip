@@ -20,6 +20,8 @@ export const costEvents = pgTable(
     projectId: uuid("project_id").references(() => projects.id),
     goalId: uuid("goal_id").references(() => goals.id),
     heartbeatRunId: uuid("heartbeat_run_id").references(() => heartbeatRuns.id),
+    // Archival account attribution survives removal of the source run or connection.
+    connectionId: uuid("connection_id"),
     subscriptionId: uuid("subscription_id").references(() => aiSubscriptions.id),
     billingCode: text("billing_code"),
     idempotencyKey: text("idempotency_key"),
@@ -50,6 +52,7 @@ export const costEvents = pgTable(
     dataQualityIdx: index("cost_events_data_quality_idx").on(table.companyId, table.occurredAt.desc(), table.id)
       .where(sql`${table.billingType} = 'unknown' or (${table.costStatus} = 'unpriced' and ${table.billingType} <> 'subscription_included')`),
     companyOccurredIdx: index("cost_events_company_occurred_idx").on(table.companyId, table.occurredAt),
+    companyConnectionOccurredIdx: index("cost_events_company_connection_occurred_idx").on(table.companyId,table.connectionId,table.occurredAt),
     companySubscriptionOccurredIdx: index("cost_events_company_subscription_occurred_idx").on(table.companyId, table.subscriptionId, table.occurredAt),
     companyAgentOccurredIdx: index("cost_events_company_agent_occurred_idx").on(
       table.companyId,

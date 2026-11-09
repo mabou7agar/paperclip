@@ -56,6 +56,8 @@ export interface HeartbeatSessionPreparationInput {
     managedAiRuntime: ManagedAiRuntime | undefined;
     aiBinding: AiConnectionBinding | undefined;
     requestedAiBinding: AiRuntimeConnectionBinding | undefined;
+    phaseRouted?: boolean;
+    persistedAgentRuntimeConfig?: Record<string, unknown>;
     secretManifest: SessionMetadataInput["secretManifest"];
     runtimeSkillEntries: SessionMetadataInput["runtimeSkills"];
     routineEnvContext: { env: unknown };
@@ -162,7 +164,7 @@ export async function prepareHeartbeatSession(db: Db, input: HeartbeatSessionPre
   }
   if (managedAiRuntime && aiBinding && taskSession &&
     readConfigFingerprintFromSessionParams(taskSession.sessionParamsJson)?.fingerprint !== sessionConfigMetadata.fingerprint) {
-    const revisions = requestedAiBinding?.mode === "router"
+    const revisions = requestedAiBinding?.mode === "router" || input.config.phaseRouted
       ? await db.select().from(agentConfigRevisions).where(and(eq(agentConfigRevisions.companyId, agent.companyId), eq(agentConfigRevisions.agentId, agent.id))).orderBy(desc(agentConfigRevisions.createdAt), desc(agentConfigRevisions.id)).limit(21)
       : [];
     const candidates = aiConnectionSessionCompatibilityInputs({
@@ -170,6 +172,8 @@ export async function prepareHeartbeatSession(db: Db, input: HeartbeatSessionPre
       agentConfigRevision: sessionConfigMetadataInput.agentConfigRevision,
       issueOverrides: issueAssigneeOverrides, originalIssueOverrides: originalAiIssueOverrides,
       binding: aiBinding, router: requestedAiBinding?.mode === "router",
+      phaseRouted: input.config.phaseRouted,
+      persistedAgentRuntimeConfig: input.config.persistedAgentRuntimeConfig,
       storedIdentity: taskSession.sessionParamsJson?.paperclipAiCredentialIdentity,
       sessionIdentity: managedAiRuntime.sessionIdentity, credentialIdentity: managedAiRuntime.identity, revisions,
     });

@@ -1,0 +1,18 @@
+meta {
+  name: Get Heartbeat Context
+  type: http
+  seq: 1
+}
+get {
+  url: {{baseUrl}}/api/issues/{{issueId}}/heartbeat-context
+  body: none
+  auth: inherit
+}
+tests {
+  test("Scoped task context", function () {
+    expect(res.getStatus()).to.equal(200);
+    expect(res.getBody().issue).to.have.property("id");
+    expect(res.getBody().issue).to.have.property("identifier");
+    expect(res.getBody().ancestors).to.be.an("array");
+  });
+}

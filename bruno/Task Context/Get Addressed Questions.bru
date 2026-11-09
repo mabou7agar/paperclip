@@ -1,0 +1,22 @@
+meta {
+  name: Get Addressed Questions
+  type: http
+  seq: 3
+}
+get {
+  url: {{baseUrl}}/api/issues/{{issueId}}/interactions
+  body: none
+  auth: inherit
+}
+tests {
+  test("Scoped interaction cards", function () {
+    expect(res.getStatus()).to.equal(200);
+    expect(res.getBody()).to.be.an("array");
+  });
+}
+docs {
+  Inspect the existing task interaction API before and after an addressed-question
+  handoff. A recipient may answer its pending card without becoming the assignee.
+  Preserve task ownership, review stages and source-run context. Resolved or
+  superseded cards must not trigger a second provider execution.
+}

@@ -472,6 +472,22 @@ describe("codex_local ACP lane", () => {
   });
 
   it.each([
+    [{}, "agent-full-access"],
+    [{ dangerouslyBypassApprovalsAndSandbox: true }, "agent-full-access"],
+    [{ dangerouslyBypassApprovalsAndSandbox: false }, "agent"],
+    [{ dangerouslyBypassApprovalsAndSandbox: true, permissionMode: "deny-all" }, "read-only"],
+    [{ dangerouslyBypassApprovalsAndSandbox: true, permissionMode: "approve-reads" }, "read-only"],
+    [{ dangerouslyBypassApprovalsAndSandbox: true, env: { PAPERCLIP_CODEX_ACP_NETWORK_ACCESS: "false" } }, "agent"],
+    [{ dangerouslyBypassApprovalsAndSandbox: true, env: { PAPERCLIP_RUNNER_NETWORK_ACCESS: "disabled" } }, "agent"],
+    [{ extraArgs: ["--sandbox", "read-only"] }, "read-only"],
+    [{ extraArgs: ["--sandbox=read-only"] }, "read-only"],
+    [{ extraArgs: ["--config=sandbox_mode=\"read-only\""] }, "read-only"],
+    [{ extraArgs: ["-csandbox_mode='read-only'"] }, "read-only"],
+  ])("maps native ACP permissions without overriding restrictions: %j", (config, expected) => {
+    expect(buildCodexAcpConfig(config).codexSessionMode).toBe(expected);
+  });
+
+  it.each([
     { env: { PAPERCLIP_CODEX_ACP_NETWORK_ACCESS: "false" } },
     { extraArgs: ["-c", "sandbox_workspace_write.network_access=false"] },
     { extraArgs: ["--config=sandbox_workspace_write.network_access=false"] },
@@ -777,7 +793,9 @@ describe("codex_local ACP lane", () => {
       mode: "persistent",
       cwd: root,
     });
-    expect(runtimes[0]?.setConfigInputs).toEqual([]);
+    expect(runtimes[0]?.setConfigInputs).toEqual([
+      expect.objectContaining({ key: "mode", value: "agent-full-access" }),
+    ]);
     expect(meta[0]?.commandNotes?.join("\n")).toContain("Prepared ACPX Codex skill home");
     expect(meta[0]?.env?.CODEX_HOME).toBe(path.join(root, "codex-home"));
     expect(JSON.parse(String(meta[0]?.env?.CODEX_CONFIG))).toMatchObject({
@@ -791,6 +809,23 @@ describe("codex_local ACP lane", () => {
         include_only: expect.arrayContaining(["PATH", "CODEX_HOME"]),
       },
     });
+  });
+
+  it("fails before inference if the native permission preset cannot be applied", async () => {
+    const root = await makeTempRoot("paperclip-codex-acp-mode-rejected-");
+    let runtime: FakeRuntime | undefined;
+    const execute = createCodexAcpExecutor({
+      createRuntime: options => {
+        runtime = new FakeRuntime(options as unknown as FakeRuntimeOptions);
+        runtime.setConfigOption = async () => { throw new Error("native permission preset rejected"); };
+        return runtime as never;
+      },
+    });
+    const result = await execute(buildContext(root));
+    expect(result.exitCode).toBe(1);
+    expect(result.errorMessage).toContain("native permission preset rejected");
+    expect(runtime?.startInputs).toEqual([]);
+    expect(runtime?.closeInputs).not.toHaveLength(0);
   });
 
   it("sends assignment-owned markdown and ordered distinct wake comments at the ACP boundary", async () => {

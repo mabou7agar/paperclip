@@ -1,0 +1,13 @@
+meta {
+  name: Save Monitoring Policy
+  type: http
+  seq: 2
+}
+put {
+  url: {{baseUrl}}/api/v1/companies/{{companyId}}/monitoring
+  body: json
+  auth: inherit
+}
+body:json {
+  { "mode": "alert_only" }
+}

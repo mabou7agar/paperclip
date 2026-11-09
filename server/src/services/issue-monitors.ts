@@ -8,6 +8,18 @@ import { applyIssueMonitorPolicyTransition, normalizeIssueExecutionPolicy, parse
 
 type NormalizedExecutionPolicy = ReturnType<typeof normalizeIssueExecutionPolicy>;
 
+/** Explicit bounded work continuations are distinct from general observations. */
+export function isBoundedTaskContinuationMonitor(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+  const monitor = value as Record<string, unknown>;
+  return monitor.kind === "task_continuation" &&
+    typeof monitor.serviceName === "string" && monitor.serviceName.trim().length > 0 &&
+    typeof monitor.externalRef === "string" && monitor.externalRef.trim().length > 0 &&
+    typeof monitor.timeoutAt === "string" && Number.isFinite(Date.parse(monitor.timeoutAt)) &&
+    typeof monitor.maxAttempts === "number" && Number.isInteger(monitor.maxAttempts) &&
+    monitor.maxAttempts > 0 && monitor.maxAttempts <= 100;
+}
+
 export function monitorPoliciesEqual(
   left: NormalizedExecutionPolicy | null,
   right: NormalizedExecutionPolicy | null,
@@ -116,6 +128,9 @@ export const setTaskMonitorSchema = z.object({
   }).strict().refine(monitor => monitor.serviceName !== PROVIDER_QUOTA_MONITOR_SERVICE_NAME, {
     message: "This serviceName is reserved for server-owned quota recovery; use a different service name for an ordinary task check",
     path: ["serviceName"],
+  }).refine(monitor => monitor.kind !== "task_continuation" || isBoundedTaskContinuationMonitor(monitor), {
+    message: "Task continuations require a service name, stable external reference, deadline and finite attempt limit",
+    path: ["kind"],
   }).nullable(),
 }).strict();
 

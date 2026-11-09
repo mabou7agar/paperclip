@@ -1,3 +1,5 @@
+import { UsageHealthPanel, UsageHealthNotice } from "../components/usage-health/UsageHealthPanel";
+import { useTranslation } from "@/i18n";
 import { FastResponseHistory } from "../components/fast-responses/FastResponseHistory";
 import { DecisionHistory } from "../components/decision-models/DecisionHistory";
 import { SubscriptionCostCard, SubscriptionTokenUsage } from "../components/SubscriptionCostCard";
@@ -47,7 +49,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 const NO_COMPANY = "__none__";
-export type CostsMainTab = "overview" | "budgets" | "providers" | "billers" | "finance" | "decisions" | "fast-responses";
+export type CostsMainTab = "overview" | "usage-health" | "budgets" | "providers" | "billers" | "finance" | "decisions" | "fast-responses";
 
 export interface CostsProps {
   /** Render inside Audit without a second page-level title or breadcrumb. */
@@ -181,6 +183,7 @@ export function Costs({
   const queryClient = useQueryClient();
 
   const [searchParams, setSearchParams] = useSearchParams();
+  const { t: usageT } = useTranslation("usageHealth");
   const scopedAgentId = searchParams.get("agentId");
   const { data: scopedAgent, error: scopedAgentError } = useQuery({
     queryKey: [...queryKeys.agents.detail(scopedAgentId ?? NO_COMPANY), selectedCompanyId],
@@ -211,7 +214,7 @@ export function Costs({
 
   useEffect(() => {
     const tab = searchParams.get("tab");
-    setMainTab(!lockTab && tab && ["overview", "providers", "billers", "finance", "budgets", "decisions", "fast-responses"].includes(tab) ? tab as CostsMainTab : initialTab);
+    setMainTab(!lockTab && tab && ["overview", "usage-health", "providers", "billers", "finance", "budgets", "decisions", "fast-responses"].includes(tab) ? tab as CostsMainTab : initialTab);
   }, [initialTab, lockTab, searchParams]);
 
   const [today, setToday] = useState(() => new Date().toDateString());
@@ -742,6 +745,7 @@ export function Costs({
           <div className="max-w-full overflow-x-auto pb-2">
             <TabsList variant="line" className="justify-start">
               <TabsTrigger value="overview">Overview</TabsTrigger>
+              <TabsTrigger value="usage-health">{usageT("title")}</TabsTrigger>
               {!hideBudgetsTab ? <TabsTrigger value="budgets">Budgets</TabsTrigger> : null}
               <TabsTrigger value="providers">Providers</TabsTrigger>
               <TabsTrigger value="billers">Billers</TabsTrigger>
@@ -754,7 +758,9 @@ export function Costs({
 
         <TabsContent value="fast-responses" className="mt-4">{showCustomPrompt ? <p className="text-sm text-muted-foreground">Select a start and end date to load data.</p> : <FastResponseHistory companyId={companyId} from={from} to={to} />}</TabsContent>
         <TabsContent value="decisions" className="mt-4">{showCustomPrompt ? <p className="text-sm text-muted-foreground">Select a start and end date to load data.</p> : <DecisionHistory companyId={companyId} from={from} to={to} />}</TabsContent>
+        <TabsContent value="usage-health" className="mt-4">{!showCustomPrompt && <UsageHealthPanel companyId={companyId} from={from} to={to}/>}</TabsContent>
         <TabsContent value="overview" className="mt-4 space-y-4">
+          {!showCustomPrompt && <UsageHealthNotice companyId={companyId} from={from} to={to}/>}
           {showCustomPrompt ? (
             <p className="text-sm text-muted-foreground">Select a start and end date to load data.</p>
           ) : showOverviewLoading ? (

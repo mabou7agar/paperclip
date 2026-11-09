@@ -1476,6 +1476,19 @@ describe("IssueDetail", () => {
     mockRouteParams.companyPrefix = "PAP";
   });
 
+  it("does not poll full history for an idle In Progress task and still refreshes invalidated history", async () => {
+    mockIssuesApi.get.mockResolvedValue(createIssue({ status: "in_progress" }));
+    mockActivityApi.runsForIssue.mockClear();
+    await act(async () => root.render(<QueryClientProvider client={queryClient}><IssueDetail /></QueryClientProvider>));
+    await waitForAssertion(() => expect(mockActivityApi.runsForIssue).toHaveBeenCalled());
+    await flushReact();
+    const initialReads = mockActivityApi.runsForIssue.mock.calls.length;
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 2_200)); });
+    expect(mockActivityApi.runsForIssue).toHaveBeenCalledTimes(initialReads);
+    await act(async () => { await queryClient.invalidateQueries({ queryKey: queryKeys.issues.runs("PAP-1") }); });
+    await waitForAssertion(() => expect(mockActivityApi.runsForIssue.mock.calls.length).toBeGreaterThan(initialReads));
+  });
+
   it("clears only the monitor after confirmation and refreshes the task", async () => {
     const nextCheckAt = new Date(Date.now() + 60_000).toISOString();
     const preservedPolicy = { mode: "normal", commentRequired: false, stages: [{ type: "review", approvalsNeeded: 1, participants: [{ type: "user", userId: "reviewer-1" }] }], maxReviewRounds: 4, authorizationPolicy: { assignmentPolicy: { mode: "protected" } } };
@@ -3756,7 +3769,12 @@ describe("IssueDetail", () => {
     mockIssuesApi.update.mockReset();
   });
 
-  it.each(["verified", "unverified", "stale", "denied"] as const)("keeps native export Retry closed with %s preservation access or source", async mode => {
+  it.each(["verified", "unverified", "unverified-plain-http", "stale", "denied"] as const)("offers exactly one native export recovery control with %s preservation access or source", async mode => {
+    // Plain-HTTP LAN and tailnet previews have no crypto.randomUUID.
+    const originalCrypto = globalThis.crypto;
+    if (mode === "unverified-plain-http")
+      vi.stubGlobal("crypto", { getRandomValues: originalCrypto.getRandomValues.bind(originalCrypto) });
+    try {
     const action = {
       id: "file-recovery", companyId: "company-1", sourceIssueId: "issue-1",
       kind: "active_run_watchdog", cause: "native_workspace_sync_out_retry_exhausted",
@@ -3765,9 +3783,11 @@ describe("IssueDetail", () => {
         stage: "restoring_files", requestIds: [], retryable: true,
       }, systemRecovery: { state: "exhausted", preservationOperationIds: [] } },
     } as unknown as NonNullable<Issue["activeRecoveryAction"]>;
-    const issue = createIssue({ status: "blocked", assigneeAgentId: "agent-1", activeRecoveryAction: action,
-      interruption: { intentId: "held-input", responsibility: "system", state: "failed", nextRetryAt: null,
-        canRetry: true, userAction: null, sourceRunIds: ["stopped-run"], observedRunId: "stopped-run" },
+    const interruption: NonNullable<Issue["interruption"]> = { intentId: "held-input", responsibility: "system", state: "failed", nextRetryAt: null,
+      canRetry: true, userAction: null, sourceRunIds: ["stopped-run"], observedRunId: "stopped-run",
+      retryWait: { reason: "saved_work_recovery_failed",
+        message: "Saving the agent's files failed after automatic retries. Retry to try again; the agent will not repeat its work." } };
+    const issue = createIssue({ status: "blocked", assigneeAgentId: "agent-1", activeRecoveryAction: action, interruption,
       executionBlocker: { runId: "stopped-run", cause: "native_workspace_sync_out_retry_exhausted", canRetry: false, workspaceRepairRequired: true,
         workspaceRecovery: { status: "blocked", stage: "restoring_files", canRetry: true } } as Issue["executionBlocker"],
     });
@@ -3779,16 +3799,33 @@ describe("IssueDetail", () => {
     });
     mockIssuesApi.recoveryActions.mockResolvedValue({ active: action, actions: [action], sourceInspection: {
       actionId: mode === "stale" ? "other-action" : action.id, runId: "stopped-run",
-      status: mode === "unverified" ? "blocked" : "verified", scope: "recorded_source_identity",
+      status: mode.startsWith("unverified") ? "blocked" : "verified", scope: "recorded_source_identity",
     } });
     mockIssuesApi.recoverWorkspace.mockResolvedValue({ actionId: action.id, status: "queued" });
+    mockIssuesApi.retryTask.mockResolvedValue({ requestId: "export-retry", accepted: true, stale: false, presentation: interruption });
     await act(async () => renderIssueView());
-    if (mode !== "verified") {
-      await waitForAssertion(() => expect(container.textContent).toContain(mode === "denied"
-        ? "A board member with task access" : "The recorded source is unavailable or has changed"));
-      expect([...container.querySelectorAll("button")].some(button => ["Recover saved files", "Retry"].includes(button.textContent ?? ""))).toBe(false);
+    const labels = () => [...container.querySelectorAll("button")].map(button => button.textContent ?? "");
+    if (mode === "denied") {
+      await waitForAssertion(() => expect(container.textContent).toContain("A board member with task access"));
+      expect(labels().some(label => ["Recover saved files", "Retry"].includes(label))).toBe(false);
       expect(mockIssuesApi.recoverWorkspace).not.toHaveBeenCalled();
       expect(mockIssuesApi.retryTask).not.toHaveBeenCalled();
+      return;
+    }
+    if (mode !== "verified") {
+      // The notice says "Retry to try again"; an unverifiable source must not
+      // leave it without a Retry. The server re-verifies the source.
+      await waitForAssertion(() => expect(labels()).toContain("Retry"));
+      expect(labels()).not.toContain("Recover saved files");
+      expect(container.textContent).not.toContain("Refresh the task");
+      const retry = [...container.querySelectorAll("button")].find(button => button.textContent === "Retry")!;
+      await act(async () => retry.click());
+      await waitForAssertion(() => expect(mockIssuesApi.retryTask).toHaveBeenCalledExactlyOnceWith(issue.id, {
+        idempotencyKey: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/),
+        observedRunId: "stopped-run",
+      }));
+      expect(mockIssuesApi.recoverWorkspace).not.toHaveBeenCalled();
+      expect(mockIssuesApi.resolveRecoveryAction).not.toHaveBeenCalled();
       return;
     }
     await waitForAssertion(() => expect([...container.querySelectorAll("button")]
@@ -3803,6 +3840,7 @@ describe("IssueDetail", () => {
     expect(mockIssuesApi.update).not.toHaveBeenCalled();
     expect(issue.executionBlocker?.workspaceRepairRequired).toBe(true);
     expect(container.textContent).not.toContain("Saved files recovered");
+    } finally { vi.unstubAllGlobals(); }
   });
 
   it("keeps the existing Retry path for exhausted legacy workspace restoration", async () => {

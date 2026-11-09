@@ -1,3 +1,4 @@
+import { resolveManagedClaudeBilling } from "@paperclipai/adapter-utils";
 import { isOpenRouterUrl, openRouterClaudeHeaders } from "@paperclipai/shared/openrouter-attribution";
 import { applyObservabilityEnvironment } from "@paperclipai/adapter-utils/agent-observability";
 import { createProviderStoppedBoundary } from "@paperclipai/adapter-utils/provider-stopped-boundary";
@@ -170,7 +171,9 @@ function isBedrockAuth(env: Record<string, string>): boolean {
   );
 }
 
-function resolveClaudeBillingType(env: Record<string, string>): "api" | "subscription" | "metered_api" {
+function resolveClaudeBillingType(env: Record<string, string>, routing?: unknown): "api" | "subscription" | "metered_api" {
+  const managed = resolveManagedClaudeBilling(routing);
+  if (managed) return managed.billingType;
   if (isBedrockAuth(env)) return "metered_api";
   return hasNonEmptyEnvValue(env, "ANTHROPIC_API_KEY") ? "api" : "subscription";
 }
@@ -507,7 +510,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   );
   const modelEnv = executionTargetIsRemote ? env : effectiveEnv;
   const model = resolveClaudeModel(config.model, modelEnv);
-  const billingType = resolveClaudeBillingType(effectiveEnv);
+  const billingType = resolveClaudeBillingType(effectiveEnv, config.managedAiRouting);
   const claudeSkillEntries = await readPaperclipRuntimeSkillEntries(config, __moduleDir);
   const desiredSkillNames = new Set(resolveClaudeDesiredSkillNames(config, claudeSkillEntries));
   // Keep per-run working-copy paths out of the content-addressed system prompt.
@@ -968,7 +971,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const accountingLog = createUsageCheckpointLog(onLog, ctx.onUsage, stdout => {
       const parsed = consumeAccounting(stdout);
       return { usage: parsed.usage ?? undefined, usageBasis: "per_run", costUsd: parsed.costUsd,
-        provider: "anthropic", biller: isBedrockAuth(effectiveEnv) ? "aws_bedrock" : "anthropic",
+        provider: "anthropic", biller: resolveManagedClaudeBilling(config.managedAiRouting)?.biller ?? (isBedrockAuth(effectiveEnv) ? "aws_bedrock" : "anthropic"),
         billingType, model: Object.keys(parseObject(parsed.resultJson?.modelUsage)).length > 1 ? "mixed" : parsed.model || model,
           usageByModel: claudeModelReceipts(parsed.resultJson?.modelUsage), complete: parsed.resultJson !== null };
     });
@@ -1027,7 +1030,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         usage: parsedStream.usage ?? undefined,
         usageBasis: "per_run",
         provider: "anthropic",
-        biller: isBedrockAuth(effectiveEnv) ? "aws_bedrock" : "anthropic",
+        biller: resolveManagedClaudeBilling(config.managedAiRouting)?.biller ?? (isBedrockAuth(effectiveEnv) ? "aws_bedrock" : "anthropic"),
         model: Object.keys(parseObject(parsedStream.resultJson?.modelUsage)).length > 1 ? "mixed" : parsedStream.model || model,
         usageByModel: claudeModelReceipts(parsedStream.resultJson?.modelUsage),
         billingType,
@@ -1097,7 +1100,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         usage: parsedStream.usage ?? undefined,
         usageBasis: "per_run",
         provider: "anthropic",
-        biller: isBedrockAuth(effectiveEnv) ? "aws_bedrock" : "anthropic",
+        biller: resolveManagedClaudeBilling(config.managedAiRouting)?.biller ?? (isBedrockAuth(effectiveEnv) ? "aws_bedrock" : "anthropic"),
         model: Object.keys(parseObject(parsedStream.resultJson?.modelUsage)).length > 1 ? "mixed" : parsedStream.model || model,
         usageByModel: claudeModelReceipts(parsedStream.resultJson?.modelUsage),
         billingType,
@@ -1284,7 +1287,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       sessionParams: resolvedSessionParams,
       sessionDisplayId: resolvedSessionId,
       provider: "anthropic",
-      biller: isBedrockAuth(effectiveEnv) ? "aws_bedrock" : "anthropic",
+      biller: resolveManagedClaudeBilling(config.managedAiRouting)?.biller ?? (isBedrockAuth(effectiveEnv) ? "aws_bedrock" : "anthropic"),
       model: Object.keys(parseObject(parsed.modelUsage)).length > 1 ? "mixed" : parsedStream.model || asString(parsed.model, model),
       billingType,
       costUsd: parsedStream.costUsd,
@@ -1344,7 +1347,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           errorMessage,
           errorCode: "claude_cli_version_incompatible",
           provider: "anthropic",
-          biller: isBedrockAuth(effectiveEnv) ? "aws_bedrock" : "anthropic",
+          biller: resolveManagedClaudeBilling(config.managedAiRouting)?.biller ?? (isBedrockAuth(effectiveEnv) ? "aws_bedrock" : "anthropic"),
           model,
           billingType,
           resultJson: {

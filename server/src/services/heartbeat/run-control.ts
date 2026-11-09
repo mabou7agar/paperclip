@@ -73,6 +73,7 @@ import {
 } from "../adapter-execution-control.js";
 import { AdapterStopTimeoutError } from "../adapter-stop-timeout.js";
 import { budgetCancellationScopePredicate, pendingBudgetRunCancellationPredicate } from "./budget-cancellation.js";
+import { notifyBudgetStopsSettled } from "../budget-resume-continuation.js";
 import { withBudgetSpan } from "../budget-tracing.js";
 import { captureException } from "../../sentry.js";
 import { randomUUID } from "node:crypto";
@@ -177,7 +178,12 @@ async function withBudgetStopDelivery<T>(db: Db, work: () => Promise<T>): Promis
   }
 }
 
+/** `preservePauseDeferred`: the stop comes from a pause, which keeps the
+ * messages it deferred for delivery once the pause lifts. */
+export type StopInvocationOptions = { preservePauseDeferred?: boolean };
+
 /** Cancellation shares executor ownership and delegates lifecycle and admission effects. */
+
 export interface HeartbeatRunControlDependencies extends Pick<ReturnType<typeof createHeartbeatRunState>,
   "getRun" | "getAgent" | "getRunCleanupState" | "getRunExecutionWait">,
   Pick<ReturnType<typeof createHeartbeatLifecycle>,
@@ -298,6 +304,8 @@ export type CancelRunOptions = {
     terminationGraceMs?: number;
     /** Caller is immediately scheduling an explicit successor path. */
     suppressImmediateRecovery?: boolean;
+    /** Exact self-handoff may wait one extra cleanup window after durable Stop. */
+    acknowledgedHandoffStopId?: string;
   };
 
 /** The same durable fence protects both individual Stop and budget fan-out.
@@ -1523,7 +1531,18 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
               abortRequested: control.controller.signal.aborted,
             };
             try {
-              await waitForAdapterStop(control.settled, undefined, stopDiagnostics, control);
+              await waitForAdapterStop(control.settled, undefined, stopDiagnostics, control, options.acknowledgedHandoffStopId ? async () => {
+              // Read only authoritative server receipts, never presentation JSON
+              // or provider output. An unrelated Stop cannot extend this wait.
+              const [acknowledged] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+                eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+                eq(heartbeatRuns.status, "cancelled"), eq(heartbeatRuns.errorCode, "issue_reassigned"),
+                sql`${heartbeatRuns.resultJson}->>'issueMutationStopId' = ${options.acknowledgedHandoffStopId}`,
+                sql`${heartbeatRuns.resultJson}->'executionCancellation'->>'state' = 'acknowledged'`,
+              )).limit(1);
+              if (acknowledged) logger.info({ runId: run.id }, "waiting for acknowledged handoff cleanup");
+              return Boolean(acknowledged);
+            } : undefined);
             } catch (error) {
               if (!(error instanceof AdapterStopTimeoutError)) throw error;
               // The owned adapter is still settling (for example copying the
@@ -1699,6 +1718,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
   async function cancelPendingWakeupsForAgentsInternal(
     agentIds: string[],
     reason: string,
+    options: StopInvocationOptions = {},
   ) {
     const uniqueAgentIds = [...new Set(agentIds)].filter(
       (agentId) => agentId.length > 0,
@@ -1713,6 +1733,10 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
           inArray(agentWakeupRequests.agentId, uniqueAgentIds),
           inArray(agentWakeupRequests.status, ["queued", "deferred_issue_execution"]),
           isNull(agentWakeupRequests.runId),
+          // A pause is temporary: a message it deferred waits for the pause to
+          // lift (work-intent outbox), so the pause's own stop keeps it.
+          options.preservePauseDeferred ? sql`not (${agentWakeupRequests.status} = 'deferred_issue_execution'
+            and coalesce(${agentWakeupRequests.payload}->'executionWait'->>'trigger', '') = 'pause_lifted')` : undefined,
         ));
       if (!wakeups.length) return 0;
       for (const companyId of new Set(wakeups.map(row => row.companyId))) {
@@ -1733,6 +1757,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
   async function cancelInvocationsForAgentsInternal(
     agentIds: string[],
     reason: string,
+    options: StopInvocationOptions = {},
   ) {
     const uniqueAgentIds = [...new Set(agentIds)].filter(
       (agentId) => agentId.length > 0,
@@ -1744,6 +1769,7 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
     const wakeupsCancelled = await cancelPendingWakeupsForAgentsInternal(
       uniqueAgentIds,
       reason,
+      options,
     );
     return {
       agentIds: uniqueAgentIds,
@@ -1830,6 +1856,9 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
         }
       }
     }));
+    // A resumed budget owes these runs a continuation once their Stop lands.
+    await notifyBudgetStopsSettled(db, runIds).catch(error =>
+      logger.warn({ err: error, companyId: scope.companyId }, "Budget resume continuation notification deferred"));
     // Drain the batch before rejecting; one failed provider must not prevent
     // the remaining runs from receiving their already-committed Stop.
     if (failures.length) throw new AggregateError(failures, "Budget cancellation delivery remains pending");

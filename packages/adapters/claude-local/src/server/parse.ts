@@ -505,6 +505,19 @@ function nextClockTimeInTimeZone(input: {
 
 function parseClaudeResetClockTime(clockText: string, now: Date, timeZoneHint?: string | null): Date | null {
   const normalized = clockText.trim().replace(/\s+/g, " ");
+  // Weekly limits include a calendar date, unlike the rolling session clock.
+  const dated = normalized.match(/^([A-Za-z]+)\s+(\d{1,2})(?:,?\s+(\d{4}))?,?\s+(\d{1,2})(?::(\d{2}))?\s*([ap])m$/i);
+  if (dated) {
+    const months = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
+    const month = months.findIndex(name => name === dated[1].toLowerCase() || name.slice(0, 3) === dated[1].toLowerCase());
+    const timeZone = timeZoneHint ? normalizeResetTimeZone(timeZoneHint) : null;
+    const hour = Number(dated[4]), minute = Number(dated[5] ?? 0), day = Number(dated[2]);
+    if (month < 0 || !timeZone || hour < 1 || hour > 12 || minute > 59 || day < 1 || day > 31) return null;
+    const anchor = readTimeZoneParts(now, timeZone);
+    const year = dated[3] ? Number(dated[3]) : anchor.year + (anchor.month === 12 && month === 0 ? 1 : 0);
+    const retryAt = dateFromTimeZoneWallClock({ year, month: month + 1, day, hour: hour % 12 + (dated[6].toLowerCase() === "p" ? 12 : 0), minute, timeZone });
+    return retryAt && retryAt.getTime() > now.getTime() ? retryAt : null;
+  }
   const match = normalized.match(/^(\d{1,2})(?::(\d{2}))?\s*([ap])\.?\s*m\.?/i);
   if (!match) return null;
 

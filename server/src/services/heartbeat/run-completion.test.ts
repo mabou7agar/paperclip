@@ -16,7 +16,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { appendHeartbeatRunEvent } from "../heartbeat-run-events.js";
 import { createNativeRunLogCoverageVerifier, formatNativeRunLogEvent } from "../native-runtime/native-run-log-export.js";
 import type { Db } from "@paperclipai/db";
-import { activityLog, agents, agentWakeupRequests, budgetReservations, caseHandoffs, cases, companies, completionContracts, costEvents, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, heartbeatRuns, heartbeatRunEvents, issueComments, issueQuestionResponseDeliveries, issueRecoveryActions, issues, nativeRunFinalizations } from "@paperclipai/db";
+import { activityLog, agents, agentWakeupRequests, approvals, issueApprovals, budgetReservations, caseHandoffs, cases, companies, completionContracts, costEvents, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, heartbeatRuns, heartbeatRunEvents, issueComments, issueQuestionResponseDeliveries, issueRecoveryActions, issues, nativeRunFinalizations } from "@paperclipai/db";
 import { and, eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
@@ -97,7 +97,7 @@ function callbacks(db: Db) {
     budgets: { getInvocationBlock: vi.fn(async () => null) },
     treeControlSvc: { getActivePauseHoldGate: vi.fn(async () => null) },
     enqueueWakeup: vi.fn(),
-    getCurrentUserRedactionOptions: vi.fn(async () => ({ enabled: false })),
+    getCurrentUserRedactionOptions: vi.fn<HeartbeatLifecycleDependencies["getCurrentUserRedactionOptions"]>(async () => ({ enabled: false })),
     getAgentInvokability: vi.fn<HeartbeatLifecycleDependencies["getAgentInvokability"]>(async () => ({ invokable: true })),
     emitTerminalAgentTaskRun: vi.fn(), budgetHooks: {},
   } satisfies HeartbeatLifecycleDependencies;
@@ -458,7 +458,9 @@ describe.skipIf(!support.supported && !process.env.PAPERCLIP_TEST_DATABASE_URL)(
 
   it("persists usage, accounting, final logs, presentation and the next task session", async () => {
     const f = await fixture();
+    f.input.adapterResult.usage!.cacheWriteTokens = 10;
     await f.completion.completeRun(f.input);
+    expect((await read(f.run.id)).usageJson).toMatchObject({ inputTokens: 20, cacheWriteTokens: 10 });
     expect(await read(f.run.id)).toMatchObject({ status: "succeeded", sessionIdAfter: "provider-session", logBytes: 123, logSha256: "log-hash", logCompressed: true, stdoutExcerpt: "answer", costAccountingPending: false, costAccountedAt: expect.any(Date), usageJson: { inputTokens: 20, cachedInputTokens: 5, outputTokens: 8, usageSource: "per_run", configFreshness: { version: 1 } }, resultJson: { presentationDecision: { commentAction: "none" } } });
     expect(await db.select().from(costEvents).where(eq(costEvents.heartbeatRunId, f.run.id))).toHaveLength(1);
     expect((await f.deps.getTaskSession(f.agent.companyId, f.agent.id, f.agent.adapterType, "completion-task"))?.sessionDisplayId).toBe("provider-session");
@@ -468,6 +470,67 @@ describe.skipIf(!support.supported && !process.env.PAPERCLIP_TEST_DATABASE_URL)(
     expect(f.deps.releaseIssueExecutionAndPromote).toHaveBeenCalledOnce();
     expect(f.deps.finalizeAgentStatus).toHaveBeenCalledWith(f.agent.id, "succeeded", null, expect.any(Object));
   });
+
+  // A chat turn can finish while its task keeps waiting: a resubmitted hire
+  // approval, an execution stage or a dependency blocker holds the status.
+  // The accepted final answer must still reach the conversation. Only a card
+  // the run itself left pending in the thread presents the turn instead.
+  it.each([
+    { hold: "pending approval", reasonCode: "governed_response_waiting", replies: true },
+    { hold: "approval sent back for revision", reasonCode: "governed_response_waiting", replies: true },
+    { hold: "execution stage", reasonCode: "governed_response_waiting", replies: true },
+    { hold: "dependency blocker", reasonCode: "durable_dependency_blocker_bound", replies: true },
+    { hold: "finished turn", reasonCode: "conversation_turn_finished", replies: true },
+    { hold: "own question card", reasonCode: "governed_response_waiting", replies: false },
+    { hold: "execution stage and own question card", reasonCode: "governed_response_waiting", replies: false },
+  ] as const)("posts a waiting conversation turn's accepted answer: $hold", async ({ hold, reasonCode, replies }) => {
+    const f = await fixture({ runtimeMode: "native" }, `CNV${randomUUID().slice(0, 6)}`);
+    const [issue] = await db.insert(issues).values({ companyId: f.run.companyId, title: "Chat with CEO",
+      status: "in_progress", assigneeAgentId: f.agent.id, responsibleUserId: "local-board",
+      conversationAgentId: f.agent.id, conversationUserId: "local-board", conversationState: "active",
+      ...(hold.startsWith("execution stage") ? { executionState: { status: "pending" } } : {}),
+    }).returning();
+    await db.update(heartbeatRuns).set({ nativeIssueId: issue.id, responsibleUserId: "local-board",
+      contextSnapshot: { issueId: issue.id, conversationSessionGeneration: 0 } }).where(eq(heartbeatRuns.id, f.run.id));
+    if (hold.includes("approval")) {
+      const [approval] = await db.insert(approvals).values({ companyId: f.run.companyId, type: "hire_agent",
+        status: hold === "pending approval" ? "pending" : "revision_requested", payload: { name: "Researcher" } }).returning();
+      await db.insert(issueApprovals).values({ companyId: f.run.companyId, issueId: issue.id, approvalId: approval.id });
+    }
+    if (hold.endsWith("own question card")) {
+      await issueThreadInteractionService(db).create(issue, { kind: "ask_user_questions", sourceRunId: f.run.id,
+        continuationPolicy: "wake_assignee", payload: { version: 1, questions: [{ id: "model", prompt: "Which model?",
+          selectionMode: "single", required: true, options: [{ id: "flash", label: "Flash" }] }] } },
+        { agentId: f.agent.id, runId: f.run.id });
+    }
+    const answer = "Resubmitted the hire with the cheaper model. [Review the pending approval](/CNV/approvals/a1).";
+    f.input.issueId = issue.id;
+    f.input.issueRef = issue;
+    f.input.issueContext = await createHeartbeatRunPreparation(db).getIssueExecutionContext(f.run.companyId, issue.id);
+    // The finalizer's saved shape, unchanged from the previous release.
+    f.input.adapterResult.resultJson = {
+      nativeResult: { schema: "paperclip.run_result.v1", reportedWorkDisposition: "yielded",
+        summary: "Waiting for the approval decision.",
+        continuation: { kind: "response_wake", summary: "Wait for the decision.", idempotencyKey: "hire-wait" } },
+      finalizationPhase: "committed", finalizationReasonCode: reasonCode,
+    };
+    f.deps.findLatestCompletedFinalAgentMessage.mockResolvedValue({ seq: 1, text: answer, sourceEventId: "final-event", channel: "final",
+      reasonCode: "latest_non_empty_completed_final_agent_message" });
+    f.deps.issuesSvc.addComment.mockImplementation(async (issueId, body) => {
+      const [comment] = await db.insert(issueComments).values({ companyId: f.run.companyId, issueId,
+        authorAgentId: f.agent.id, authorType: "agent", createdByRunId: f.run.id, body }).returning();
+      return { ...comment, authorType: "agent" as const };
+    });
+
+    await f.completion.completeRun(f.input);
+
+    const posted = (await db.select().from(issueComments).where(eq(issueComments.issueId, issue.id)))
+      .filter(comment => comment.createdByRunId === f.run.id);
+    expect(posted.map(comment => comment.body)).toEqual(replies ? [answer] : []);
+    expect((await read(f.run.id)).resultJson).toMatchObject({ presentationDecision: replies
+      ? { chosenSource: "final_agent_message", commentAction: "create", commentId: posted[0]?.id }
+      : { chosenSource: "none", commentAction: "none" } });
+  }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 
   it("settles the accepted native exact rate-card price without replacing it with zero", async () => {
     const f = await fixture({ runtimeMode: "native" });
@@ -720,6 +783,85 @@ describe.skipIf(!support.supported && !process.env.PAPERCLIP_TEST_DATABASE_URL)(
     await f.completion.failRun(f.failure(new Error("transport ended")));
     expect((await read(f.run.id)).errorCode).toBe("native_result_missing");
     expect(f.deps.releaseIssueExecutionAndPromote).toHaveBeenCalledWith(expect.objectContaining({ id: f.run.id }), { suppressImmediateRecovery: true });
+  });
+
+  describe("a same-run exact-checkpoint resume refused before its provider claim", () => {
+    const originalMessage = "PRP command turn.start failed: ACPX turn start failed closed: classification=session_resume_required";
+    const refusal = "Plugin Runner retained session is not authorized";
+    async function resumeClaim(recoveryHistory: Array<Record<string, unknown>>, attempt = 1) {
+      const f = await fixture({ runtimeMode: "native" });
+      const [issue] = await db.insert(issues).values({ companyId: f.run.companyId, title: "Native resume" }).returning();
+      await db.update(heartbeatRuns).set({ nativeIssueId: issue.id }).where(eq(heartbeatRuns.id, f.run.id));
+      const leaseOwner = `runner:resume:${randomUUID()}`;
+      await db.insert(nativeRunFinalizations).values({ runId: f.run.id, companyId: f.run.companyId, issueId: issue.id,
+        phase: "observed", attempt, leaseOwner, leaseExpiresAt: new Date(Date.now() + 20 * 60_000), recoveryHistory });
+      return { f, issue, leaseOwner, attempt };
+    }
+    const interruption = { at: "2099-01-01T00:00:00.000Z", disposition: "retryable_failure", reason: "native_session_interrupted",
+      providerAttempt: 1, stderrTail: originalMessage, providerSessionEstablished: true, checkpointExists: true };
+
+    it("reports the interrupted first attempt in the terminal error, result and coordinator detail", async () => {
+      const { f, leaseOwner, attempt } = await resumeClaim([interruption]);
+      await f.completion.failRun(f.failure(new Error(refusal)));
+      const expected = `native_session_interrupted: ${originalMessage}; exact checkpoint resume refused: ${refusal}`;
+      const failed = await read(f.run.id);
+      expect(failed).toMatchObject({ status: "failed", errorCode: "adapter_failed", error: expected });
+      expect(failed.resultJson).toMatchObject({ nativeExactResumeRefusal: {
+        originalFailureCode: "native_session_interrupted", originalMessage, interruptedAttempt: 1, refusal } });
+      const [errorEvent] = await db.select().from(heartbeatRunEvents).where(and(eq(heartbeatRunEvents.runId, f.run.id),
+        eq(heartbeatRunEvents.eventType, "error")));
+      expect(errorEvent?.message).toBe(expected);
+
+      // The dispatcher then releases its unstarted claim; the coordinator keeps
+      // the same named cause and its unchanged eligibility fields.
+      const { settleUnstartedNativeSessionResume } = await import("../native-runtime/native-failed-run-owner-release.js");
+      await expect(settleUnstartedNativeSessionResume(db, { runId: f.run.id, leaseOwner, attempt })).resolves.toBe(true);
+      const [coordinator] = await db.select().from(nativeRunFinalizations).where(eq(nativeRunFinalizations.runId, f.run.id));
+      expect(coordinator).toMatchObject({ phase: "terminal_failure", failureCode: "adapter_failed",
+        failureDetail: { message: expected, originalFailureCode: "adapter_failed" } });
+    });
+
+    it("masks usernames in both texts before their length budgets cut them", async () => {
+      // Each username crosses a cut: 1,500 characters for the original message
+      // and 480 for the refusal. A cut before masking would keep "casp".
+      const userName = "casperhost";
+      const original = `${"x".repeat(1_495)} ${userName} could not resume`;
+      const longRefusal = `${"r".repeat(475)} ${userName} retained session is not authorized`;
+      const { f } = await resumeClaim([{ ...interruption, stderrTail: original }]);
+      f.deps.getCurrentUserRedactionOptions.mockResolvedValue({ enabled: true, userNames: [userName], homeDirs: [] });
+      await f.completion.failRun(f.failure(new Error(longRefusal)));
+      const failed = await read(f.run.id);
+      const recorded = (failed.resultJson as { nativeExactResumeRefusal: Record<string, string> }).nativeExactResumeRefusal;
+      expect(failed.error).toHaveLength(2_000);
+      expect(failed.error!.startsWith("native_session_interrupted: xxx")).toBe(true);
+      expect(failed.error!.endsWith(`; exact checkpoint resume refused: ${"r".repeat(475)} c***`)).toBe(true);
+      expect(recorded.originalMessage).toBe(`${"x".repeat(1_495)} c***`);
+      expect(recorded.refusal).toBe(`${"r".repeat(475)} c********* retained session is not authorized`);
+      for (const text of [failed.error!, recorded.originalMessage, recorded.refusal]) expect(text).not.toContain("casp");
+    });
+
+    it("saves the failure when an emoji crosses each cut", async () => {
+      const emoji = "\u{1F642}";
+      const { f } = await resumeClaim([{ ...interruption, stderrTail: `${"x".repeat(1_499)}${emoji} could not resume` }]);
+      await f.completion.failRun(f.failure(new Error(`${"r".repeat(479)}${emoji} retained session is not authorized`)));
+      const failed = await read(f.run.id);
+      expect(failed.status).toBe("failed");
+      const recorded = (failed.resultJson as { nativeExactResumeRefusal: Record<string, string> }).nativeExactResumeRefusal;
+      expect(recorded.originalMessage).toBe("x".repeat(1_499));
+      expect(failed.error!.endsWith(`; exact checkpoint resume refused: ${"r".repeat(479)}`)).toBe(true);
+    });
+
+    it.each([
+      ["has no prior interruption", [], 0],
+      ["follows a bootstrap retry", [{ ...interruption, checkpointExists: false, providerSessionEstablished: false }], 1],
+      ["already claimed a later provider attempt", [interruption], 2],
+    ])("keeps the thrown error unchanged when the run %s", async (_name, history, attempt) => {
+      const { f } = await resumeClaim(history, attempt);
+      await f.completion.failRun(f.failure(new Error(refusal)));
+      const failed = await read(f.run.id);
+      expect(failed).toMatchObject({ status: "failed", errorCode: "adapter_failed", error: refusal });
+      expect(failed.resultJson).not.toHaveProperty("nativeExactResumeRefusal");
+    });
   });
 
   it("persists a project denial without provider work or an automatic retry", async () => {
@@ -1093,6 +1235,9 @@ describe.skipIf(!support.supported && !process.env.PAPERCLIP_TEST_DATABASE_URL)(
     await interactions.answerQuestions(issue, interaction.id, { answers: [{ questionId: "choice", optionIds: ["yes"] }] },
       { userId: "local-board" });
     const heartbeat = heartbeatService(db);
+    // This fixture manually admits the queued answer below; it must not also
+    // dispatch through the background execution path.
+    heartbeat.startTaskDrain();
     const answerHeartbeat = legacy ? { ...heartbeat, wakeup: (...[agentId, options]: Parameters<typeof heartbeat.wakeup>) => {
       const contextSnapshot = { ...options?.contextSnapshot };
       delete contextSnapshot.mutation;

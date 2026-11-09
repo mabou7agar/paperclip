@@ -68,6 +68,20 @@ function baseStalenessFacts(): QueuedRunFacts {
 }
 
 describe("decideScheduledRetryGate", () => {
+  it("admits a verified recipient without taking task ownership and rejects stale cards", () => {
+    const facts = { ...baseGateFacts(), issueAssigneeAgentId: "worker", addressedInteractionWake: "pending" as const,
+      issueStatus: "in_review", reviewParticipant: { ...NO_PARTICIPANT, isInReview: true,
+        hasParticipant: true, participantIsAgent: true, participantAgentId: "reviewer" } };
+    expect(decideScheduledRetryGate(facts, NOW)).toEqual({ allowed: true });
+    expect(decideScheduledRetryGate({ ...facts, addressedInteractionWake: "stale" }, NOW))
+      .toMatchObject({ allowed: false, errorCode: "issue_interaction_changed" });
+    expect(decideScheduledRetryGate({ ...facts, dependenciesBlocked: { unresolvedBlockerIssueIds: ["blocker"], unresolvedBlockerCount: 1 } }, NOW))
+      .toMatchObject({ allowed: false, errorCode: "issue_dependencies_blocked" });
+    expect(decideScheduledRetryGate({ ...facts, pendingResponse: "approval" }, NOW))
+      .toMatchObject({ allowed: false, errorCode: "issue_waiting_for_response" });
+    expect(decideScheduledRetryGate({ ...facts, issueStatus: "done" }, NOW))
+      .toMatchObject({ allowed: false, errorCode: "issue_terminal_status" });
+  });
   it("allows the current reviewer and rejects a replaced participant", () => {
     const facts: ScheduledRetryFacts = {
       ...baseGateFacts(), issueStatus: "in_review", issueAssigneeAgentId: "implementor",
@@ -267,6 +281,20 @@ describe("decideScheduledRetryGate", () => {
 });
 
 describe("decideQueuedRunStaleness", () => {
+  it("admits current addressed questions while retaining terminal, pending-response and ordinary ownership guards", () => {
+    const facts = { ...baseStalenessFacts(), issueStatus: "in_review", issueAssigneeAgentId: "worker",
+      addressedInteractionWake: "pending" as const, reviewParticipant: { ...NO_PARTICIPANT, isInReview: true,
+        hasParticipant: true, participantIsAgent: true, participantAgentId: "reviewer" } };
+    expect(decideQueuedRunStaleness(facts, NOW)).toEqual({ stale: false });
+    expect(decideQueuedRunStaleness({ ...facts, addressedInteractionWake: null }, NOW))
+      .toMatchObject({ stale: true, errorCode: "issue_assignee_changed" });
+    expect(decideQueuedRunStaleness({ ...facts, addressedInteractionWake: "stale", issueAssigneeAgentId: facts.runAgentId }, NOW))
+      .toMatchObject({ stale: true, errorCode: "issue_interaction_changed" });
+    expect(decideQueuedRunStaleness({ ...facts, issueStatus: "done" }, NOW))
+      .toMatchObject({ stale: true, errorCode: "issue_terminal_status" });
+    expect(decideQueuedRunStaleness({ ...facts, pendingResponse: "approval" }, NOW))
+      .toMatchObject({ stale: true, errorCode: "issue_waiting_for_response" });
+  });
   it("is not stale when every rule passes", () => {
     expect(decideQueuedRunStaleness(baseStalenessFacts(), NOW)).toEqual({
       stale: false,
@@ -299,6 +327,15 @@ describe("decideQueuedRunStaleness", () => {
       overrides: {
         isResolvedInteractionContinuation: true,
         issueStatus: "todo",
+      } satisfies Partial<QueuedRunFacts>,
+      errorCode: "issue_not_in_progress",
+    },
+    {
+      name: "issue_not_in_progress (resolved-interaction continuation, unstarted answer on a non-todo task)",
+      overrides: {
+        isResolvedInteractionContinuation: true,
+        isUnstartedTaskQuestionAnswer: true,
+        issueStatus: "backlog",
       } satisfies Partial<QueuedRunFacts>,
       errorCode: "issue_not_in_progress",
     },
@@ -396,6 +433,15 @@ describe("decideQueuedRunStaleness", () => {
       isConnectionContinuation: false,
       issueStatus: "in_review",
       reviewParticipant: { ...NO_PARTICIPANT, isInReview: true },
+    }, NOW)).toEqual({ stale: false });
+  });
+
+  it("allows an answer to a question no run asked to start a todo task that has never started", () => {
+    expect(decideQueuedRunStaleness({
+      ...baseStalenessFacts(),
+      isResolvedInteractionContinuation: true,
+      isUnstartedTaskQuestionAnswer: true,
+      issueStatus: "todo",
     }, NOW)).toEqual({ stale: false });
   });
 

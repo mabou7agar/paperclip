@@ -89,7 +89,7 @@ export type {
   RuntimeStatusSink,
   RuntimeStatusUpdate,
 } from "./runtime-progress.js";
-export { inferOpenAiCompatibleBiller, resolveManagedOpenAiBilling } from "./billing.js";
+export { inferOpenAiCompatibleBiller, resolveManagedOpenAiBilling, resolveManagedClaudeBilling, resolveManagedAiBillingIdentity } from "./billing.js";
 export {
   ADAPTER_LOGIN_PANEL_MODES,
   ADAPTER_LOGIN_TIMEOUT_POLICIES,
@@ -124,6 +124,7 @@ export {
   resolvePaperclipRunnerIdleTimeoutMs,
   resolvePaperclipRunnerModel,
   paperclipRunnerTransitionConfig,
+  paperclipRunnerFollowsLifecycleDefault,
   normalizeLegacyRunnerProvider,
   resolvePaperclipRunnerPermissionMode,
   resolvePaperclipRunnerCursorMode,

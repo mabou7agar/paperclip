@@ -5,7 +5,7 @@ import { notifyInstructionCollection } from "./instruction-collection-notificati
 import { notifyExecutionRunWork } from "./execution-control-notifications.js";
 import { hasRequiredWorkspaceRecovery, preserveWorkspaceRestoreRecoveryMetadata, LEGACY_WORKSPACE_RECOVERY_SCHEMA } from "./workspace-restore-recovery-state.js";
 import { hasUnrestoredRemoteWorkspace, preserveLegacyWorkspaceRestoreSources, type LegacyWorkspaceRestoreSource } from "./legacy-workspace-restore-recovery.js";
-import { isPreDispatchReviewWaitVerified } from "./pre-dispatch-review-wait.js";
+import { isPreDispatchReviewWaitVerified, isCancelledQuotaWaitBeforeDispatchVerified } from "./pre-dispatch-review-wait.js";
 import { isPreDispatchExecutionWaitVerified } from "./pre-dispatch-execution-wait.js";
 import { REMOTE_WORKSPACE_PREPARATION_TIMEOUT_CODE, REMOTE_WORKSPACE_RESTORE_FAILED_CODE } from "./remote-workspace-transport.js";
 import { REUSABLE_SANDBOX_RESUME_FAILED_CODE } from "./reusable-sandbox-resume-error.js";
@@ -77,7 +77,7 @@ export function legacyExecutionNeedsReconciliation(
       && (run.resultJson?.executionCancellation as Record<string, unknown> | undefined)?.state === "acknowledged") return false;
   // Waiting for a subscription or workspace precedes provider execution. It is
   // a resource wait, not a failed provider attempt or permission to replay work.
-  if (run.status === "cancelled" && (run.errorCode === "ai_connection_busy" || run.errorCode === "ai_connection_pool_exhausted" || run.errorCode === "provider_limit_wait") &&
+  if (run.status === "cancelled" && (run.errorCode === "ai_connection_busy" || run.errorCode === "ai_connection_pool_exhausted" || run.errorCode === "provider_limit_wait" || run.errorCode === "phase_quota_cooldown") &&
       evidence?.kind === "ai_connection_wait" && evidence.providerWorkStarted === false) return false;
   if (run.status === "cancelled" && run.errorCode === "workspace_busy" &&
       evidence?.kind === "workspace_wait" && evidence.providerWorkStarted === false) return false;
@@ -102,7 +102,7 @@ export async function legacyExecutionNeedsReconciliationWithEvidence(db: Db, run
   if (await isInterruptedNativePreparation(db, run)) return false;
   return await hasUnrestoredRemoteWorkspace(db, run) ||
     (legacyExecutionNeedsReconciliation(run) && !(await isPreDispatchReviewWaitVerified(db, run))
-      && !(await isPreDispatchExecutionWaitVerified(db, run)));
+      && !(await isPreDispatchExecutionWaitVerified(db, run)) && !(await isCancelledQuotaWaitBeforeDispatchVerified(db, run)));
 }
 
 /** Persist the failed legacy run, owned lock release and operator decision together. */
@@ -328,7 +328,11 @@ export async function terminalizeLegacyExecution(input: {
 }
 
 export async function settleInterruptedNativeBootstrap(
-  db: Db, input: { run: Run; providerDispatchStarted: boolean },
+  db: Db, input: { run: Run; providerDispatchStarted: boolean;
+    /** Owner proof that authorized this settle, recorded in the activity log. */
+    proof?: string;
+    /** Called inside the transaction with the number of holds this call resolved. */
+    onHoldsResolved?: (count: number) => void },
 ): Promise<Run | null> {
   if (input.providerDispatchStarted) return null;
   const issueId = input.run.contextSnapshot?.issueId;
@@ -386,8 +390,10 @@ export async function settleInterruptedNativeBootstrap(
     }).where(inArray(issueRecoveryActions.id, holds.map(hold => hold.id))).returning({ id: issueRecoveryActions.id }) : [];
     if (resolved.length) await logActivity(tx as unknown as Db, { companyId: run.companyId, actorType: "system", actorId: "system",
       action: "issue.recovery_action_resolved", entityType: "issue", entityId: task.id, agentId: run.agentId, runId: run.id,
-      details: { reason: "native_bootstrap_stopped_before_provider", recoveryActionIds: resolved.map(r => r.id) },
+      details: { reason: "native_bootstrap_stopped_before_provider", recoveryActionIds: resolved.map(r => r.id),
+        ...(input.proof ? { ownerProof: input.proof } : {}) },
     });
+    input.onHoldsResolved?.(resolved.length);
     return settled;
   });
 }

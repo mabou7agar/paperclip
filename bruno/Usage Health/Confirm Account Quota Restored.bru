@@ -1,0 +1,25 @@
+meta {
+  name: Confirm Account Quota Restored
+  type: http
+  seq: 3
+}
+
+post {
+  url: {{baseUrl}}/api/v1/companies/{{companyId}}/ai-connections/{{connectionId}}/quota-restored
+  body: json
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{boardToken}}
+}
+
+body:json {
+  { "reason": "Account owner confirmed restored quota after a successful provider check" }
+}
+
+tests {
+  test("request succeeds", function () {
+    expect(res.getStatus()).to.equal(200);
+  });
+}

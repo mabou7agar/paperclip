@@ -60,7 +60,12 @@ d("heartbeat context_snapshot expression index migration", () => {
       "EXPLAIN SELECT id FROM heartbeat_runs WHERE company_id = '00000000-0000-0000-0000-000000000001' AND context_snapshot -> 'paperclipIssue' ->> 'id' = 'x'",
     );
     const redactionText = redactionPlan.map((r) => Object.values(r)[0]).join("\n");
-    expect(redactionText).toContain("heartbeat_runs_company_ctx_paperclip_issue_created_idx");
+    // Both upstream's ordered index and the fork's narrower lookup index
+    // cover this predicate. The planner may choose either across platforms.
+    expect(redactionText).toMatch(/Index (?:Only )?Scan using heartbeat_runs_company_(?:ctx_paperclip_issue_created|embedded_issue)_idx/);
+    expect(redactionText).toContain("Index Cond:");
+    expect(redactionText).toContain("company_id");
+    expect(redactionText).toContain("paperclipIssue");
 
     const originPlan = await sql.unsafe(
       "EXPLAIN SELECT id FROM heartbeat_runs WHERE company_id = '00000000-0000-0000-0000-000000000001' AND coalesce(native_issue_id::text, nullif(context_snapshot->>'issueId', ''), nullif(context_snapshot->>'taskId', ''), nullif(context_snapshot->>'taskKey', '')) IN ('x', 'SRC-1')",

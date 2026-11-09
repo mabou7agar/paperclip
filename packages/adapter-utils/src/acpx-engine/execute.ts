@@ -94,6 +94,9 @@ import {
 } from "@paperclipai/adapter-utils/server-utils";
 import { shellQuote } from "@paperclipai/adapter-utils/ssh";
 import { createEphemeralSessionEnvironmentStore } from "./ephemeral-session-environment.js";
+import { managedAiSessionFingerprintConfig } from "../managed-ai-session-fingerprint.js";
+import { prepareManagedClaudeSessionStorage } from "../managed-claude-session-storage.js";
+import { prepareManagedCodexSessionStorage } from "../managed-codex-session-storage.js";
 import {
   createAcpRuntime,
   createAgentRegistry,
@@ -475,6 +478,7 @@ interface AcpxPreparedRuntime {
   permissionMode: "approve-all" | "approve-reads" | "deny-all";
   nonInteractivePermissions: "deny" | "fail";
   requestedModel: string;
+  requestedAgentMode: string;
   requestedThinkingEffort: string;
   fastMode: boolean;
   timeoutSec: number;
@@ -1996,6 +2000,7 @@ async function buildRuntime(input: {
   const permissionMode = normalizePermissionMode(config);
   const nonInteractivePermissions = normalizeNonInteractivePermissions(config);
   const requestedModel = asString(config.model, "").trim();
+  const requestedAgentMode = acpxAgent === "codex" ? asString(config.codexSessionMode, "") : "";
   const requestedThinkingEffort = normalizeRequestedThinkingEffort(config);
   const fastMode = acpxAgent === "codex" && config.fastMode === true;
   const runtimeMcpServers = input.ctx.runtimeMcp?.getServers() ?? [];
@@ -2077,6 +2082,7 @@ async function buildRuntime(input: {
       ...(Array.isArray(scratch.tempKeysApplied) ? scratch.tempKeysApplied.filter((key): key is string =>
         typeof key === "string" && ["TMPDIR", "TEMP", "TMP"].includes(key)) : [])])
     : new Set<string>();
+  const runtimeAssignedEnvKeys = new Set(Object.keys(env));
   for (const [key, value] of Object.entries(shapedEnvConfig)) {
     if (typeof value !== "string") continue;
     // Runtime PAPERCLIP_* always wins over config: skip a PAPERCLIP_* key that
@@ -2096,7 +2102,26 @@ async function buildRuntime(input: {
     env.ANTHROPIC_CUSTOM_HEADERS = openRouterClaudeHeaders(env.ANTHROPIC_CUSTOM_HEADERS ?? process.env.ANTHROPIC_CUSTOM_HEADERS);
     resolvedAdapterEnv.ANTHROPIC_CUSTOM_HEADERS = env.ANTHROPIC_CUSTOM_HEADERS;
   }
+  // The launch env includes rotating GitHub broker credentials and launcher paths.
+  // Keep those out of conversation identity; still forward the current values.
+  // Only the server-owned execution-context field can supply the configured base.
+  const fingerprintEnv = input.ctx.sessionFingerprintEnv === undefined ? resolvedAdapterEnv
+    : Object.fromEntries(Object.entries(input.ctx.sessionFingerprintEnv)
+      .filter(([key, value]) => !isForbiddenConfigEnvKey(key) && !(isPaperclipRuntimeEnvKey(key) && runtimeAssignedEnvKeys.has(key))
+        && (!scratchKeys.has(key) || value !== scratch.dir)));
   if (authToken) env.PAPERCLIP_API_KEY = authToken;
+  const managedSessionIdentity = (acpxAgent === "claude" || (acpxAgent === "codex" && !executionTargetIsRemote))
+    ? asString(parseObject(config.managedAiConnection).sessionIdentity, "")
+    : "";
+  const canonicalManagedConfig = managedSessionIdentity
+    ? managedAiSessionFingerprintConfig({ ...config, env: fingerprintEnv }, asString(envConfig.HOME, "") || undefined)
+    : null;
+  if (acpxAgent === "claude" && managedSessionIdentity && !executionTargetIsRemote) {
+    await prepareManagedClaudeSessionStorage({ stateDir, sessionIdentity: managedSessionIdentity, env });
+  }
+  if (acpxAgent === "codex" && managedSessionIdentity && !executionTargetIsRemote) {
+    await prepareManagedCodexSessionStorage({ stateDir, sessionIdentity: managedSessionIdentity, env });
+  }
   if (input.ctx.observability) {
     applyObservabilityEnvironment(env, input.ctx.observability);
   }
@@ -2298,6 +2323,7 @@ async function buildRuntime(input: {
     permissionMode,
     nonInteractivePermissions,
     requestedModel,
+    ...(requestedAgentMode ? { requestedAgentMode } : {}),
     requestedThinkingEffort,
     fastMode,
     remoteExecutionIdentity,
@@ -2306,7 +2332,12 @@ async function buildRuntime(input: {
     // next launch stages the current referenced-project trees instead of reusing
     // a stale staged tree.
     additionalSourcesIdentity: additionalSourcesIdentity as unknown as Record<string, unknown>,
-    skillsIdentity,
+    skillsIdentity: acpxAgent === "codex" && canonicalManagedConfig
+      ? { ...skillsIdentity,
+          codexHome: parseObject(canonicalManagedConfig.env).CODEX_HOME,
+          skillsHome: path.join(asString(parseObject(canonicalManagedConfig.env).CODEX_HOME, ""), "skills"),
+        }
+      : skillsIdentity,
     skillPromptInstructions,
     paperclipClaudeSettings: paperclipClaudeSettings
       ? {
@@ -2326,7 +2357,9 @@ async function buildRuntime(input: {
     // that sources the latest env. secretManifestHash alone misses plain-value
     // edits and same-version secret rotations. Per-wake runtime vars never enter
     // resolvedAdapterEnv, so they don't churn the fingerprint every heartbeat.
-    adapterEnvHash: shortHash(resolvedAdapterEnv),
+    adapterEnvHash: shortHash(canonicalManagedConfig
+      ? { env: canonicalManagedConfig.env, sessionIdentity: managedSessionIdentity }
+      : fingerprintEnv),
   };
   const fingerprint = buildSessionFingerprint(fingerprintIdentity);
   const taskKey = asString(input.ctx.runtime.taskKey, "") || wakeTaskId || workspaceId || "default";
@@ -2690,6 +2723,7 @@ async function buildRuntime(input: {
     permissionMode,
     nonInteractivePermissions,
     requestedModel,
+    requestedAgentMode,
     requestedThinkingEffort,
     fastMode,
     timeoutSec,
@@ -2721,6 +2755,7 @@ async function buildRuntime(input: {
 
 function sessionConfigOptions(prepared: AcpxPreparedRuntime): Array<{ key: string; value: string }> {
   const options: Array<{ key: string; value: string }> = [];
+  if (prepared.requestedAgentMode) options.push({ key: "mode", value: prepared.requestedAgentMode });
   // Claude, Codex and Gemini runtime config is pre-set via startup env vars; skip
   // set_config_option to avoid ACP-server picker validation rejecting valid
   // backend model IDs that are not advertised by the local ACP server.
@@ -2757,7 +2792,7 @@ async function applySessionConfigOptions(input: {
   if (options.length === 0) return;
   if (!input.runtime.setConfigOption) {
     const message =
-      "ACPX runtime does not expose session config controls; upgrade ACPX or remove configured model, effort, and fast mode overrides.";
+      "ACPX runtime does not expose session config controls; upgrade ACPX or remove configured model, effort, fast mode, and native permission overrides.";
     await input.onLog("stderr", `[paperclip] ${message}\n`);
     throw new Error(message);
   }
@@ -3451,13 +3486,13 @@ export function summarizeAcpxTurnUsage(input: {
   const cachedReadTokens = Math.max(0, Math.floor(asNumber(breakdown?.cachedReadTokens, 0)));
   const cachedWriteTokens = Math.max(0, Math.floor(asNumber(breakdown?.cachedWriteTokens, 0)));
   const hasTokens = inputTokens > 0 || outputTokens > 0 || cachedReadTokens > 0 || cachedWriteTokens > 0;
-  // Cache-write tokens are prompt tokens the provider billed to create cache
-  // entries; UsageSummary has no dedicated field, so count them as input.
+  // Cache writes remain a subset of input; retain their split when reported.
   const usage: UsageSummary | null = hasTokens
     ? {
         inputTokens: inputTokens + cachedWriteTokens,
         outputTokens,
         cachedInputTokens: cachedReadTokens,
+        ...(typeof breakdown?.cachedWriteTokens === "number" ? { cacheWriteTokens: cachedWriteTokens } : {}),
       }
     : null;
   const usageDetail = breakdown
@@ -3548,6 +3583,14 @@ function classifyError(
     ...(stackPreview ? { stackPreview } : {}),
     ...(phase ? { phase } : {}),
   };
+  // Repeating the same native resume cannot repair its persistent storage.
+  // Keep the conversation intact and require repair before another attempt.
+  if (errorName === "SessionResumeRequiredError") {
+    return {
+      errorCode: "acpx_session_resume_required",
+      errorMeta: { category: "session", ...baseMeta, retryable: false, recoveryAction: "repair_existing_session" },
+    };
+  }
   // A host-generated handshake-guard error is classified by its type, never
   // by message text, and runs before the message-driven heuristics below. A
   // startup timeout or a duplex control-channel loss must report its own
@@ -3682,6 +3725,7 @@ async function emitAcpxFailure(input: {
 }
 
 function isResumeFailure(err: unknown): boolean {
+  if (err instanceof Error && err.name === "SessionResumeRequiredError") return false;
   const message = err instanceof Error ? err.message : String(err);
   return /resume|load|not found|no session|unknown session|conversation/i.test(message);
 }
@@ -4473,7 +4517,25 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
 
         const previousParams = parseObject(ctx.runtime.sessionParams);
         const canResume = isCompatibleSession(previousParams, prepared);
-        const resumeSessionId = canResume ? asString(previousParams.acpSessionId, "") || undefined : undefined;
+        const persistedRuntimeStore = createRuntimeStore({ stateDir: prepared.stateDir });
+        let resumeSessionId = canResume ? asString(previousParams.acpSessionId, "") || undefined : undefined;
+        // ACP also resumes its exact persisted key when the outer task-session
+        // row is absent. Repair that conversation's disposable-home index before
+        // the provider reads it, using the same account/config-scoped key.
+        if (!resumeSessionId && prepared.acpxAgent === "codex" && !prepared.remoteExecutionIdentity &&
+            asString(parseObject(ctx.config.managedAiConnection).sessionIdentity, "")) {
+          const retained = await persistedRuntimeStore.load(prepared.sessionKey);
+          if (retained && retained.acpxRecordId === prepared.sessionKey && retained.cwd === prepared.cwd &&
+              retained.agentCommand === (prepared.agentCommand ?? prepared.acpxAgent)) {
+            resumeSessionId = retained.acpSessionId;
+          }
+        }
+        if (resumeSessionId && prepared.acpxAgent === "codex" && !prepared.remoteExecutionIdentity) {
+          const sessionIdentity = asString(parseObject(ctx.config.managedAiConnection).sessionIdentity, "");
+          if (sessionIdentity) await prepareManagedCodexSessionStorage({
+            stateDir: prepared.stateDir, sessionIdentity, env: { ...prepared.env }, resumeSessionId,
+          });
+        }
         // Borrow the warm entry without removing it, so an overlapping run of the
         // same session still sees it. The borrow clears the entry's idle timer, so
         // the reused runtime cannot expire under its own timer while this run uses
@@ -4483,8 +4545,12 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         if (cached && (cached.observabilityCompatibilityKey !== ctx.observability?.compatibilityKey || ctx.context.refreshTools === true
           || asString(previousParams.mcpFingerprint, "") !== shortHash(prepared.mcpIdentity)
           // MCP bearer credentials are run-scoped, even for an unchanged catalog.
-          || prepared.mcpServers.length > 0)) {
+          || prepared.mcpServers.length > 0
+          // A managed login gets a disposable home/current credentials per run.
+          // Resume its saved conversation with a fresh process and environment.
+          || (["claude", "codex"].includes(prepared.acpxAgent) && Boolean(parseObject(ctx.config.managedAiConnection).sessionIdentity)))) {
           providerProcessReason = cached.observabilityCompatibilityKey !== ctx.observability?.compatibilityKey
+            || (["claude", "codex"].includes(prepared.acpxAgent) && Boolean(parseObject(ctx.config.managedAiConnection).sessionIdentity))
             ? "configuration_changed" : "tools_changed";
           await hostStore.discard(prepared.sessionKey);
           cached = undefined;
@@ -4509,7 +4575,6 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
           : undefined;
         flushChildStderr(childStderrState);
         childStderrState.logPath = prepared.childStderrLogPath;
-        const persistedRuntimeStore = createRuntimeStore({ stateDir: prepared.stateDir });
         // Resume with this run's launch environment; keep it out of the saved
         // conversation record without mutating the live runtime's options.
         const runtimeStore = createEphemeralSessionEnvironmentStore(persistedRuntimeStore, prepared.env);

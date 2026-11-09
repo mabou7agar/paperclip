@@ -1,0 +1,63 @@
+{
+  "sourceRevision": "94ae3135bf232dec5a477bcff98d391e1500c3f9",
+  "baseEntryCount": 332,
+  "baseLastTag": "0333_normal_wild_pack",
+  "renames": [
+    {
+      "oldTag": "0334_complex_boom_boom",
+      "newTag": "0452_company_phase_routing",
+      "oldWhen": 1794051974707,
+      "newWhen": 1794185816323,
+      "sqlSha256": "510a05f2c48090428c4476cd565d74d72d42fd0aa7f112a440ce2271e04534b7"
+    },
+    {
+      "oldTag": "0335_usage_health",
+      "newTag": "0453_usage_health",
+      "oldWhen": 1794079791843,
+      "newWhen": 1794185816324,
+      "sqlSha256": "51a7c0a78db7cd54903206e81f3c8f48222badc2bdca4410cb184fde6ae6a092"
+    },
+    {
+      "oldTag": "0336_event_driven_monitoring",
+      "newTag": "0454_event_driven_monitoring",
+      "oldWhen": 1794094211250,
+      "newWhen": 1794185816325,
+      "sqlSha256": "b4542fe969436ae3888a3787c34d22b37f8485939fe55323a84cbb5cfe4c9625"
+    },
+    {
+      "oldTag": "0337_run_context_lookup_indexes",
+      "newTag": "0455_run_context_lookup_indexes",
+      "oldWhen": 1794101019442,
+      "newWhen": 1794185816326,
+      "sqlSha256": "55cc2220a9901f60f80fead0f7e1af15e2a56f008293105910cc9b00281384a1"
+    },
+    {
+      "oldTag": "0338_provider_quota_probes",
+      "newTag": "0456_provider_quota_probes",
+      "oldWhen": 1794132208156,
+      "newWhen": 1794185816327,
+      "sqlSha256": "2207a20bf7992bfae1c1a2b5eca8941ab556d0d75b3b38efd25f5cb6dd75305c"
+    },
+    {
+      "oldTag": "0339_quota_receipt_lookup",
+      "newTag": "0457_quota_receipt_lookup",
+      "oldWhen": 1794138662481,
+      "newWhen": 1794185816328,
+      "sqlSha256": "43f0eb12346de92a666437cb5069f61b05a7395a71aa5f5a414ea3b0539cff17"
+    },
+    {
+      "oldTag": "0340_cost_connection_attribution",
+      "newTag": "0458_cost_connection_attribution",
+      "oldWhen": 1794141614047,
+      "newWhen": 1794185816329,
+      "sqlSha256": "9a536ed49a82f9126e2f29f0e21770fb9ddd4afa96036220e51d0356e5f072d5"
+    },
+    {
+      "oldTag": "0341_run_secret_registry_index",
+      "newTag": "0459_run_secret_registry_index",
+      "oldWhen": 1794149636351,
+      "newWhen": 1794185816330,
+      "sqlSha256": "47d428fbd47def0695b048f9ba40839b9454a0264dc4be483e0b6ab2c18c8be1"
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+---
+title: Bounded task continuations
+---
+
+Company alert-only monitoring continues to suppress general observation, repair,
+watchdog and repeated blocker wakes. An explicitly owned background job may use
+`set_task_monitor` with `kind: "task_continuation"` to read its result once without
+changing the company's monitoring policy.
+
+Include a stable job/candidate/stage identity in `externalRef`, a `serviceName`, a
+`timeoutAt`, and a finite cumulative `maxAttempts`. Use the existing task, plan,
+session, candidate and evidence. The native scheduler claims the check once and
+uses its durable task-and-schedule wake key; repeated scheduler ticks do not
+repeat it. Active executions, assignment, approval, quota, budget and independent
+review guards continue to apply. The continuation is permission to read and
+report the job's terminal result, not permission to repeat a proof or failed job.
+
+Await the owned executor's terminal event when available. Otherwise schedule one
+bounded result check after the expected finish. If work is still running, retain
+the same job and report its state; never create a new execution or reset attempt
+counters to obtain another check. Missing job identity, deadline or attempt bound
+fails validation and cannot bypass alert-only monitoring. Existing
+`external_service` monitors retain their prior behavior.

@@ -95,6 +95,31 @@ describe("useLiveRunTranscripts", () => {
     vi.useRealTimers();
   });
 
+  it("bounds concurrent history reads and retains settled output across live metadata updates", async () => {
+    const releases: Array<() => void> = [];
+    let active = 0, peak = 0;
+    logMock.mockImplementation(() => new Promise(resolve => {
+      active++; peak = Math.max(peak, active);
+      releases.push(() => { active--; resolve({ runId: "fixture", store: "memory", logRef: "fixture", content: "", nextOffset: 0 }); });
+    }));
+    const runs = Array.from({ length: 12 }, (_, index) => ({ id: `history-${index}`, status: "succeeded", adapterType: "codex_local", logBytes: 100 }));
+    function Harness({ outputBytes }: { outputBytes: number }) {
+      useLiveRunTranscripts({ companyId: "company", runs: [...runs, { id: "live", status: "running", adapterType: "codex_local", lastOutputBytes: outputBytes }], enableRealtimeUpdates: false });
+      return null;
+    }
+    const root = createRoot(document.createElement("div"));
+    try {
+      await act(async () => root.render(<Harness outputBytes={1} />));
+      expect(logMock).toHaveBeenCalledTimes(4);
+      expect(logMock.mock.calls[0][0]).toBe("live");
+      for (let pass = 0; pass < 4; pass++) await act(async () => { releases.splice(0).forEach(release => release()); });
+      expect(logMock).toHaveBeenCalledTimes(13);
+      expect(peak).toBeLessThanOrEqual(4);
+      await act(async () => root.render(<Harness outputBytes={2} />));
+      expect(logMock.mock.calls.filter(([id]) => id?.startsWith("history-"))).toHaveLength(12);
+    } finally { await act(async () => { root.unmount(); releases.splice(0).forEach(release => release()); }); }
+  });
+
   it("pauses hidden-tab reads and resumes at the retained log offset", async () => {
     vi.useFakeTimers();
     const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");

@@ -447,6 +447,7 @@ export interface SessionFingerprintIdentity {
   readonly permissionMode: AcpxPermissionMode;
   readonly nonInteractivePermissions: AcpxNonInteractivePermissions;
   readonly requestedModel: string;
+  readonly requestedAgentMode?: string;
   readonly requestedThinkingEffort: string;
   readonly fastMode: boolean;
   readonly remoteExecutionIdentity: Record<string, unknown> | null;

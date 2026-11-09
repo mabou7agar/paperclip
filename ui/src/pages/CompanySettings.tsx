@@ -31,6 +31,8 @@ import {
   ToggleField,
 } from "../components/agent-config-primitives";
 import { InstanceGeneralSettings } from "./InstanceGeneralSettings";
+import { useFastResponsesEnabled } from "../hooks/useFastResponsesEnabled";
+import { CompanyPhaseRoutingSettings } from "../components/ai-connections/CompanyPhaseRoutingSettings";
 
 export function CompanySettings() {
   const {
@@ -336,6 +338,8 @@ export function CompanySettings() {
       )}
 
       {/* Hiring */}
+      {selectedCompanyId && <CompanyPhaseRoutingSettings key={`phase-routing:${selectedCompanyId}`} companyId={selectedCompanyId} />}
+
       <div className="max-w-2xl space-y-4" data-testid="company-settings-team-section">
         <div className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
           Hiring

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import {
   activityLog,
@@ -76,6 +76,40 @@ describeEmbeddedPostgres("activity service", () => {
 
   afterAll(async () => {
     await tempDb?.cleanup();
+  });
+
+  it("retains older and activity-linked runs, retry state and saved context in long histories", async () => {
+    const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID();
+    await db.insert(companies).values({ id: companyId, name: "History fixture", issuePrefix: `H${companyId.slice(0, 6)}` });
+    await db.insert(agents).values({ id: agentId, companyId, name: "Worker", role: "engineer", adapterType: "codex_local", status: "idle" });
+    await db.insert(issues).values({ id: issueId, companyId, title: "Long history", status: "blocked", assigneeAgentId: agentId });
+    const retryAt = new Date("2030-01-01T12:00:00Z");
+    const rows = Array.from({ length: 72 }, (_, index) => ({
+      id: randomUUID(), companyId, agentId, issueId: index === 0 ? null : issueId,
+      scopeKind: "issue" as const, status: index === 71 ? "scheduled_retry" : "succeeded",
+      createdAt: new Date(Date.UTC(2026, 0, 1, 0, index)), livenessState: "advanced",
+      scheduledRetryAt: index === 71 ? retryAt : null,
+      scheduledRetryReason: index === 71 ? "provider_quota" : null,
+      scheduledRetryAttempt: index === 71 ? 2 : 0,
+      contextSnapshot: { issueId, wakeCommentIds: ["saved-message"], wakeCommentId: "saved-message",
+        commentId: "source-message", failureRetriesBeforeAiConnectionWait: 1,
+        privatePlanningContext: "saved plan and native session".repeat(10_000) },
+    }));
+    await db.insert(heartbeatRuns).values(rows);
+    await db.insert(activityLog).values({ companyId, actorType: "agent", actorId: agentId,
+      action: "issue.updated", entityType: "issue", entityId: issueId, runId: rows[0]!.id });
+    const hashes = () => db.select({ id: heartbeatRuns.id,
+      hash: sql`md5(${heartbeatRuns.contextSnapshot}::text)` }).from(heartbeatRuns).orderBy(heartbeatRuns.id);
+    const before = await hashes();
+    const history = await activityService(db).runsForIssue(companyId, issueId);
+    expect(history.map((row) => row.runId)).toEqual(rows.toReversed().map((row) => row.id));
+    expect(history[0]).toMatchObject({ scheduledRetryAt: retryAt, scheduledRetryAttempt: 2,
+      execution: { phase: "retry_scheduled", retryAt: retryAt.toISOString(), attempt: 3 },
+      wakeCommentIds: ["saved-message"], wakeCommentId: "saved-message", contextCommentId: "source-message", contextIssueId: issueId });
+    expect(history.every((row) => !Object.hasOwn(row, "commentContext") && !Object.hasOwn(row, "contextSnapshot"))).toBe(true);
+    expect(JSON.stringify(history)).not.toContain("privatePlanningContext");
+    expect(await hashes()).toEqual(before);
+    expect(await activityService(db).runsForIssue(randomUUID(), issueId)).toEqual([]);
   });
 
   it.each(["standard", "planning", "ask"] as const)("LCA-05 persists explicit %s mode across wording edits and uses it in ledger backfill", async (workMode) => {

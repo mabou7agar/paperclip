@@ -34,6 +34,18 @@ export function aiConnectionOnlyConfigRevision(revision: ConfigRevision): boolea
     && isDeepStrictEqual(withoutBinding(revision.beforeConfig), withoutBinding(revision.afterConfig));
 }
 
+/** Routing controls future selection; the effective profile/account still fingerprints
+ * the executing phase. Only an otherwise identical revision is compatible. */
+export function phaseRoutingOnlyConfigRevision(revision: ConfigRevision): boolean {
+  const withoutRouting = (snapshot: Record<string, unknown>) => {
+    const runtimeConfig = { ...record(snapshot.runtimeConfig) };
+    delete runtimeConfig.phaseRouting;
+    return { ...snapshot, runtimeConfig };
+  };
+  return !isDeepStrictEqual(record(revision.beforeConfig.runtimeConfig).phaseRouting, record(revision.afterConfig.runtimeConfig).phaseRouting)
+    && isDeepStrictEqual(withoutRouting(revision.beforeConfig), withoutRouting(revision.afterConfig));
+}
+
 export function aiConnectionRevisionMetadata(revision: ConfigRevision | undefined) {
   return revision ? { id: revision.id, changedKeys: revision.changedKeys, configRevisionAt: revision.createdAt.toISOString() } : null;
 }
@@ -48,6 +60,8 @@ export function aiConnectionSessionCompatibilityInputs(input: {
   originalIssueOverrides: unknown;
   binding: AiConnectionBinding;
   router: boolean;
+  phaseRouted?: boolean;
+  persistedAgentRuntimeConfig?: unknown;
   storedIdentity: unknown;
   sessionIdentity: string;
   credentialIdentity: string;
@@ -71,16 +85,24 @@ export function aiConnectionSessionCompatibilityInputs(input: {
     for (const binding of bindings) {
       variants.push({ agentRuntimeConfig: { ...record(input.agentRuntimeConfig), aiConnection: binding }, agentConfigRevision: input.agentConfigRevision });
     }
-    let expectedRuntimeConfig = record(input.agentRuntimeConfig);
+  }
+  if (input.router || input.phaseRouted) {
+    let expectedRuntimeConfig = record(input.persistedAgentRuntimeConfig ?? input.agentRuntimeConfig);
     for (let index = 0; index < Math.min(20, input.revisions.length); index++) {
       const revision = input.revisions[index]!;
       if (index === 0 && revision.id !== record(input.agentConfigRevision).id) break;
       if (!isDeepStrictEqual(record(revision.afterConfig.runtimeConfig), expectedRuntimeConfig)) break;
-      if (!aiConnectionOnlyConfigRevision(revision)) break;
+      if (!(input.router && aiConnectionOnlyConfigRevision(revision)) && !(input.phaseRouted && phaseRoutingOnlyConfigRevision(revision))) break;
       // An incomplete bounded history is not sufficient to waive a revision.
       const previous = input.revisions[index + 1];
       if (!previous && input.revisions.length >= 21) break;
-      variants.push({ agentRuntimeConfig: record(revision.beforeConfig.runtimeConfig), agentConfigRevision: aiConnectionRevisionMetadata(previous) });
+      const previousRuntimeConfig = record(revision.beforeConfig.runtimeConfig);
+      variants.push({
+        agentRuntimeConfig: input.phaseRouted
+          ? { ...previousRuntimeConfig, aiConnection: record(input.agentRuntimeConfig).aiConnection }
+          : previousRuntimeConfig,
+        agentConfigRevision: aiConnectionRevisionMetadata(previous),
+      });
       expectedRuntimeConfig = record(revision.beforeConfig.runtimeConfig);
     }
   }

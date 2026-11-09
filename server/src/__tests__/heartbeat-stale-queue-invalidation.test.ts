@@ -90,7 +90,9 @@ async function ensureIssueRelationsTable(db: ReturnType<typeof createDb>) {
   `));
 }
 
-async function waitForCondition(fn: () => Promise<boolean>, timeoutMs = 3_000) {
+// Runtime preparation includes accounting and workspace transactions; assert
+// the observable handoff rather than a three-second machine-speed assumption.
+async function waitForCondition(fn: () => Promise<boolean>, timeoutMs = 15_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (await fn()) return true;
@@ -271,7 +273,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       expect(countExecuteCallsForRun(delivered.runId!), JSON.stringify({
         status: current?.status, errorCode: current?.errorCode,
       })).toBe(1);
-    }, { timeout: 5_000 });
+    }, { timeout: 30_000 });
     await heartbeat.waitForRunExecutionDrain(delivered.runId!);
     expect(countExecuteCallsForRun(delivered.runId!)).toBe(1);
     expect((await heartbeat.getRun(delivered.runId!))?.contextSnapshot).toMatchObject({ wakeCommentIds: [comment.id] });
@@ -279,7 +281,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(countExecuteCallsForRun(delivered.runId!)).toBe(1);
     expect((await db.select().from(issueComments).where(eq(issueComments.id, comment.id)))[0]?.body).toBe(comment.body);
     expect((await db.select().from(issues).where(eq(issues.id, issue.id)))[0]?.assigneeAgentId).toBe(agentId);
-  });
+  }, 60_000);
 
   it.each(["preparing", "verifying", "resuming"] as const)("keeps assigned work queued through %s, including recovery with timers disabled", async lifecycleState => {
     const { companyId, agentId } = await seedCompanyAndAgent({ heartbeatConfig: { enabled: false } });
@@ -697,6 +699,68 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     });
     const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
     expect(issue).toMatchObject({ status, assigneeAgentId: reassigned ? null : agentId });
+  });
+
+  it("delivers an addressed CTO question once without taking worker ownership or losing context", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent({ agentName: "CTO", heartbeatConfig: { enabled: false } });
+    const workerId = randomUUID();
+    await db.insert(agents).values({ id: workerId, companyId, name: "Worker", role: "engineer", status: "idle", adapterType: "codex_local" });
+    const [issue] = await db.insert(issues).values({ companyId, title: "Worker needs a bounded planning answer", status: "in_review", assigneeAgentId: workerId }).returning();
+    const [interaction] = await db.insert(issueThreadInteractions).values({ companyId, issueId: issue.id,
+      kind: "ask_user_questions", createdByAgentId: workerId, addresseeAgentId: agentId,
+      effectiveResolverPolicy: "anyone", payload: { version: 1, questions: [] } }).returning();
+    const context = { source: "issue.interaction.created", interactionId: interaction.id,
+      interactionKind: interaction.kind, planningContext: "Keep the original bounded implementation and review constraints" };
+    const { runId } = await seedQueuedRun({ companyId, agentId, issueId: issue.id,
+      wakeReason: "interaction_pending", invocationSource: "automation", contextExtras: context });
+
+    await heartbeat.resumeQueuedRuns();
+    expect(await waitForCondition(async () => countExecuteCallsForRun(runId) === 1)).toBe(true);
+    await heartbeat.waitForRunExecutionDrain(runId);
+    await heartbeat.resumeQueuedRuns();
+    const run = await heartbeat.getRun(runId);
+    expect(run).toMatchObject({ status: "succeeded", contextSnapshot: { ...context, issueId: issue.id, wakeReason: "interaction_pending" } });
+    expect(countExecuteCallsForRun(runId)).toBe(1);
+    expect((await db.select().from(issues).where(eq(issues.id, issue.id)))[0]).toMatchObject({ status: "in_review", assigneeAgentId: workerId });
+    expect((await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, interaction.id)))[0].status).toBe("pending");
+  });
+
+  it.each(["queued", "scheduled_retry"] as const)("retains a valid %s addressed question when a worker wake arrives", async status => {
+    const { companyId, agentId } = await seedCompanyAndAgent({ heartbeatConfig: { enabled: false } });
+    const workerId = randomUUID();
+    await db.insert(agents).values({ id: workerId, companyId, name: "Worker", role: "engineer", status: "idle", adapterType: "codex_local" });
+    const [issue] = await db.insert(issues).values({ companyId, title: "Pending planning answer", status: "in_review", assigneeAgentId: workerId }).returning();
+    const [interaction] = await db.insert(issueThreadInteractions).values({ companyId, issueId: issue.id,
+      kind: "ask_user_questions", addresseeAgentId: agentId, createdByAgentId: workerId,
+      effectiveResolverPolicy: "anyone", payload: { version: 1, questions: [] } }).returning();
+    const { runId } = await seedQueuedRun({ companyId, agentId, issueId: issue.id, wakeReason: "interaction_pending",
+      contextExtras: { source: "issue.interaction.created", interactionId: interaction.id, interactionKind: interaction.kind } });
+    await db.update(heartbeatRuns).set({ status, scheduledRetryReason: status === "scheduled_retry" ? "ai_connection_busy" : null,
+      scheduledRetryAt: status === "scheduled_retry" ? new Date(Date.now() + 3_600_000) : null }).where(eq(heartbeatRuns.id, runId));
+    await db.update(issues).set({ executionRunId: runId }).where(eq(issues.id, issue.id));
+    heartbeat.startTaskDrain();
+    try {
+      await heartbeat.wakeup(workerId, { source: "automation", triggerDetail: "system", reason: "issue_assigned",
+        payload: { issueId: issue.id }, contextSnapshot: { issueId: issue.id, wakeReason: "issue_assigned" } });
+      expect(await heartbeat.getRun(runId)).toMatchObject({ status, errorCode: null });
+      expect(countExecuteCallsForRun(runId)).toBe(0);
+    } finally { heartbeat.stopTaskDrain(); }
+  });
+
+  it("cancels an addressed card resolved after claim at the final provider handoff", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const [issue] = await db.insert(issues).values({ companyId, title: "Question answered during startup", status: "in_review", assigneeAgentId: agentId }).returning();
+    const [interaction] = await db.insert(issueThreadInteractions).values({ companyId, issueId: issue.id,
+      kind: "ask_user_questions", addresseeAgentId: agentId, payload: { version: 1, questions: [] } }).returning();
+    const { runId } = await seedQueuedRun({ companyId, agentId, issueId: issue.id, wakeReason: "interaction_pending",
+      contextExtras: { source: "issue.interaction.created", interactionId: interaction.id, interactionKind: interaction.kind } });
+    beforeContinuationDispatchCheck = async () => { await db.update(issueThreadInteractions).set({ status: "answered", resolvedAt: new Date() }).where(eq(issueThreadInteractions.id, interaction.id)); };
+    await heartbeat.resumeQueuedRuns();
+    expect(await waitForCondition(async () => (await heartbeat.getRun(runId))?.status === "cancelled")).toBe(true);
+    await heartbeat.waitForRunExecutionDrain(runId);
+    const run = await heartbeat.getRun(runId);
+    expect({ status: run?.status, errorCode: run?.errorCode }).toEqual({ status: "cancelled", errorCode: "issue_interaction_changed" });
+    expect(countExecuteCallsForRun(runId)).toBe(0);
   });
 
   it("cancels a resolved connection-intent wake parked before queued-run claim", async () => {
@@ -1865,5 +1929,124 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect((await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns).where(eq(heartbeatRuns.id, runId)))[0]?.status).toBe("succeeded");
     expect(countExecuteCallsForRun(runId)).toBe(1);
     expect(claimedIssue).toEqual({ status: "in_progress", executionRunId: runId });
+  });
+
+  async function seedAnsweredQuestion(input: {
+    companyId: string;
+    issueId: string;
+    agentId: string;
+    sourceRunId: string | null;
+    rejectedConfirmation?: boolean;
+  }) {
+    const interactionId = randomUUID();
+    const resolved = {
+      id: interactionId,
+      companyId: input.companyId,
+      issueId: input.issueId,
+      continuationPolicy: "wake_assignee",
+      createdByAgentId: input.agentId,
+      sourceRunId: input.sourceRunId,
+      resolvedByUserId: "responsible-user",
+      resolvedAt: new Date(),
+    };
+    await db.insert(issueThreadInteractions).values(input.rejectedConfirmation
+      ? {
+        ...resolved,
+        kind: "request_confirmation",
+        status: "rejected",
+        payload: { version: 1, prompt: "Approve the plan?" },
+        result: { version: 1, outcome: "rejected", reason: "Needs more work" },
+      }
+      : {
+        ...resolved,
+        kind: "ask_user_questions",
+        status: "answered",
+        payload: { version: 1, questions: [{ id: "first-task-opening", prompt: "What would you like to do?", selectionMode: "single",
+          required: true, options: [{ id: "interview", label: "Interview me" }] }] },
+        result: { version: 1, answers: [{ questionId: "first-task-opening", optionIds: ["interview"] }] },
+      });
+    // Mirrors the context question-response delivery queues for an answer.
+    return {
+      interactionId,
+      interactionKind: input.rejectedConfirmation ? "request_confirmation" : "ask_user_questions",
+      interactionStatus: input.rejectedConfirmation ? "rejected" : "answered",
+      mutation: "interaction",
+      sourceRunId: input.sourceRunId,
+      externalChatContinuation: false,
+      source: "issue.interaction.respond",
+    };
+  }
+
+  it("starts the assignee when a question no run asked is answered on a todo task that has never started", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const issueId = randomUUID();
+    let answeredRunId: string | undefined;
+    let claimedIssue: { status: string; executionRunId: string | null } | null = null;
+    afterContinuationDispatchCheck = async ({ runId: checkedRunId, issueId: checkedIssueId }) => {
+      if (checkedIssueId !== issueId || checkedRunId !== answeredRunId) return;
+      claimedIssue = await db
+        .select({ status: issues.status, executionRunId: issues.executionRunId })
+        .from(issues)
+        .where(eq(issues.id, issueId))
+        .then((rows) => rows[0] ?? null);
+    };
+    await db.insert(issues).values({ id: issueId, companyId, title: "Onboarding first task", status: "todo", priority: "medium", assigneeAgentId: agentId });
+    const contextExtras = await seedAnsweredQuestion({ companyId, issueId, agentId, sourceRunId: null });
+    const { runId } = await seedQueuedRun({ companyId, agentId, issueId, wakeReason: "issue_commented",
+      invocationSource: "automation", contextExtras });
+    answeredRunId = runId;
+
+    await heartbeat.resumeQueuedRuns();
+    await vi.waitFor(async () => {
+      const current = await heartbeat.getRun(runId);
+      expect(countExecuteCallsForRun(runId), JSON.stringify({
+        status: current?.status, errorCode: current?.errorCode,
+      })).toBe(1);
+    }, { timeout: 30_000 });
+    await heartbeat.waitForRunExecutionDrain(runId);
+
+    expect((await heartbeat.getRun(runId))?.status).toBe("succeeded");
+    expect(claimedIssue).toEqual({ status: "in_progress", executionRunId: runId });
+    expect((await db.select({ startedAt: issues.startedAt }).from(issues).where(eq(issues.id, issueId)))[0]?.startedAt)
+      .toBeInstanceOf(Date);
+  }, 60_000);
+
+  it.each([
+    { name: "a started task parked back in todo", startedAt: new Date("2026-01-01T00:00:00.000Z"), askedByRun: false, rejectedConfirmation: false },
+    { name: "a question an agent run asked", startedAt: null, askedByRun: true, rejectedConfirmation: false },
+    { name: "a rejected confirmation no run asked", startedAt: null, askedByRun: false, rejectedConfirmation: true },
+  ])("keeps cancelling an answer continuation for $name", async ({ startedAt, askedByRun, rejectedConfirmation }) => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const issueId = randomUUID();
+    await db.insert(issues).values({ id: issueId, companyId, title: "Parked or agent-asked", status: "todo", priority: "medium",
+      assigneeAgentId: agentId, startedAt });
+    const [sourceRun] = askedByRun
+      ? await db.insert(heartbeatRuns).values({ companyId, agentId, invocationSource: "assignment", status: "succeeded",
+        startedAt: new Date(), finishedAt: new Date(), contextSnapshot: { issueId } }).returning()
+      : [null];
+    const contextExtras = await seedAnsweredQuestion({ companyId, issueId, agentId, sourceRunId: sourceRun?.id ?? null,
+      rejectedConfirmation });
+    const { runId, wakeupRequestId } = await seedQueuedRun({ companyId, agentId, issueId, wakeReason: "issue_commented",
+      invocationSource: "automation", contextExtras });
+
+    await heartbeat.resumeQueuedRuns();
+    await heartbeat.drainActiveRunExecutions();
+
+    const [run, wakeup, issue] = await Promise.all([
+      db.select({ status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode })
+        .from(heartbeatRuns)
+        .where(eq(heartbeatRuns.id, runId))
+        .then((rows) => rows[0] ?? null),
+      db.select({ status: agentWakeupRequests.status, error: agentWakeupRequests.error })
+        .from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.id, wakeupRequestId))
+        .then((rows) => rows[0] ?? null),
+      db.select({ status: issues.status }).from(issues).where(eq(issues.id, issueId))
+        .then((rows) => rows[0] ?? null),
+    ]);
+    expect(run).toMatchObject({ status: "cancelled", errorCode: "issue_not_in_progress" });
+    expect(wakeup).toMatchObject({ status: "skipped", error: expect.stringContaining("no longer in_progress") });
+    expect(issue?.status).toBe("todo");
+    expect(countExecuteCallsForRun(runId)).toBe(0);
   });
 });

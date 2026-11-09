@@ -1,3 +1,4 @@
+import { monitoringService } from "./monitoring.js";
 import type { DeadlineReconciliationSnapshot } from "./deadline-reconciliation.js";
 import { idleDeadlineRowLimit, type IdleDeadlineSnapshot } from "./idle-deadline-types.js";
 import { notifyStatusCardIssueChange } from "./status-card-notifications.js";
@@ -1531,6 +1532,11 @@ export function taskWatchdogService(db: Db, deps: TaskWatchdogServiceDeps = {}) 
     }
     if (classification.state !== "stopped") {
       return { state: classification.state, reason: classification.reason, classification };
+    }
+
+    if (await monitoringService(db).observe({ companyId: sourceIssue.companyId, issueId: sourceIssue.id,
+      kind: "stopped_subtree", fingerprint: classification.stopFingerprint })) {
+      return { state: "skipped" as const, reason: "alert_only_monitoring", classification };
     }
 
     const existingWatchdogIssueId = watchdog.watchdogIssueId ?? (await findTaskWatchdogIssue(

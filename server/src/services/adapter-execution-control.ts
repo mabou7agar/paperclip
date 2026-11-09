@@ -96,6 +96,7 @@ export async function waitForAdapterStop(
   timeoutMs = 60_000,
   diagnostics?: AdapterStopContext,
   owner?: ReturnType<typeof createAdapterExecutionControl>,
+  acknowledgedCleanup?: () => Promise<boolean>,
 ) {
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
@@ -108,6 +109,13 @@ export async function waitForAdapterStop(
         );
       }),
     ]);
+  } catch (error) {
+    // Provider Stop and executor cleanup are separate boundaries. Allow one
+    // additional cleanup window only when the exact handoff has durable Stop
+    // proof. Never resend cancellation or repeat this grace period.
+    if (!(error instanceof AdapterStopTimeoutError) || !acknowledgedCleanup ||
+        !(await acknowledgedCleanup())) throw error;
+    await waitForAdapterStop(settled, timeoutMs, diagnostics, owner);
   } finally {
     clearTimeout(timer);
   }

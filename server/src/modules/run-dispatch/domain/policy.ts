@@ -63,6 +63,7 @@ export type ScheduledRetryGateErrorCode =
   | "issue_paused"
   | "issue_dependencies_blocked"
   | "issue_disposition_repair_superseded"
+  | "issue_interaction_changed"
   | "issue_waiting_for_response";
 
 export type GateDecision =
@@ -76,6 +77,8 @@ export type GateDecision =
     };
 
 export type ScheduledRetryFacts = {
+  addressedInteractionWake?: "pending" | "stale" | null;
+  completionReceiptWake?: "pending" | "stale" | null;
   runId: string;
   runAgentId: string;
   issueId: string | null;
@@ -108,6 +111,7 @@ export type ScheduledRetryFacts = {
 };
 
 export type QueuedRunStalenessErrorCode =
+  | "issue_interaction_changed"
   | "issue_waiting_for_response"
   | "execution_reconciliation_required"
   | "issue_dependencies_blocked"
@@ -130,6 +134,8 @@ export type StalenessDecision =
     };
 
 export type QueuedRunFacts = {
+  addressedInteractionWake?: "pending" | "stale" | null;
+  completionReceiptWake?: "pending" | "stale" | null;
   pendingResponse?: "interaction" | "approval" | null;
   /** Rechecked for automatic native replacements immediately before dispatch. */
   dependenciesBlocked?: DependencyBlockFacts | null;
@@ -145,6 +151,8 @@ export type QueuedRunFacts = {
   issueCheckoutRunId?: string | null;
 
   isResolvedInteractionContinuation: boolean;
+  /** Verified under the issue lock: an answer to a question no run asked, on a todo task that has never started. */
+  isUnstartedTaskQuestionAnswer?: boolean;
   /** A connection resolution or tool refresh can resume an agent waiting in review. */
   isConnectionContinuation?: boolean;
   isInteractionWake: boolean;
@@ -172,6 +180,8 @@ type OwnershipFacts = {
   issueAssigneeAgentId: string | null;
   isNonAssigneeWorkspaceBusyRetry: boolean;
   isInteractionWake?: boolean;
+  addressedInteractionWake?: "pending" | "stale" | null;
+  completionReceiptWake?: "pending" | "stale" | null;
   isCurrentReviewParticipant?: boolean;
   isAuthorizedSourceScopedRecovery?: boolean;
 };
@@ -179,14 +189,14 @@ type OwnershipFacts = {
 type OwnershipOutcome = "current_owner" | "reassigned";
 
 /**
- * Decides whether the run's agent still owns the issue. A caller passes
- * only the bypass signals it has; an omitted bypass is treated as absent,
+ * Decides whether the run still has dispatch authority on the issue. A caller passes
+ * only the verified exception signals it has; an omitted exception is treated as absent,
  * not as granted.
  */
 function decideIssueOwnership(facts: OwnershipFacts): OwnershipOutcome {
   if (facts.issueAssigneeAgentId === facts.runAgentId) return "current_owner";
   if (facts.isNonAssigneeWorkspaceBusyRetry) return "current_owner";
-  if (facts.isInteractionWake) return "current_owner";
+  if (facts.isInteractionWake || facts.addressedInteractionWake === "pending" || facts.completionReceiptWake === "pending") return "current_owner";
   if (facts.isCurrentReviewParticipant) return "current_owner";
   if (facts.isAuthorizedSourceScopedRecovery) return "current_owner";
   return "reassigned";
@@ -234,7 +244,7 @@ function decideExecutionLock(facts: ExecutionLockFacts): ExecutionLockOutcome {
 
 type ReviewParticipantCheckFacts = ReviewParticipantFacts & {
   runAgentId: string;
-  /** True when a comment wake excuses a participant mismatch (staleness only). */
+  /** True when verified attention permits answering without acting as the reviewer. */
   bypass?: boolean;
 };
 
@@ -339,10 +349,18 @@ export function decideScheduledRetryGate(
     }
   }
 
+  if (facts.addressedInteractionWake === "stale") {
+    return { allowed: false, issueId: facts.issueId, errorCode: "issue_interaction_changed",
+      reason: "Scheduled attention request no longer has a pending authorized addressee",
+      details: { issueId: facts.issueId } };
+  }
+
   const ownership = decideIssueOwnership({
     runAgentId: facts.runAgentId,
     issueAssigneeAgentId: facts.issueAssigneeAgentId,
     isNonAssigneeWorkspaceBusyRetry: facts.isNonAssigneeWorkspaceBusyRetry,
+    addressedInteractionWake: facts.addressedInteractionWake,
+    completionReceiptWake: facts.completionReceiptWake,
     isCurrentReviewParticipant:
       facts.reviewParticipant.isInReview &&
       facts.reviewParticipant.hasParticipant &&
@@ -410,7 +428,7 @@ export function decideScheduledRetryGate(
   const lockOutcome = decideExecutionLock({
     requiresExecutionLock:
       (requiresInProgress ||
-        (facts.retryReasonKind === "ai_connection_wait" && !facts.isNonAssigneeWorkspaceBusyRetry)) &&
+        (facts.retryReasonKind === "ai_connection_wait" && !facts.isNonAssigneeWorkspaceBusyRetry && facts.addressedInteractionWake !== "pending")) &&
       facts.enforceIssueExecutionLock,
     runId: facts.runId,
     issueExecutionRunId: facts.issueExecutionRunId,
@@ -433,6 +451,7 @@ export function decideScheduledRetryGate(
   const participantOutcome = decideReviewParticipant({
     ...facts.reviewParticipant,
     runAgentId: facts.runAgentId,
+    bypass: facts.addressedInteractionWake === "pending",
   });
   if (participantOutcome === "participant_changed") {
     return {
@@ -510,9 +529,11 @@ export function decideQueuedRunStaleness(
   }
 
   if (facts.isResolvedInteractionContinuation || facts.isConnectionContinuation) {
+    // A todo task that has never started has no parked execution to protect.
+    const startsUnstartedTask = facts.issueStatus === "todo" && facts.isUnstartedTaskQuestionAnswer === true;
     const earlyStatus = decideIssueStatus({
       status: facts.issueStatus,
-      requiresInProgress: facts.issueStatus !== "in_review",
+      requiresInProgress: facts.issueStatus !== "in_review" && !startsUnstartedTask,
       terminalBypass: true,
     });
     if (earlyStatus === "not_in_progress") {
@@ -569,10 +590,20 @@ export function decideQueuedRunStaleness(
     };
   }
 
+  if (facts.completionReceiptWake === "stale") return { stale: true, errorCode: "issue_assignee_changed", reason: "Completion receipt is no longer current or was already acknowledged", details: { issueId: facts.issueId } };
+
+  if (facts.addressedInteractionWake === "stale") {
+    return { stale: true, errorCode: "issue_interaction_changed",
+      reason: "Cancelled because the addressed interaction was resolved, changed, or is no longer authorized",
+      details: { issueId: facts.issueId } };
+  }
+
   const ownership = decideIssueOwnership({
     runAgentId: facts.runAgentId,
     issueAssigneeAgentId: facts.issueAssigneeAgentId,
     isNonAssigneeWorkspaceBusyRetry: facts.isNonAssigneeWorkspaceBusyRetry,
+    addressedInteractionWake: facts.addressedInteractionWake,
+    completionReceiptWake: facts.completionReceiptWake,
     isInteractionWake: facts.isInteractionWake,
     isCurrentReviewParticipant:
       facts.reviewParticipant.isInReview &&
@@ -619,7 +650,7 @@ export function decideQueuedRunStaleness(
   const statusOutcome = decideIssueStatus({
     status: facts.issueStatus,
     requiresInProgress,
-    terminalBypass: facts.resumeIntent || facts.wakeCommentIdPresent || (
+    terminalBypass: facts.resumeIntent || facts.wakeCommentIdPresent || (facts.completionReceiptWake === "pending" && facts.issueStatus === "done") || (
       facts.isCompletedOnboardingHandoffWake === true &&
       facts.wakeReason === "issue_children_completed" && facts.issueStatus === "done"
     ),
@@ -648,7 +679,7 @@ export function decideQueuedRunStaleness(
   const lockOutcome = decideExecutionLock({
     // A server-recorded non-assignee wake never held the task execution lock.
     requiresExecutionLock: requiresInProgress ||
-      (facts.retryReasonKind === "ai_connection_wait" && !facts.isNonAssigneeWorkspaceBusyRetry),
+      (facts.retryReasonKind === "ai_connection_wait" && !facts.isNonAssigneeWorkspaceBusyRetry && facts.addressedInteractionWake !== "pending"),
     runId: facts.runId,
     issueExecutionRunId: facts.issueExecutionRunId,
   });
@@ -669,7 +700,7 @@ export function decideQueuedRunStaleness(
   const participantOutcome = decideReviewParticipant({
     ...facts.reviewParticipant,
     runAgentId: facts.runAgentId,
-    bypass: facts.wakeCommentIdPresent,
+    bypass: facts.wakeCommentIdPresent || facts.addressedInteractionWake === "pending",
   });
   if (participantOutcome === "participant_changed") {
     return {

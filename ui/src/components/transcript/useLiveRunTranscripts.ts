@@ -19,6 +19,10 @@ import {
 
 const LOG_POLL_INTERVAL_MS = 2000;
 const LOG_READ_LIMIT_BYTES = 256_000;
+const MAX_CONCURRENT_LOG_READS = 4;
+// When realtime websocket updates are enabled, the frequent log poll is
+// redundant with the live stream; keep only a slow safety-net poll to cover
+// gaps and reconnects instead of polling every couple of seconds.
 const REALTIME_FALLBACK_POLL_INTERVAL_MS = 30_000;
 const EMPTY_RUN_LOG_CHUNKS: RunLogChunk[] = [];
 // Retained transcript payload budget for full task views. A byte budget (rather
@@ -128,6 +132,7 @@ export function useLiveRunTranscripts({
   const [retryGeneration, setRetryGeneration] = useState(0);
   const retry = useCallback(() => {
     missingTerminalLogRunIdsRef.current.clear();
+    completedTerminalLogsRef.current.clear();
     setRetryGeneration((value) => value + 1);
   }, []);
   const seenChunkKeysRef = useRef(new Set<string>());
@@ -179,6 +184,7 @@ export function useLiveRunTranscripts({
 
   const [truncatedRunIds, setTruncatedRunIds] = useState<ReadonlySet<string>>(new Set());
   const missingTerminalLogRunIdsRef = useRef(new Set<string>());
+  const completedTerminalLogsRef = useRef(new Map<string, string>());
   // PAP-462 B3: buffered runs that dropped out of the `runs` list, mapped to the
   // wall-clock deadline (ms) after which their buffer may be pruned. A run still
   // inside its grace window is retained across the empty poll; `pruneTick` fires
@@ -329,6 +335,9 @@ export function useLiveRunTranscripts({
         missingTerminalLogRunIdsRef.current.delete(runId);
       }
     }
+    for (const runId of completedTerminalLogsRef.current.keys()) {
+      if (!retainedRunIds.has(runId)) completedTerminalLogsRef.current.delete(runId);
+    }
     for (const runId of transcriptCacheRef.current.keys()) {
       if (!retainedRunIds.has(runId)) {
         transcriptCacheRef.current.delete(runId);
@@ -425,6 +434,8 @@ export function useLiveRunTranscripts({
       if (cancelled || missingTerminalLogRunIdsRef.current.has(run.id) || inFlightRunIds.has(run.id)) {
         return;
       }
+      if (isTerminalStatus(run.status) && runKnownLogBytes(run) !== null && !pendingRefresh.has(run.id) && !gapPendingRef.current.has(run.id)
+          && completedTerminalLogsRef.current.get(run.id) === JSON.stringify([runKnownLogBytes(run), logReadLimitBytes, run.logRef ?? null])) return;
       pendingRefresh.delete(run.id);
       window.clearTimeout(retryTimers.get(run.id));
       retryTimers.delete(run.id);
@@ -486,7 +497,12 @@ export function useLiveRunTranscripts({
           offset = next;
         }
         failed = sequence(run.id).needsCatchup;
-        if (!failed) gapPendingRef.current.delete(run.id);
+        if (!failed) {
+          gapPendingRef.current.delete(run.id);
+          if (isTerminalStatus(run.status) && runKnownLogBytes(run) !== null) {
+            completedTerminalLogsRef.current.set(run.id, JSON.stringify([runKnownLogBytes(run), logReadLimitBytes, run.logRef ?? null]));
+          }
+        }
       } catch (error) {
         if (cancelled) return;
         failed = true;
@@ -532,8 +548,17 @@ export function useLiveRunTranscripts({
         if (force) { pendingRefresh.add(run.id); missingTerminalLogRunIdsRef.current.delete(run.id); }
         void readRunLog(run);
       });
-      void readRunLog(run);
     }
+    const readAll = async () => {
+      // Let current output load first; historical reads share a bounded queue.
+      const pending = [...readableRuns].sort((a, b) => Number(b.status === "running") - Number(a.status === "running"));
+      let next = 0;
+      await Promise.all(Array.from({ length: Math.min(MAX_CONCURRENT_LOG_READS, pending.length) }, async () => {
+        while (!cancelled && next < pending.length) await readRunLog(pending[next++]);
+      }));
+    };
+
+    void readAll();
     const activeRuns = readableRuns.filter((run) => run.status === "running");
     // The realtime websocket is the primary live source when enabled, so the
     // recurring poll only needs to run as a slow fallback rather than doubling

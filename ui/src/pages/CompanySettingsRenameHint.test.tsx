@@ -54,6 +54,10 @@ vi.mock("../components/decision-models/DecisionModelSettings", () => ({
   DecisionModelSettingsSection: () => <div data-testid="decision-model-settings" />,
 }));
 
+vi.mock("../components/ai-connections/CompanyPhaseRoutingSettings", () => ({
+  CompanyPhaseRoutingSettings: () => <div data-testid="phase-routing-settings" />,
+}));
+
 // Both panels below the name field own their own queries and are not part of
 // what this test covers.
 vi.mock("../components/InteractionGovernancePanel", () => ({
@@ -97,10 +101,9 @@ describe("CompanySettings rename hint", () => {
     vi.clearAllMocks();
   });
 
-  function render(health: unknown, enableFastResponses = true) {
-    const queryClient = new QueryClient({
+  function render(health: unknown, enableFastResponses = true, queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
-    });
+    })) {
     // CloudAccessGate owns the health fetch in the app; seeding the cache is how
     // useCloudInstance sees a managed instance under test.
     queryClient.setQueryData(queryKeys.health, health);
@@ -142,5 +145,21 @@ describe("CompanySettings rename hint", () => {
     const root = render(SELF_HOSTED_HEALTH);
     expect(hintText()).toBeUndefined();
     flushSync(() => root.unmount());
+  });
+
+  it("keeps routing unique across refreshes and decision models on the connections page", async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const root = render(SELF_HOSTED_HEALTH, false, client);
+    try {
+      for (let i = 0; i < 4; i++) {
+        flushSync(() => client.setQueryData(queryKeys.health, i % 2 ? SELF_HOSTED_HEALTH : CLOUD_HEALTH));
+        await new Promise(resolve => setTimeout(resolve, 0));
+        flushSync(() => {});
+        expect(container.querySelectorAll("[data-testid=phase-routing-settings]")).toHaveLength(1);
+        // Upstream moved decision-model settings to CompanyConnections. Do not
+        // restore a second panel while retaining the fork's routing controls.
+        expect(container.querySelectorAll("[data-testid=decision-model-settings]")).toHaveLength(0);
+      }
+    } finally { flushSync(() => root.unmount()); client.clear(); }
   });
 });

@@ -1,3 +1,4 @@
+import { isPhaseQuotaWaitBeforeDispatchVerified } from "./pre-dispatch-review-wait.js";
 import { notifyUnsafeWorkspaceExportRecovery } from "./unsafe-workspace-export-notifications.js";
 import { assertDurableChatWakeupRequest, assertDurableChatWakeupReceipt, type DurableChatWakeupRequest } from "./durable-chat-wakeup.js";
 import { notifyExecutionRunWork } from "./execution-control-notifications.js";
@@ -16,7 +17,7 @@ import { appendHeartbeatRunEvent } from "./heartbeat-run-events.js";
 import { canContinueCancelledRun, userStopBoundaryAt } from "./run-cancellation.js";
 import { readQueuedInteractionResponse } from "./queued-interaction-response.js";
 import { isCancelledNativeStartup, isFailedNativePreparation, isFailedNativePreparationRetryAncestor } from "./cancelled-native-startup.js";
-import { hasNativeLocalProcessStop, hasHistoricalSuspendedNativeSession, recordedLocalExecutionStopped, recordUnidentifiedLocalRunnerStop } from "./native-local-process-stop.js";
+import { hasNativeLocalProcessStop, hasHistoricalSuspendedNativeSession, nativeRunRefusedBeforeLaunch, recordedLocalExecutionStopped, recordUnidentifiedLocalRunnerStop } from "./native-local-process-stop.js";
 import { completeTerminatedRemoteNativeSessionCleanup, nativeSessionCleanupBlock } from "../vendor/paperclip-runner/index.js";
 import { hasRecoveredCleanupStopReceipt, hasRemoteTerminationReceipt, remoteLeaseCleanupScope } from "./remote-execution-termination.js";
 import { z } from "zod";
@@ -34,6 +35,7 @@ import { activeIssueInteractionCondition } from "./issue-question-context.js";
 
 import { historicalAdapterType, isConversationAdapter } from "./conversation-continuation.js";
 import { queuedCommentIdsFromWakePayload } from "./issue-queued-comment-queue.js";
+import { firstTurnDeliveredCommentIds } from "./queued-comment-delivery.js";
 
 type Run = Pick<typeof heartbeatRuns.$inferSelect,
   "id" | "companyId" | "agentId" | "status" | "startedAt" | "finishedAt" | "createdAt" |
@@ -121,7 +123,9 @@ export async function undeliveredLegacyUserCommentIds(
       for (const id of context.wakeCommentIds) if (typeof id === "string") valid.delete(id);
     }
   }
-  return commentIds.filter(id => valid.has(id));
+  // An accepted first turn that took a queued message consumed it too.
+  const firstTurn = await firstTurnDeliveredCommentIds(db, { companyId, issueId, agentId, commentIds: [...valid] });
+  return commentIds.filter(id => valid.has(id) && !firstTurn.has(id));
 }
 
 /** Called under the issue lock, in the transaction that creates the new turn.
@@ -415,7 +419,7 @@ export async function admitExplicitNativeContinuation(input: {
           sql`${issueRecoveryActions.evidence}->>'runId' = ${run.id}`,
           sql`${issueRecoveryActions.evidence} ? 'systemRecovery'`));
         if (live.some(row => row.ownerHold))
-          return blocked("workspace_owner_stop_required", "A board member must confirm that the previous server stopped copying files. Your Retry is saved.");
+          return blocked("workspace_owner_stop_required", "Paperclip is waiting to confirm that the previous server stopped saving files. Your Retry is saved.");
         // A spent recovery budget finishes nothing by itself. Another Retry
         // starts one new recovery generation (task-retry), so name that action
         // instead of an endless finalizing wait (RC-50b, s14).
@@ -508,6 +512,7 @@ export async function admitExplicitNativeContinuation(input: {
         if (!run.processPid && !run.processGroupId &&
             !await hasNativeLocalProcessStop(db, companyId, run.id) &&
             !await hasHistoricalSuspendedNativeSession(db, run) &&
+            !await nativeRunRefusedBeforeLaunch(db, run) &&
             !(run.runtimeMode === "native" &&
               await recordUnidentifiedLocalRunnerStop(db, run, { record: !input.dryRun }))) return blocked("process_identity_missing", "The previous run has no verified stop record. Paperclip cannot start this message yet.");
         if (run.processPid && !processStopped(run.processPid)) return blocked("process_running", "Waiting for the previous process to stop. Your message will start automatically.");
@@ -735,7 +740,7 @@ async function readTaskRetryRetryAuthority(db: Db, input: {
  */
 export async function admitExplicitContinuationRetry(input: {
   db: Db; companyId: string; issueId: string; agentId: string;
-  parentRunId: string; successorRunId: string; now: Date;
+  parentRunId: string; successorRunId: string; now: Date; allowQuotaWait?: boolean;
 }): Promise<{ previousRunId: string; commentId: string | null; taskRetryRequestId?: string } | null> {
   const { db, companyId, issueId, agentId } = input;
   const [task] = await db.select().from(issues).where(and(
@@ -747,7 +752,8 @@ export async function admitExplicitContinuationRetry(input: {
   )).for("update");
   if (!task || task.assigneeAgentId !== agentId || task.executionRunId !== input.parentRunId ||
       ["done", "cancelled"].includes(task.status) || !parent ||
-      !["failed", "timed_out"].includes(parent.status) || !parent.finishedAt ||
+      (!["failed", "timed_out"].includes(parent.status) &&
+        !(input.allowQuotaWait && await isPhaseQuotaWaitBeforeDispatchVerified(db, parent))) || !parent.finishedAt ||
       parent.runtimeMode !== "legacy" || parent.contextSnapshot?.issueId !== issueId ||
       (parent.nativeIssueId !== null && parent.nativeIssueId !== issueId) ||
       adapterExecutionControls.has(parent.id) ||

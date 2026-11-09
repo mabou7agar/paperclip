@@ -1,4 +1,9 @@
+import { unknownQuotaResetBackoffSeconds } from "../provider-quota-reset.js";
+import { phaseRoutingSettingsRepository } from "../../repositories/phase-routing-settings.js";
+import { wakeWaitersOfStalledIssues, type BlockerStallWakeup } from "./blocker-stall-wakeups.js";
 import { notifyScheduledRetryDispatch } from "../run-dispatch-notifications.js";
+import { OWNER_UNPROVABLE_CAUSE } from "./owner-gone-attestation.js";
+import { promoteDeferredWorkIntents } from "../work-intent-outbox.js";
 import { isContextCompactionRun } from "../context-compaction.js";
 import { notifyNativeEnvironmentSettlement } from "../native-environment-settlement-notifications.js";
 import { notifyExternalAgentSettlement } from "../../modules/external-agents/index.js";
@@ -17,6 +22,7 @@ import { recoveryRunContextColumn, recoveryRunVersionColumn } from "./run-contex
 import { recoveryRunResultColumn } from "./run-result-read.js";
 import { readLegacyDispositionSource } from "./legacy-disposition-read.js";
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
+import { monitoringService } from "../monitoring.js";
 import { onboardingFirstTaskAwaitingUserSql } from "./onboarding-first-task-wait.js";
 import { isAiAuthenticationBlocked } from "../ai-auth-failure.js";
 import { RESTRICTED_WORKSPACE_SOURCE_REASON } from "../workspace-source-restriction.js";
@@ -104,14 +110,13 @@ import {
 import { visibleIssueCondition } from "../issue-visibility.js";
 import { forbidden, notFound } from "../../errors.js";
 import { logger } from "../../middleware/logger.js";
-import {
-  isPidAlive,
-  isProcessGroupAlive,
-} from "../local-service-supervisor.js";
+import { proveRunProcessGone } from "../run-process-owner.js";
+import { LEGACY_HOST_FALLBACK_EVENT } from "../native-runtime/native-restart-recovery.js";
 import { redactSensitiveText } from "../../redaction.js";
 import { isUniqueViolation } from "../../db-errors.js";
 import {
   logActivity,
+  persistActivity,
   publishActivity,
   type ActivityPublication,
 } from "../activity-log.js";
@@ -176,6 +181,7 @@ import {
   isStrandedIssueRecoveryOriginKind,
 } from "./origins.js";
 import { withRecoveryContext } from "./status-only-context.js";
+import { currentRunFailureText } from "../native-runtime/native-exact-resume-failure.js";
 import { isAutomaticRecoverySuppressedByPauseHold } from "./pause-hold-guard.js";
 import {
   collectDispositionRepairSourceState,
@@ -243,6 +249,7 @@ type RecoveryWakeupOptions = {
     statuses: string[];
     assigneeAgentId: string;
   };
+  allowRunCoalescing?: boolean;
 };
 
 type RecoveryWakeup = (
@@ -259,6 +266,7 @@ type ResolvedDependencyWakeBackstopOptions = {
   blockerIssueId?: string | null;
   issueId?: string;
   source?: ResolvedDependencyWakeBackstopSource;
+  onDeferredDeadline?: (at: number) => void;
 };
 
 const recoveryRunFields = {
@@ -433,7 +441,7 @@ function isProviderQuotaRecovery(latestRun: LatestIssueRun) {
   if (readRecoveryRunErrorFamily(latestRun) === "provider_quota") return true;
   if (latestRun?.errorCode !== "adapter_failed") return false;
   return /(?:usage|rate|quota) limit|you(?:'|’)ve hit your (?:\w+ )?limit|quota (?:exceeded|reset)|try again after/i.test(
-    latestRun.error ?? "",
+    currentRunFailureText(latestRun) ?? "",
   );
 }
 
@@ -625,10 +633,13 @@ export function classifyAdapterFailureForRecovery(
     return null;
   }
   const resultJson = parseObject(latestRun.resultJson);
+  // A refused exact resume keeps its interrupted attempt for operators in
+  // `error` and `nativeExactResumeRefusal`. Recovery follows the refusal only.
+  const { nativeExactResumeRefusal: _interruptedAttempt, ...currentResult } = resultJson;
   const error = [
     latestRun.errorCode ?? "",
-    latestRun.error ?? "",
-    JSON.stringify(resultJson),
+    currentRunFailureText(latestRun) ?? "",
+    JSON.stringify(currentResult),
   ].join("\n");
   if (
     latestRun.errorCode === "configuration_incomplete" ||
@@ -643,6 +654,7 @@ export function classifyAdapterFailureForRecovery(
     return null;
 
   const persistedRetryAt =
+    readNonEmptyString(resultJson.quotaRecoveryBackoffNotBefore) ??
     readNonEmptyString(resultJson.retryNotBefore) ??
     readNonEmptyString(resultJson.transientRetryNotBefore) ??
     readNonEmptyString(resultJson.providerQuotaRetryNotBefore);
@@ -657,7 +669,7 @@ export function classifyAdapterFailureForRecovery(
     return {
       kind: "provider_quota",
       retryAt: parsedPersistedRetryAt,
-      parsedResetTime: true,
+      parsedResetTime: resultJson.providerQuotaResetSource !== "backoff",
     };
   }
 
@@ -918,6 +930,13 @@ export function recoveryService(
       run: typeof heartbeatRuns.$inferSelect,
     ) => boolean;
     liveRunExecutions?: Readonly<{ has(id: string): boolean }>;
+    /**
+     * The one settle path for a `running` legacy run whose adapter child is
+     * lost: heartbeat's active-execution reaper (failed/process_lost, with its
+     * retry policy). The stale-lock sweep hands such runs to it instead of
+     * judging process death itself.
+     */
+    settleLostRunProcess?: (scope: { companyId: string; runId: string; onDeferredDeadline?: (at: number) => void }) => Promise<unknown>;
     beforeOrphanedRunTerminalWrite?: (runId: string) => Promise<void>;
     beforeStaleLockClear?: (issueId: string) => Promise<void>;
   },
@@ -1973,6 +1992,11 @@ export function recoveryService(
      */
     outcome?: { retryExhausted?: boolean };
   }) {
+    const sourceIssue = await db.select().from(issues).where(eq(issues.id, input.issueId)).limit(1).then(rows => rows[0]);
+    if (sourceIssue && await monitoringService(db).observe({
+      companyId: sourceIssue.companyId, issueId: sourceIssue.id, kind: "no_execution_path",
+      fingerprint: JSON.stringify([sourceIssue.status, sourceIssue.assigneeAgentId, input.reason]),
+    })) return null;
     if (input.retryOfRunId) {
       const [predecessor] = await db
         .select(legacyReconciliationRunFields)
@@ -2099,6 +2123,10 @@ export function recoveryService(
     issue: RecoveryIssue,
     agentId: string,
   ) {
+    if (await monitoringService(db).observe({
+      companyId: issue.companyId, issueId: issue.id, kind: "no_execution_path",
+      fingerprint: JSON.stringify(["assigned_todo_liveness_dispatch", issue.status, agentId]),
+    })) return null;
     return deps.enqueueWakeup(agentId, {
       source: "assignment",
       triggerDetail: "system",
@@ -2208,6 +2236,16 @@ export function recoveryService(
         creatorAgent.companyId !== candidate.companyId ||
         !(await isAgentInvokable(creatorAgent))
       ) {
+        skipped += 1;
+        continue;
+      }
+
+      if (await monitoringService(db).observe({
+        companyId: candidate.companyId,
+        issueId: candidate.id,
+        kind: "no_execution_path",
+        fingerprint: JSON.stringify(["unassigned_blocker", candidate.status, creatorAgent.id]),
+      })) {
         skipped += 1;
         continue;
       }
@@ -2589,6 +2627,8 @@ export function recoveryService(
                   : recoveryCause === "configuration_incomplete"
                     ? readConfigurationIncompletePayload(input.latestRun)?.reason === "workspace_base_ref_unresolved"
                       ? "Check the starting branch and repository access, then repair the task’s branch and retry the original assignee."
+                      : readConfigurationIncompletePayload(input.latestRun)?.reason === "ai_connection_quota_reset_unknown"
+                      ? "Confirm quota restoration in Usage Health or provide a verified renewal time, then continue the same task."
                       : readConfigurationIncompletePayload(input.latestRun)?.reason === "ai_connection_unavailable"
                       ? "Reconnect the selected AI account or choose an available connection, then continue the task."
                       : readConfigurationIncompletePayload(input.latestRun)?.reason === RESTRICTED_WORKSPACE_SOURCE_REASON
@@ -2629,6 +2669,7 @@ export function recoveryService(
     const result = parseObject(latestRun?.resultJson);
     const context = parseObject(latestRun?.contextSnapshot);
     const raw =
+      result.quotaRecoveryBackoffNotBefore ??
       result.providerQuotaRetryNotBefore ??
       result.retryNotBefore ??
       result.transientRetryNotBefore ??
@@ -2652,6 +2693,11 @@ export function recoveryService(
     actionId: string;
     agentId: string;
   }, database: DbOrTransaction = db) {
+    if (input.latestRun) {
+      const classification = classifyAdapterFailureForRecovery(input.latestRun);
+      if (classification?.kind === "provider_quota" && await holdUnknownQuotaReset(
+        input.issue.companyId, input.issue.id, input.agentId, input.latestRun, classification, database)) return null;
+    }
     const existing = await database
       .select()
       .from(heartbeatRuns)
@@ -3479,6 +3525,12 @@ export function recoveryService(
       issueIds: [] as string[],
     };
     for (const { action, issue } of rows) {
+      // Only the board's stop confirmation, or the resource's own release, settles this request:
+      // the reserved resource stays reserved however the task ends.
+      if (action.cause === OWNER_UNPROVABLE_CAUSE) {
+        result.skipped += 1;
+        continue;
+      }
       if (await hasUnverifiedNativeWorkspaceFinalizationOwner(db, action)) {
         result.skipped += 1;
         continue;
@@ -3617,7 +3669,11 @@ export function recoveryService(
       // longer schedules another agent-owned wake for them.
       result.skipped += 1;
     }
-    return result;
+    // A child or blocker stalled on a board-owned action: tell whoever waits on it, once per stall.
+    const stalls = await wakeWaitersOfStalledIssues(db, deps.enqueueWakeup as BlockerStallWakeup, { companyId: opts?.companyId });
+    // A failed delivery is reported so the recovery worker retries this pass.
+    return { ...result, blockerStallWakes: stalls.woken, blockerStallWakeFailures: stalls.failed,
+      blockerStallRetryAt: stalls.retryAt };
   }
 
   async function escalateDispositionRepair(input: {
@@ -3879,6 +3935,7 @@ export function recoveryService(
     const state = await collectDispositionRepairSourceState(db, {
       issue: current,
     });
+    const observedStateFingerprint = state.fingerprint;
     if (episode) {
       if (!latestRun) return "skipped";
       const decision = await decidePersistedLegacyContinuation(current, latestRun.id, state, episode);
@@ -3893,6 +3950,9 @@ export function recoveryService(
       );
       return "covered";
     }
+
+    if (await monitoringService(db).observe({ companyId: current.companyId, issueId: current.id,
+      kind: "missing_disposition", fingerprint: observedStateFingerprint })) return "skipped";
 
     const ownerAgentId = current.assigneeAgentId;
     const ownerAgent = ownerAgentId ? await getAgent(ownerAgentId) : null;
@@ -4346,9 +4406,15 @@ export function recoveryService(
       classification.kind === "provider_quota"
         ? {
             errorFamily: "provider_quota",
-            retryNotBefore: classification.retryAt.toISOString(),
-            transientRetryNotBefore: classification.retryAt.toISOString(),
-            providerQuotaRetryNotBefore: classification.retryAt.toISOString(),
+            providerQuotaResetSource: classification.parsedResetTime ? "provider" : "backoff",
+            ...(classification.parsedResetTime ? {
+              retryNotBefore: classification.retryAt.toISOString(),
+              transientRetryNotBefore: classification.retryAt.toISOString(),
+              providerQuotaRetryNotBefore: classification.retryAt.toISOString(),
+            } : {
+              quotaRecoveryBackoffNotBefore: classification.retryAt.toISOString(),
+              retryNotBefore: null, transientRetryNotBefore: null, providerQuotaRetryNotBefore: null,
+            }),
           }
         : { errorFamily: "configuration_incomplete" };
     const errorCode = classification.kind;
@@ -4362,6 +4428,19 @@ export function recoveryService(
         recoveryClassification: errorCode,
       },
     };
+  }
+
+  async function holdUnknownQuotaReset(companyId: string, issueId: string, agentId: string,
+    latestRun: NonNullable<LatestIssueRun>, classification: Extract<NonNullable<AdapterFailureRecoveryClassification>, { kind: "provider_quota" }>,
+    database: DbOrTransaction = db) {
+    if (classification.parsedResetTime) return false;
+    const [companyPolicy, agent] = await Promise.all([
+      phaseRoutingSettingsRepository(database as Db).get(companyId), getAgent(agentId, database),
+    ]);
+    if (unknownQuotaResetBackoffSeconds(companyPolicy, agent?.runtimeConfig) !== 0) return false;
+    await monitoringService(database as Db).observe({ companyId, issueId, kind: "no_execution_path",
+      fingerprint: JSON.stringify(["provider_quota_reset_unknown", agentId, latestRun.id]) });
+    return true;
   }
 
   async function scheduleProviderQuotaRecoveryMonitor(input: {
@@ -4381,6 +4460,9 @@ export function recoveryService(
     const targetAgentId = getAdapterFailureRecoveryTargetAgentId(input.issue);
     if (!targetAgentId || input.latestRun.agentId !== targetAgentId)
       return null;
+
+    if (await holdUnknownQuotaReset(input.issue.companyId, input.issue.id, targetAgentId,
+      input.latestRun, input.classification)) return null;
 
     const previousPolicy = normalizeIssueExecutionPolicy(
       input.issue.executionPolicy ?? null,
@@ -5984,6 +6066,13 @@ export function recoveryService(
           continue;
         }
 
+        // A reconciliation pass observes readiness; it is not another blocker
+        // completion event. Real route/finalization events keep their wake path.
+        if (source !== "workspace.finalize" && await monitoringService(db).observe({
+          companyId, issueId: candidate.id, kind: "dependency_ready",
+          fingerprint: JSON.stringify([...readiness.blockerIssueIds].sort()),
+        })) { result.existingWakeSkipped += 1; continue; }
+
         try {
           const wake = await deps.enqueueWakeup(agentId, {
             source: "automation",
@@ -6058,6 +6147,16 @@ export function recoveryService(
       );
     }
 
+    // A stalled child or blocker: tell whoever waits on it, once per stall
+    // (blocker-stall-wakeups.ts). This sweep visits each blocked issue, which
+    // covers a board action already resolved as "blocked".
+    if (!opts?.runId && !opts?.blockerIssueId) {
+      const stalls = await wakeWaitersOfStalledIssues(db, deps.enqueueWakeup as BlockerStallWakeup,
+        { companyId: opts?.companyId ?? null, issueId: opts?.issueId ?? null });
+      // Counted with the dependency wakes, so the worker retries a failed one.
+      result.enqueueFailed += stalls.failed;
+      if (stalls.retryAt !== null) opts?.onDeferredDeadline?.(stalls.retryAt);
+    }
     return result;
   }
 
@@ -6086,9 +6185,12 @@ export function recoveryService(
   //   authority that catches the reuse-lease path: the release stops the sandbox
   //   but keeps the server process alive, so the in-memory handle and the
   //   recorded pid can both persist.
-  // - Process-death authority: the run has no in-memory handle and its recorded
-  //   process and process group are both gone. This catches a hard server crash
-  //   that skipped the graceful teardown, even when the issue is not terminal.
+  // - Process death: the run has no in-memory handle and the shared owner
+  //   prover finds its recorded child gone. A legacy run is handed to the one
+  //   lost-process settle path (heartbeat's active-execution reaper), so it
+  //   gets the same failed/process_lost outcome and retry as any other lost
+  //   child. A native run keeps this backstop's interrupted outcome; native
+  //   recovery owns its retries.
   async function terminalizeOrphanedRunningRun(
     run: typeof heartbeatRuns.$inferSelect,
     options?: {
@@ -6174,16 +6276,28 @@ export function recoveryService(
     // group. Require recorded process metadata, so this authority never fires
     // on a run that has not yet stored its pid.
     let processGone = false;
+    let legacyHostFallback = false;
     const hasLiveExecution =
       deps.liveRunExecutions?.has(run.id) ?? runningProcesses.has(run.id);
+    if (!issueTerminalStatus && !hasLiveExecution && run.runtimeMode !== "native") {
+      // The lost-process settle path proves the child itself and owns the
+      // outcome. Without it (a bare recovery service) nothing is judged here.
+      if (!deps.settleLostRunProcess) return { terminalized: false, status: run.status };
+      await deps.settleLostRunProcess({ companyId: run.companyId, runId: run.id,
+        onDeferredDeadline: options?.onDeferredDeadline });
+      const [current] = await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns)
+        .where(and(eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.id, run.id)));
+      const status = current?.status ?? run.status;
+      return { terminalized: status !== run.status && TERMINAL_HEARTBEAT_RUN_STATUSES.has(status), status };
+    }
+    // The shared owner prover judges a recorded PID only in the PID space that
+    // recorded it (#19871). Rows saved before the space was recorded keep the
+    // previous local proof for one release, on single-host servers only. An
+    // unprovable child is never released here; its operator path is Stop.
     if (!hasLiveExecution) {
-      if (typeof pid === "number" || typeof processGroupId === "number") {
-        const processAlive =
-          (typeof pid === "number" && isPidAlive(pid)) ||
-          (typeof processGroupId === "number" &&
-            isProcessGroupAlive(processGroupId));
-        processGone = !processAlive;
-      }
+      const proof = await proveRunProcessGone(run, "orphaned_running_run");
+      processGone = proof?.verdict === "gone";
+      legacyHostFallback = proof?.legacyHostFallback === true;
     }
 
     // Neither authority applies. The run is still live, so leave it alone.
@@ -6320,6 +6434,17 @@ export function recoveryService(
         { err: error, runId: run.id, previousStatus: run.status },
         "failed to append recovery run event after terminalizing orphaned run; run stays terminal and the sweep clears the lock",
       );
+    }
+    // Counted by the release that removes the null-host fallback. Best-effort
+    // like the audit event above: it never holds the terminal write back.
+    if (authority === "process_gone" && legacyHostFallback) {
+      try {
+        await persistActivity(db, { companyId: run.companyId, actorType: "system", actorId: "orphan-reaper",
+          action: LEGACY_HOST_FALLBACK_EVENT, entityType: "heartbeat_run", entityId: run.id, runId: run.id,
+          agentId: run.agentId, details: { reason: "orphaned_running_run", source: "orphan_reaper" } });
+      } catch (error) {
+        logger.error({ err: error, runId: run.id }, "failed to record the legacy host fallback event");
+      }
     }
     logger.warn(
       {
@@ -6508,7 +6633,7 @@ export function recoveryService(
         }
         await notifyUnsafeWorkspaceExportRecovery(tx, { companyId: issue.companyId, issueId: issue.id });
         await notifyNativeStatusReassessment(tx, { companyId: issue.companyId, issueId: issue.id });
-        return tx
+        const cleared = await tx
         .update(issues)
         .set({
           checkoutRunId: null,
@@ -6534,6 +6659,12 @@ export function recoveryService(
         )
         .returning({ id: issues.id })
         .then((rows) => rows[0] ?? null);
+        // Releasing the lock is a hold-release event: messages saved behind it
+        // are promoted through the one outbox path (section E), only when the
+        // guarded clear actually released it. The promotion registers its own
+        // work signals before its write.
+        if (cleared) await promoteDeferredWorkIntents(tx, { companyId: issue.companyId, trigger: "lock_released", issueId: issue.id });
+        return cleared;
       });
 
       if (!updated) continue;

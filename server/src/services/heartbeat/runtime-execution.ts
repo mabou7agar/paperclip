@@ -14,7 +14,7 @@ import { environmentService } from "../environments.js";
 import { writeExecutionControl } from "../execution-control-notifications.js";
 import { inspectPluginWorkspaceForFinalization } from "../native-runtime/native-plugin-workspace-finalization.js";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { measureRunPhase } from "../execution-preparation-timing.js";
+import { drainRunPreparationPhases, measureRunPhase } from "../execution-preparation-timing.js";
 import { parseNativeSessionGoalControl } from "./scheduling.js";
 import { isHeartbeatRunTerminalStatus } from "./run-lifecycle.js";
 import {
@@ -52,7 +52,7 @@ import { isConversation } from "../agent-conversations.js";
 import { withAdapterExecutionPhase } from "@paperclipai/adapter-utils/execution-phase";
 import { remoteExecutionHasStopped } from "../remote-execution-termination.js";
 import { registerAdapterExecutionControl } from "../adapter-execution-control.js";
-import { resolveManagedOpenAiBilling } from "@paperclipai/adapter-utils";
+import { resolveManagedAiBillingIdentity } from "@paperclipai/adapter-utils";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { heartbeatRuns, nativeRunFinalizations, workspaceOperations } from "@paperclipai/db";
 import { conflict } from "../../errors.js";
@@ -145,6 +145,7 @@ export interface HeartbeatRuntimeExecutionInput {
   };
   config: Pick<Selection["config"], "runtimeConfig" | "resolvedConfig" | "managedAiRuntime"> & {
     resolvedInstanceSettings: { experimental: Pick<Awaited<ReturnType<ReturnType<typeof instanceSettingsService>["getExperimental"]>>, "enableWorkspaceBranchReconcileForward" | "enableWorkspaceDirtyQuarantineRepair"> };
+    sessionFingerprintEnv?: Record<string, string>;
     configuredTaskEnvironment: Parameters<typeof configuredEnvironmentProjection>[0];
     adapterEnv: Parameters<typeof buildNativeProviderEnvironment>[0];
     agentIdentity: AdapterExecutionContext["agentIdentity"];
@@ -601,6 +602,12 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
       });
       if (wakeIngressSpan)
         nativeRunnerPreparationSpans.unshift(wakeIngressSpan);
+      // Named preparation phases (workspace, configuration, runner staging)
+      // that ran before dispatch, as run-log spans under task.prepare.
+      nativeRunnerPreparationSpans.push(...drainRunPreparationPhases(run.id).map(phase => ({
+        name: phase.name, startedAtMs: phase.startedAtMs, endedAtMs: phase.endedAtMs,
+        ...(phase.outcome === "failed" ? { outcome: "failed" as const } : {}),
+      })));
       nativeRunnerPreparationSpans.push(
         ...buildNativeHeartbeatPreparationSpans({
           runCreatedAtMs,
@@ -678,7 +685,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
               // configured provider values and the server-selected
               // workspace boundary authoritative.
               managedGitHub: !useHostGitHub && githubSelection.configured,
-              billingIdentity: managedAiRuntime ? { provider: managedAiRuntime.attribution.provider, biller: managedAiRuntime.attribution.provider === "openai" ? resolveManagedOpenAiBilling(managedAiRuntime.config.managedAiRouting)?.biller ?? managedAiRuntime.attribution.provider : managedAiRuntime.attribution.provider, billingType: managedAiRuntime.attribution.method === "subscription" ? "subscription_included" : "metered_api" } : undefined,
+              billingIdentity: managedAiRuntime ? resolveManagedAiBillingIdentity(managedAiRuntime.attribution, managedAiRuntime.config.managedAiRouting) : undefined,
               managedAiCredentialIdentity: managedAiRuntime?.identity,
               managedAiAccountIdentity: managedAiRuntime?.sessionIdentity,
               managedAiCredentialWriteback: managedAiRuntime?.credentialWriteback,
@@ -856,6 +863,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
               agent,
               runtime: runtimeForAdapter,
               config: runtimeConfig,
+              sessionFingerprintEnv: input.config.sessionFingerprintEnv,
               context: adapterContext,
               executionContinuation: executionContinuation ?? null,
               runtimeCommandSpec:
@@ -924,6 +932,8 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
                       ? meta.processGroupId
                       : null,
                   startedAt: meta.startedAt,
+                  // A sandbox runner's spawn metadata names a sandbox PID.
+                  targetKind: executionTarget?.kind ?? "local",
                 });
               },
               authToken: authToken ?? undefined,

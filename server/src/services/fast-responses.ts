@@ -1,3 +1,4 @@
+import { connectionUsageCapsService } from "./connection-usage-caps.js";
 import { notifyChatResponseAvailability } from "./chat-response-availability.js";
 import { insertIssueComment } from "./issue-comment-writes.js";
 import { randomUUID } from "node:crypto";
@@ -886,6 +887,7 @@ export function fastResponseService(
             !(await fastResponseSourceCurrent(tx, request))
           )
             return null;
+          if ((await connectionUsageCapsService(tx).check(request.companyId,current.connection.connection.id)).blocked) return null;
           if (request.endpointId) await options.authorizeExternal!(tx, request);
           const [agent] = request.agentId
             ? await tx

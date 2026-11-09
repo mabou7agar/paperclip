@@ -1,0 +1,9 @@
+---
+title: Codex GitHub capability forwarding
+---
+
+Paperclip's managed GitHub launcher uses a run-scoped broker capability to resolve the authorized Git identity for each operation. Codex command subprocesses must receive `PAPERCLIP_GITHUB_BROKER_TOKEN` and, on bridged environments, `PAPERCLIP_GITHUB_BRIDGE_TOKEN`, alongside the scoped Paperclip API identity.
+
+Both the CLI and ACP adapters use the same name allowlist. It contains these scoped capabilities, agent identity, ordinary explicitly configured environment names and basic shell paths. It excludes provider API keys, ambient host credentials and unrelated token/secret variables. Configuration contains names only; capability values remain ephemeral process state. Shell snapshots stay disabled so a resumed command receives the current environment. GitHub connection and grant validation, active-run checks and sandbox permissions remain authoritative.
+
+If Git reports `capability_missing`, check whether the provider process and its command subprocess both have the broker capability. Report presence only. Do not print tokens, copy a host PAT, change Git safe-directory rules, or retry publication repeatedly. A rejected capability or missing grant requires its own access diagnosis.

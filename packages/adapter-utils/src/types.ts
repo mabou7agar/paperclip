@@ -239,6 +239,8 @@ export interface AdapterExecutionContext {
   observability?: import("./agent-observability.js").ProviderObservabilityLaunch;
   /** Server-owned credentials. Never persist this object or merge it into config. */
   agentIdentity?: AgentRuntimeIdentity;
+  /** Server-owned configured env before disposable scratch and launcher overlays. Never persist. */
+  sessionFingerprintEnv?: Record<string, string>;
   /** Synchronous, content-free diagnostic scope; never stop or collection authority. */
   onExecutionPhase?: AdapterExecutionPhaseSink;
   /** Run-scoped operator cancellation; adapters must settle before returning. */

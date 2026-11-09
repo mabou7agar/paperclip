@@ -2,12 +2,14 @@ import { preserveAcceptedRunUsageProjectionSql } from "../usage-receipts.js";
 import { isContextCompactionRun } from "../context-compaction.js";
 import { providerFailureFromError } from "../../vendor/paperclip-runner/index.js";
 import { nativeTaskSessionPublicationHandled } from "../native-runtime/native-task-session-publication.js";
+import { boundOriginalMessage, describeRefusedExactResume, interruptedExactResumeCause } from "../native-runtime/native-exact-resume-failure.js";
 import { settledResponsePublicationSql } from "../native-runtime/native-response-publication-receipt.js";
 import { notifyChatRunMilestones } from "../chat-run-milestone-notifications.js";
 import { measureRunPhase } from "../execution-preparation-timing.js";
 import { PROJECT_ACCESS_DENIED, ProjectAccessDeniedError } from "../project-access-denial.js";
 import { pendingCaseHandoffForRun } from "./case-handoff-lifecycle.js";
 import { NON_RETRYABLE_PREFLIGHT_FAILURE_CODES, isHeartbeatRunTerminalStatus } from "./run-lifecycle.js";
+import { phaseRouteDispatchSchema, phaseRoutingService, PHASE_QUOTA_FALLBACK_RETRY_REASON, PHASE_QUOTA_RESET_WAKE_REASON } from "../phase-routing.js";
 import { ChatControlRecoveryUnresolvedError } from "./queue.js";
 import { readTransientRecoveryContractFromRun, readHeartbeatRunErrorFamily, isTransientWorkspacePreparationCode } from "./retries.js";
 import { RemoteWorkspacePreparationTimeoutError, REMOTE_WORKSPACE_RESTORE_FAILED_CODE, findRemoteWorkspaceRestoreError } from "../remote-workspace-transport.js";
@@ -44,9 +46,10 @@ import { isUnresolvedWorkspaceBaseRefError, readUnresolvedWorkspaceBaseRefDiagno
 import { runnerGoalService } from "../runner-goals.js";
 import { resolveChatRunPresentationAuthorizationReason } from "../chat-run-publications.js";
 import { hasChatRunOwnedProviderInteraction } from "../chat-interaction-arbitration.js";
+import { conversationTurnPresentsAnswer } from "../native-runtime/native-governance.js";
 import { readAcceptedTaskContinuationSummary } from "../heartbeat-run-summary.js";
 import { SANDBOX_PROVIDER_PLUGIN_NOT_READY_REASON } from "../recovery/stranded-notice.js";
-import { MAX_TURN_CONTINUATION_RETRY_REASON, isResolvedInteractionContinuationWakeContext } from "../../modules/run-dispatch/index.js";
+import { AI_CONNECTION_POOL_WAIT_RETRY_REASON, MAX_TURN_CONTINUATION_RETRY_REASON, isResolvedInteractionContinuationWakeContext } from "../../modules/run-dispatch/index.js";
 import { redactCurrentUserText } from "../../log-redaction.js";
 import type { createHeartbeatLifecycle } from "./run-lifecycle.js";
 import type { createHeartbeatRunPreparation } from "./run-preparation.js";
@@ -579,6 +582,14 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       costUsdExact: adapterResult.costUsdExact ?? null,
       providerRequestId: adapterResult.providerRequestId ?? null,
       ...(normalizedUsage ?? {}),
+      // Cache writes are a subset of input. Preserve the split only when the
+      // adapter reports this turn's usage; session totals need their own delta.
+      ...(adapterResult.usageBasis === "per_run" &&
+          typeof adapterResult.usage?.cacheWriteTokens === "number" &&
+          Number.isFinite(adapterResult.usage.cacheWriteTokens)
+        ? { cacheWriteTokens: Math.min(normalizedUsage?.inputTokens ?? 0,
+            Math.max(0, Math.floor(adapterResult.usage.cacheWriteTokens))) }
+        : {}),
       ...(adapterResult.usageByModel ? { usageByModel: adapterResult.usageByModel } : {}),
       ...(rawUsage
         ? {
@@ -844,8 +855,12 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
           resultJson: persistedResultJson,
           interactionOwnsResponse: Boolean(issueId && readAcceptedTaskContinuationSummary(persistedResultJson) &&
             await hasChatRunOwnedProviderInteraction(db, { companyId: livenessRun.companyId, issueId, runId: livenessRun.id })),
-          conversationTurnFinished: isConversation(issueContext) && livenessRun.status === "succeeded"
-            && persistedResultJson?.finalizationReasonCode === "conversation_turn_finished",
+          conversationTurnFinished: Boolean(issueId) && isConversation(issueContext) && livenessRun.status === "succeeded"
+            && await measureRunPhase("response.resolve", () => conversationTurnPresentsAnswer({
+              db, companyId: livenessRun.companyId, issueId: issueId!, runId: livenessRun.id,
+              finalizationPhase: persistedResultJson?.finalizationPhase,
+              finalizationReasonCode: persistedResultJson?.finalizationReasonCode,
+            })),
           existingComment: existingRunComment,
           finalAgentMessage,
           preferFinalResponseOverExistingComment:
@@ -943,7 +958,22 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
           `[paperclip] Failed to resolve run presentation: ${err instanceof Error ? err.message : String(err)}\n`,
         );
       }
-      if (outcome === "failed" && isMaxTurnExhaustionRun(livenessRun)) {
+      const phaseRoute = phaseRouteDispatchSchema.safeParse(parseObject(parseObject(run.runnerProfileJson).adapterDispatch).phaseRoute).data;
+      if (outcome === "failed" && readHeartbeatRunErrorFamily(livenessRun) === "provider_quota" && phaseRoute?.profile) {
+        // The just-persisted quota receipt can exhaust the last available level.
+        // Resolve the complete chain before deciding between fallback and renewal.
+        const now = new Date();
+        const available = await phaseRoutingService(db).resolve({ companyId: run.companyId, agentId: agent.id,
+          userId: run.responsibleUserId ?? null, adapterType: agent.adapterType, runtimeConfig: parseObject(agent.runtimeConfig), agentRole: agent.role,
+          workMode: issueRef?.workMode, issueId: issueId ?? undefined, isConversation: false, now });
+        await scheduleBoundedRetryForRun(livenessRun, agent, available && !available.profile && available.retryAt ? {
+          now, retryReason: AI_CONNECTION_POOL_WAIT_RETRY_REASON, wakeReason: PHASE_QUOTA_RESET_WAKE_REASON,
+          maxAttempts: 1, delayMs: Math.max(1_000, Date.parse(available.retryAt) - now.getTime()),
+        } : {
+          retryReason: PHASE_QUOTA_FALLBACK_RETRY_REASON, wakeReason: "phase_quota_fallback",
+          maxAttempts: phaseRoute.maxFallbackAttempts, delayMs: 1_000,
+        });
+      } else if (outcome === "failed" && isMaxTurnExhaustionRun(livenessRun)) {
         const policy = parseMaxTurnContinuationPolicy(agent);
         if (policy.enabled && policy.maxAttempts > 0) {
           await scheduleBoundedRetryForRun(livenessRun, agent, {
@@ -1087,10 +1117,9 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     await processRunCancellationSettlements.get(run.id)?.settled;
     const providerFailure = providerFailureFromError(err);
     const currentUserRedactionOptions = await getCurrentUserRedactionOptions();
-    const message = redactCurrentUserText(
-      identityRedactor.redact(err instanceof Error ? err.message : "Unknown adapter failure"),
-      currentUserRedactionOptions,
-    );
+    const redactFailureText = (text: string) =>
+      redactCurrentUserText(identityRedactor.redact(text), currentUserRedactionOptions);
+    const thrownMessage = redactFailureText(err instanceof Error ? err.message : "Unknown adapter failure");
     const workspaceValidationFailure = isWorkspaceValidationFailure(err)
       ? err
       : null;
@@ -1107,23 +1136,39 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
     // durable coordinator is also the stronger authority here: legacy
     // runs simply have no row, while native result-less exhaustion keeps
     // its named failure instead of being flattened to `adapter_failed`.
-    const nativeTerminalFailureCode = await db
+    const nativeCoordinator = await db
       .select({
         phase: nativeRunFinalizations.phase,
         resultId: nativeRunFinalizations.resultId,
         failureCode: nativeRunFinalizations.failureCode,
+        attempt: nativeRunFinalizations.attempt,
+        recoveryHistory: nativeRunFinalizations.recoveryHistory,
       })
       .from(nativeRunFinalizations)
       .where(eq(nativeRunFinalizations.runId, run.id))
       .limit(1)
-      .then((rows) => {
-        const coordinator = rows[0];
-        return coordinator?.phase === "terminal_failure" &&
-          coordinator.resultId === null
-          ? coordinator.failureCode
-          : null;
-      })
+      .then((rows) => rows[0] ?? null)
       .catch(() => null);
+    const nativeTerminalFailureCode =
+      nativeCoordinator?.phase === "terminal_failure" &&
+      nativeCoordinator.resultId === null
+        ? nativeCoordinator.failureCode
+        : null;
+    // A same-run exact-checkpoint retry can fail closed before the executor
+    // claims a provider attempt, for example when the interrupted attempt left
+    // its checkpoint unresumable. The refusal alone hides why the run retried,
+    // so the reported failure names the interrupted attempt first. Failure
+    // classification reads only the thrown error (here and, through
+    // `nativeExactResumeRefusal.refusal`, in the retry and recovery
+    // classifiers). Both texts are masked whole before any length budget cuts
+    // them, so a cut cannot leave an unmasked username prefix.
+    const exactResumeCause = interruptedExactResumeCause(nativeCoordinator);
+    const interruptedExactResume = exactResumeCause
+      ? { ...exactResumeCause, originalMessage: redactFailureText(exactResumeCause.originalMessage) }
+      : null;
+    const message = interruptedExactResume
+      ? describeRefusedExactResume(interruptedExactResume, thrownMessage)
+      : thrownMessage;
     const failureErrorCode =
       workspaceValidationFailure?.code ??
       configurationIncompleteFailure?.code ??
@@ -1168,11 +1213,17 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       finishedAt: new Date(),
       resultJson: mergeRunStopMetadataForAgent(agent, failureOutcome, {
         errorCode: failureErrorCode,
-        errorMessage: message,
+        errorMessage: thrownMessage,
         resultJson: {
           ...parseObject(stopSnapshot?.resultJson),
           ...(providerFailure ? { providerFailure: { ...providerFailure,
             message: redactCurrentUserText(identityRedactor.redact(providerFailure.message), currentUserRedactionOptions) } } : {}),
+          ...(interruptedExactResume ? { nativeExactResumeRefusal: {
+            originalFailureCode: interruptedExactResume.originalFailureCode,
+            originalMessage: boundOriginalMessage(interruptedExactResume.originalMessage),
+            interruptedAttempt: interruptedExactResume.interruptedAttempt,
+            refusal: thrownMessage,
+          } } : {}),
           ...requiredWorkspaceRestoreEvidence,
           ...(workspaceValidationFailure?.resultJson ??
             configurationIncompleteFailure?.resultJson ??
@@ -1216,7 +1267,7 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
       wasFirstHeartbeat: timerClaimWasFirstHeartbeat(run),
       keepIdleOnFailure:
         Boolean(nonRetryablePreflightFailureCode(err)) ||
-        isWorkspaceSyncConflictFailure(message),
+        isWorkspaceSyncConflictFailure(thrownMessage),
     });
     await setWakeupStatus(run.wakeupRequestId, "failed", {
       finishedAt: new Date(),

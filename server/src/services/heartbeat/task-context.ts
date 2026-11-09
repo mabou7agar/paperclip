@@ -5,6 +5,7 @@ import type { PaperclipTurnContext } from "@paperclipai/adapter-utils/server-uti
 import { parseObject } from "../../adapters/utils.js";
 import { isConversation } from "../agent-conversations.js";
 import { chatCompletionInstruction } from "../chat-completion-delivery.js";
+import { taskCompletionReceiptInstruction } from "../task-completion-receipts.js";
 import { getConversationConfirmationContext } from "../conversation-confirmation-context.js";
 import { buildExecutionContinuation } from "../execution-continuation.js";
 import { getIssueContinuationSummaryDocument } from "../issue-continuation-summary.js";
@@ -36,8 +37,9 @@ export interface HeartbeatTaskContextInput {
   };
   policy: {
     recovering?: boolean;
+    executionRoute?: { responsibility: string; provider: string; model: string } | null;
     trustPreset: Pick<TrustPresetResolution, "kind">;
-    experimentalInstanceSettings: { enableSimplifiedEnglishInteractions?: boolean; enableCases?: boolean };
+    experimentalInstanceSettings: { enableSimplifiedEnglishInteractions?: boolean; enableCases?: boolean; enableConferenceRoomChat?: boolean };
   };
   services: {
     issuesSvc: Pick<ReturnType<typeof issueService>, "getAncestors">;
@@ -240,7 +242,10 @@ export async function prepareHeartbeatTaskContext(db: Db, input: HeartbeatTaskCo
     : false;
   context.paperclipCoordinatorWorkspaceEnabled = Boolean(coordinatorWorkspace);
   const taskMarkdownInput = {
+    addressedInteraction: paperclipWakePayload?.addressedInteraction ?? null,
+    executionRoute: input.policy.executionRoute ?? null,
     coordinatorWorkspace: Boolean(coordinatorWorkspace),
+    conferenceRoomEnabled: experimentalInstanceSettings.enableConferenceRoomChat === true,
     conversationConfirmations: issueRef && isConversation(issueContext)
       ? await getConversationConfirmationContext({ db, companyId: agent.companyId, issueId: issueRef.id, agentId: agent.id })
       : null,
@@ -315,23 +320,24 @@ export async function prepareHeartbeatTaskContext(db: Db, input: HeartbeatTaskCo
   if (workflowCase) context.paperclipCase = workflowCase;
   else delete context.paperclipCase;
   const assignmentPrefix = liveVoiceTaskPrefix + caseExecutionMarkdown(workflowCase);
-  let taskMarkdown = assignmentPrefix + buildPaperclipTaskMarkdown({ ...taskMarkdownInput, taskPlan }) + chatCompletionInstruction(context);
+  const completionInstruction = taskCompletionReceiptInstruction(context);
+  let taskMarkdown = assignmentPrefix + buildPaperclipTaskMarkdown({ ...taskMarkdownInput, taskPlan }) + chatCompletionInstruction(context) + completionInstruction;
   let taskMarkdownAssignment = assignmentPrefix + buildPaperclipTaskMarkdown({
     ...taskMarkdownInput,
     taskPlan,
     includeWakeComments: false,
-  }) + chatCompletionInstruction(context);
+  }) + chatCompletionInstruction(context) + completionInstruction;
   const taskMarkdownCompact = assignmentPrefix + buildPaperclipTaskMarkdown({
     ...taskMarkdownInput,
     taskPlan,
     includeDescription: false,
-  }) + chatCompletionInstruction(context);
+  }) + chatCompletionInstruction(context) + completionInstruction;
   const taskMarkdownAssignmentCompact = assignmentPrefix + buildPaperclipTaskMarkdown({
     ...taskMarkdownInput,
     taskPlan,
     includeDescription: false,
     includeWakeComments: false,
-  }) + chatCompletionInstruction(context);
+  }) + chatCompletionInstruction(context) + completionInstruction;
   if (issueRef) {
     context.paperclipIssue = {
       id: issueRef.id,

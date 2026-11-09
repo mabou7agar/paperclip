@@ -32,6 +32,9 @@ const apiPrefixes: Record<string, string> = {
   "decision-models.ts": "/api",
   "agent-observability.ts": "/api",
   "fast-responses.ts": "/api",
+  "phase-routing.ts": "/api",
+  "usage-health.ts": "/api",
+  "monitoring.ts": "/api",
   "prompt-injection-prevention.ts": "/api",
   "attention.ts": "/api",
   "approvals.ts": "/api",
@@ -331,6 +334,53 @@ function loadSpecRoutes() {
 }
 
 describe("openapi routes", () => {
+  it("documents usage health and account quota recovery as board-only", () => {
+    const { spec } = loadSpecRoutes();
+    for (const [method, path] of [
+      ["get", "/api/v1/companies/{companyId}/usage-health"],
+      ["put", "/api/v1/companies/{companyId}/usage-health/policy"],
+      ["post", "/api/v1/companies/{companyId}/ai-connections/{connectionId}/quota-restored"],
+    ]) {
+      expect(spec.paths[path][method].security).toEqual([{ BoardSessionAuth: [] }, { BoardApiKeyAuth: [] }]);
+      expect(spec.paths[path][method]["x-paperclip-authorization"]).toEqual({ actor: "board" });
+      expect(spec.paths[path][method].responses["403"]).toBeDefined();
+    }
+  });
+  it("documents board-only versioned model routing with arbitrary fallback chains", () => {
+    const { spec } = loadSpecRoutes();
+    const routes = spec.paths["/api/v1/companies/{companyId}/phase-routing"];
+    for (const method of ["get", "put"]) {
+      expect(routes[method].security).toEqual([{ BoardSessionAuth: [] }, { BoardApiKeyAuth: [] }]);
+      expect(routes[method]["x-paperclip-authorization"]).toEqual({ actor: "board" });
+      expect(routes[method].responses["403"]).toBeDefined();
+    }
+    const body = routes.put.requestBody.content["application/json"].schema;
+    expect(body.additionalProperties).toBe(false);
+    for (const phase of ["planning", "implementation"]) {
+      expect(body.properties[phase].type).toBe("array");
+      expect(body.properties[phase].items.properties.model.type).toBe("string");
+      expect(body.properties[phase].maxItems).toBeUndefined();
+    }
+  });
+  it("documents the export include body so agents can request projects and skills", () => {
+    const spec = buildOpenApiSpec();
+    for (const path of ["/api/companies/{companyId}/exports", "/api/companies/{companyId}/exports/preview"]) {
+      const operation = spec.paths[path].post;
+      const body = operation.requestBody.content["application/json"].schema;
+      expect(body.properties.include.properties).toMatchObject({ projects: expect.anything(), skills: expect.anything() });
+      expect(operation.description).toMatch(/include\.projects/);
+    }
+  });
+  it("documents the safe company import body so agents can preview and resolve agent name conflicts", () => {
+    const spec = buildOpenApiSpec();
+    for (const path of ["/api/companies/{companyId}/imports/preview", "/api/companies/{companyId}/imports/apply"]) {
+      const operation = spec.paths[path].post;
+      const body = operation.requestBody.content["application/json"].schema;
+      expect(body.required).toEqual(expect.arrayContaining(["source", "target"]));
+      expect(body.properties).toMatchObject({ collisionStrategy: expect.anything(), nameOverrides: expect.anything(), include: expect.anything() });
+      expect(operation.description).toMatch(/replace/);
+    }
+  });
   it("documents generic webhook provenance headers and accepted responses without a provider-specific endpoint", () => {
     const spec = buildOpenApiSpec();
     const operation = spec.paths["/api/routine-triggers/public/{publicId}/fire"].post;
@@ -478,13 +528,13 @@ describe("openapi routes", () => {
     expect(operation.responses["404"]).toBeDefined();
   });
 
-  it("documents strict run-attributed feedback and board-only commentary reads", () => {
+  it("documents strict run-attributed feedback and board-or-agent commentary reads", () => {
     const { spec } = loadSpecRoutes();
     const path = spec.paths["/api/companies/{companyId}/agent-commentary"];
     expect(Object.keys(path)).toEqual(["get", "post"]);
     const detail = spec.paths["/api/companies/{companyId}/agent-commentary/{id}"].get;
     for (const read of [path.get, detail]) {
-      expect(read.security).toEqual([{ BoardSessionAuth: [] }, { BoardApiKeyAuth: [] }]);
+      expect(read.security).toEqual([{ BoardSessionAuth: [] }, { BoardApiKeyAuth: [] }, { AgentBearerAuth: [] }]);
       expect(read.responses["403"]).toBeDefined();
       expect(read.responses["404"]).toBeDefined();
     }
@@ -555,6 +605,24 @@ describe("openapi routes", () => {
       required: ["companyId"], additionalProperties: false,
     });
     expect(dismiss.description).toContain("viewers may dismiss their own");
+  });
+
+  it("tells agents that Agent Chat is always on instead of advertising a retired toggle", async () => {
+    const res = await request(createApp()).get("/api/openapi.json");
+    const experimental = res.body.paths["/api/instance/settings/experimental"];
+    for (const operation of [experimental.get, experimental.patch]) {
+      expect(operation.description).toContain("Agent Chat is always on");
+      expect(operation.description).toContain("enableAgentChat is a retired compatibility key");
+      expect(operation.description).toContain("tell them it is already on");
+    }
+  });
+
+  it("tells agents that archiving keeps a status card and where a person restores it", async () => {
+    const res = await request(createApp()).get("/api/openapi.json");
+    const patch = res.body.paths["/api/status-cards/{id}"].patch;
+    expect(patch.description).toContain("it is not deleted");
+    expect(patch.description).toContain("give them the returned href as a Markdown link");
+    expect(patch.description).toContain("Restoring (archived: false) starts a fresh full summary");
   });
 
   it("documents exact failed-run selection and durable accepted retry responses", async () => {

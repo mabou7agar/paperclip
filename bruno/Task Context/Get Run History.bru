@@ -1,0 +1,27 @@
+meta {
+  name: Get Run History
+  type: http
+  seq: 2
+}
+get {
+  url: {{baseUrl}}/api/issues/{{issueId}}/runs
+  body: none
+  auth: inherit
+}
+tests {
+  test("History retains scoped run metadata and execution state", function () {
+    expect(res.getStatus()).to.equal(200);
+    expect(res.getBody()).to.be.an("array");
+    for (const run of res.getBody()) {
+      expect(run).to.have.property("runId");
+      expect(run).to.have.property("execution");
+      expect(run).not.to.have.property("contextSnapshot");
+      expect(run).not.to.have.property("commentContext");
+    }
+  });
+}
+docs {
+  Uses the existing API contract. Full saved context remains in storage; the
+  response contains display metadata and current execution projections only.
+  Run against both a long history and a task with a scheduled retry or hold.
+}

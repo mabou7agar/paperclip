@@ -32,6 +32,7 @@ import { buildExecutionContinuation } from "./execution-continuation.js";
 import { verifiedWorkspaceRepairReceipt } from "./workspace-recovery-receipt.js";
 import { heartbeatService, persistHeartbeatRunProcessMetadata, type HeartbeatEnvironmentRuntime } from "./heartbeat.js";
 import { getExecutionBlocker } from "./execution-blocker.js";
+import { legacyExecutionNeedsReconciliationWithEvidence } from "./legacy-execution-recovery.js";
 import { createDurableChatWakeupRequest } from "./durable-chat-wakeup.js";
 import { recordNativeFinalizationFailure } from "./native-runtime/native-run-finalizer.js";
 const externalUrl = resolveExternalTestDatabaseUrl("PAPERCLIP_CONTINUATION_TEST_DATABASE_URL");
@@ -94,6 +95,32 @@ const support = externalUrl ? { supported: true } : await getEmbeddedPostgresTes
       onBlocked: reason => blocked.push(reason) });
     return { result, blocked, reads };
   }
+  it.each([
+    { shape: "refused by the cleanup quarantine before launch", errorCode: "native_session_cleanup_quarantined", launched: false,
+      comment: "local_cleanup", retry: "cleanup_quarantined" },
+    { shape: "quarantined after it requested a launch", errorCode: "native_session_cleanup_quarantined", launched: true,
+      comment: "process_identity_missing", retry: "process_identity_missing" },
+    { shape: "failed for another reason without a process record", errorCode: "adapter_failed", launched: false,
+      comment: "process_identity_missing", retry: "process_identity_missing" },
+  ])("routes input after a run $shape to the gate that can clear it", async ({ errorCode, launched, comment, retry }) => {
+    // s7532/t04: a Retry's run failed at the quarantine fence before it asked
+    // for a runner. Input then waited for a stop record of a process that
+    // never existed ("process_identity_missing", Retry still offered) instead
+    // of the quarantine's own gate, which names the action that clears it.
+    const f = await seed();
+    await db.update(heartbeatRuns).set({ processPid: null, errorCode }).where(eq(heartbeatRuns.id, f.sourceRunId));
+    if (launched) await db.insert(heartbeatRunEvents).values({ companyId: f.companyId, runId: f.sourceRunId, agentId: f.agentId,
+      seq: 1, eventType: "native.process_start_requested", stream: "system", level: "info", message: "launch requested",
+      payload: { hostname: "another-host" } });
+    const { result, blocked } = await readAdmission(f, false);
+    expect(result).toBeNull();
+    expect(blocked).toEqual([comment]);
+    const retryBlocked: string[] = [];
+    expect(await admitExplicitNativeContinuation({ ...f, db, dryRun: true, reason: "retry_failed_run",
+      failedRunId: f.sourceRunId, onBlocked: reason => retryBlocked.push(reason) })).toBeNull();
+    expect(retryBlocked).toEqual([retry]);
+  });
+
   it("keeps admission and the complete locked session profile while omitting prompt data", async () => {
     const f = await seed();
     const payload = randomBytes(128 * 1024).toString("base64");
@@ -893,6 +920,41 @@ const support = externalUrl ? { supported: true } : await getEmbeddedPostgresTes
     await expect(dispatchExplicitRetry(f, scheduled.run)).rejects.toThrow("continuation_user_authorization_missing");
   });
 
+  it.each(["verified", "edited_comment", "provider_launch", "unknown_renewal", "unrelated_cancel"])(
+    "renews an explicit user quota wait exactly once with %s evidence", async mode => {
+      const f = await seedTimedOutExplicitTurn(), renewal = new Date(f.now.getTime() + 60_000);
+      const [parent] = await db.update(heartbeatRuns).set({ status: "cancelled", errorCode: mode === "unrelated_cancel" ? "cancelled" : "phase_quota_cooldown",
+        processPid: null, processGroupId: null, processStartedAt: null, nativeIssueId: null, nativeSessionId: null, sessionIdAfter: null,
+        resultJson: { ...(mode === "unknown_renewal" ? {} : { retryAt: renewal.toISOString() }),
+          executionRecovery: { kind: "ai_connection_wait", providerWorkStarted: false },
+          cancellation: { source: "control_plane", expected: true, initiator: { type: "system" }, reason: "Quota wait", recordedAt: f.now.toISOString() } },
+      }).where(eq(heartbeatRuns.id, f.parent.id)).returning();
+      if (mode === "edited_comment") await db.update(issueComments).set({ body: "Changed instruction" }).where(eq(issueComments.id, f.commentId));
+      if (mode === "provider_launch") await appendHeartbeatRunEvent(db, { companyId: f.companyId, runId: parent.id, agentId: f.agentId,
+        eventType: PROCESS_START_REQUESTED });
+      const hb = heartbeatService(db), opts = { now: f.now, retryReason: "ai_connection_pool_wait", wakeReason: "phase_quota_reset", maxAttempts: 1, delayMs: 60_000 };
+      const [first, second] = await Promise.all([hb.scheduleBoundedRetry(parent.id, opts), hb.scheduleBoundedRetry(parent.id, opts)]);
+      if (mode !== "verified") {
+        expect(first.outcome).not.toBe("scheduled");
+        expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, parent.id))).toHaveLength(0);
+        return;
+      }
+      expect(first.outcome).toBe("scheduled");
+      if (first.outcome !== "scheduled") return;
+      expect(second).toMatchObject({ outcome: "scheduled", run: { id: first.run.id } });
+      expect(first.run.scheduledRetryAt).toEqual(renewal);
+      expect(first.run.contextSnapshot?.explicitUserContinuation).toEqual({ previousRunId: parent.id, commentId: f.commentId });
+      await expect(dispatchExplicitRetry(f, first.run)).resolves.toMatchObject({ interruptedRunId: parent.id });
+      expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, parent.id))).toHaveLength(1);
+      expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, f.issueId))).toHaveLength(2);
+      await db.update(heartbeatRuns).set({ status: "cancelled", finishedAt: f.now, errorCode: "phase_quota_cooldown", resultJson: parent.resultJson })
+        .where(eq(heartbeatRuns.id, first.run.id));
+      await db.update(issues).set({ executionRunId: first.run.id }).where(eq(issues.id, f.issueId));
+      expect(await hb.scheduleBoundedRetry(first.run.id, opts)).toMatchObject({ outcome: "retry_exhausted" });
+      expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.retryOfRunId, first.run.id))).toHaveLength(0);
+    },
+  );
+
   it("waits for the parent adapter controller even when no environment lease remains", async () => {
     const f = await seedTimedOutExplicitTurn();
     const heartbeat = heartbeatService(db);
@@ -1323,6 +1385,58 @@ const support = externalUrl ? { supported: true } : await getEmbeddedPostgresTes
     return f;
   }
 
+  async function seedCancelledQuotaWait() {
+    const f = await seedCancelledReviewWait(), predecessorId = randomUUID();
+    await db.insert(heartbeatRuns).values({ id: predecessorId, companyId: f.companyId, agentId: f.agentId,
+      status: "cancelled", errorCode: "phase_quota_cooldown", contextSnapshot: { issueId: f.issueId },
+      resultJson: { executionRecovery: { kind: "ai_connection_wait", providerWorkStarted: false } },
+    });
+    await db.update(heartbeatRuns).set({ errorCode: "cancelled", retryOfRunId: predecessorId,
+      scheduledRetryReason: "ai_connection_pool_wait", scheduledRetryAttempt: 1,
+      scheduledRetryAt: new Date("2026-09-11T12:00:00Z"),
+      resultJson: { cancellation: { source: "control_plane", expected: true,
+        initiator: { type: "system" }, reason: "Correct unverified quota deadline", recordedAt: "2026-09-11T09:59:59Z" },
+        startupCancellation: { requestedAt: "2026-09-11T09:59:59Z", beforeNativeSelection: false } },
+    }).where(eq(heartbeatRuns.id, f.sourceRunId));
+    return f;
+  }
+
+  it("admits a cancelled, never-eligible quota wait only once for new owner input", async () => {
+    const f = await seedCancelledQuotaWait();
+    const [source] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.sourceRunId));
+    expect(await legacyExecutionNeedsReconciliationWithEvidence(db, source)).toBe(false);
+    expect(await db.transaction(tx => admitExplicitNativeContinuation({ ...f, db: tx as unknown as typeof db, actorType: "system" }))).toBeNull();
+    expect(await admit(f)).toMatchObject({ previousRunId: f.sourceRunId, commentId: f.commentId });
+    expect(await admit(f)).toBeNull();
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.sourceRunId)))[0]).toMatchObject({
+      status: "cancelled", resultJson: source.resultJson,
+    });
+  });
+
+  it.each(["launch", "provider", "cleanup", "late_cancel", "missing_parent", "process"])(
+    "retains a cancelled quota wait with contradictory %s evidence", async kind => {
+      const f = await seedCancelledQuotaWait();
+      if (kind === "launch" || kind === "provider") await appendHeartbeatRunEvent(db, {
+        companyId: f.companyId, agentId: f.agentId, runId: f.sourceRunId,
+        eventType: kind === "launch" ? PROCESS_START_REQUESTED : "provider.event",
+      });
+      if (kind === "cleanup") await db.insert(environmentLeases).values({ companyId: f.companyId,
+        heartbeatRunId: f.sourceRunId, provider: "local", status: "pending_cleanup" });
+      if (kind === "late_cancel") await db.update(heartbeatRuns).set({ scheduledRetryAt: new Date("2026-09-11T09:00:00Z") }).where(eq(heartbeatRuns.id, f.sourceRunId));
+      if (kind === "missing_parent") await db.update(heartbeatRuns).set({ retryOfRunId: null }).where(eq(heartbeatRuns.id, f.sourceRunId));
+      if (kind === "process") await db.update(heartbeatRuns).set({ processPid: process.pid }).where(eq(heartbeatRuns.id, f.sourceRunId));
+      try {
+        const [source] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.sourceRunId));
+        expect(await legacyExecutionNeedsReconciliationWithEvidence(db, source)).toBe(true);
+        expect(await admit(f)).toBeNull();
+      } finally {
+        // The suite also tests a company-wide cleanup sweep. This conflicting
+        // fixture must not become work owned by a later test's fake provider.
+        if (kind === "cleanup") await db.delete(environmentLeases).where(eq(environmentLeases.heartbeatRunId, f.sourceRunId));
+      }
+    },
+  );
+
   async function seedCancelledWorkspaceWaitRetry() {
     const f = await seed(), parentRunId = randomUUID();
     await db.delete(nativeRunFinalizations).where(eq(nativeRunFinalizations.runId, f.sourceRunId));
@@ -1746,7 +1860,7 @@ const support = externalUrl ? { supported: true } : await getEmbeddedPostgresTes
     expect(await hasNativeLocalProcessStop(db, f.companyId, source.id)).toBe(true);
     expect(await hasNativeLocalProcessStop(db, randomUUID(), source.id)).toBe(false);
     expect(await admit(f, true)).toMatchObject({ previousRunId: source.id });
-    await persistHeartbeatRunProcessMetadata(db, source.id, { pid: 999999999, processGroupId: null, startedAt: new Date().toISOString() });
+    await persistHeartbeatRunProcessMetadata(db, source.id, { pid: 999999999, processGroupId: null, startedAt: new Date().toISOString(), targetKind: "local" });
     await db.update(heartbeatRuns).set({ processPid: null }).where(eq(heartbeatRuns.id, source.id));
     expect(await admit(f, true)).toBeNull();
     expect(await db.transaction(tx => recordNativeLocalProcessStop(tx as unknown as typeof db, source))).toBe(true);

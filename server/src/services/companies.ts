@@ -1,3 +1,5 @@
+import { notifyMuseContactVerification } from "../modules/external-agents/index.js";
+import { promoteDeferredWorkIntents } from "./work-intent-outbox.js";
 import { notifyDeferredExecutionEligibility } from "./deferred-execution-notifications.js";
 import { notifyRunDispatch } from "./run-dispatch-notifications.js";
 import { notifyStatusCardIssueChange } from "./status-card-notifications.js";
@@ -342,14 +344,17 @@ export function companyService(db: Db, _budgetHooks: BudgetServiceHooks = {}) {
         const renamedPrefix = await resolveRenamedIssuePrefix(tx, id, companyPatch);
 
         if (companyPatch.status !== undefined && companyPatch.status !== existing.status) {
+          if(willReactivate)await notifyMuseContactVerification(tx,{companyId:id});
           await notifyRunDispatch(tx, { companyId: id });
           await notifyGitHubCompanyChange(tx, id);
           await notifyDeferredExecutionEligibility(tx, { companyId: id });
+          if (companyPatch.status === "active") await promoteDeferredWorkIntents(tx, { companyId: id, trigger: "pause_lifted" });
           await notifyDeliveryWork(tx, DELIVERY_QUEUES.agentTimers);
           await notifyDeliveryWork(tx, DELIVERY_QUEUES.skillSourceSync);
           await notifyExternalObjectRefresh(tx, id);
           await notifyDeliveryWork(tx, DELIVERY_QUEUES.routineSchedules);
           await notifyDeliveryWork(tx, DELIVERY_QUEUES.issueMonitors);
+          await notifyDeliveryWork(tx, DELIVERY_QUEUES.providerApiQuotaHealth, id);
           await notifyStatusCardIssueChange(tx, id);
           await notifyCompanyRetentionWork(tx, id);
           await notifyChatInboundWakeNotices(tx, { companyId: id });

@@ -1,3 +1,5 @@
+import { completionReceiptHttpMutationAllowed } from "../services/task-completion-receipts.js";
+import { notifyMuseContactVerification } from "../modules/external-agents/index.js";
 import { idleApiActivity } from "../services/idle-api-activity.js";
 import { createHash, timingSafeEqual } from "node:crypto";
 import type { Request, RequestHandler } from "express";
@@ -408,6 +410,10 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
           code: conversation ? "conversation_turn_cancelled" : "agent_run_cancelled" });
         return;
       }
+      if (!completionReceiptHttpMutationAllowed(identityRun?.contextSnapshot ?? {}, req.method, req.path, req.body)) {
+        _res.status(403).json({ error: "This completion receipt allows one acknowledgement on its original task; execution and other mutations are unavailable", code: "completion_receipt_write_denied" });
+        return;
+      }
       if (identityRun?.activeIdentityContextId && identityRun.status === "running") {
         const captured = await captureRunIdentity(db, { companyId: claims.company_id, agentId: claims.sub, runId: claims.run_id },
           { readScope: "request_authentication" });
@@ -511,6 +517,14 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
       return;
     }
 
+    if (runIdHeader && isUuidLike(runIdHeader) && !["GET", "HEAD", "OPTIONS"].includes(req.method)) {
+      const [keyRun] = await db.select({ contextSnapshot: heartbeatRuns.contextSnapshot }).from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.id, runIdHeader), eq(heartbeatRuns.companyId, key.companyId), eq(heartbeatRuns.agentId, key.agentId)));
+      if (!completionReceiptHttpMutationAllowed(keyRun?.contextSnapshot ?? {}, req.method, req.path, req.body)) {
+        _res.status(403).json({ error: "This completion receipt allows one acknowledgement on its original task", code: "completion_receipt_write_denied" });
+        return;
+      }
+    }
     req.actor = {
       type: "agent",
       agentId: key.agentId,
@@ -672,6 +686,7 @@ async function resolveCloudTenantActorOnce(
       // guarded upsert that leaves unchanged memberships untouched.
       if (!existing || existing.status !== "active" || existing.membershipRole === "viewer") {
         await notifyChatCompanyAuthorityChange(tx, { companyId });
+        await notifyMuseContactVerification(tx, { companyId, operatorId: userId });
       }
       return tx
         .insert(companyMemberships)

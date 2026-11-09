@@ -1,17 +1,43 @@
-import { and, eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, or, sql } from "drizzle-orm";
 import { createHash } from "node:crypto";
 import type { Db } from "@paperclipai/db";
-import { agentWakeupRequests } from "@paperclipai/db";
+import { agentWakeupRequests, issueRecoveryActions } from "@paperclipai/db";
 
 export const ISSUE_BLOCKERS_RESOLVED_WAKE_REASON = "issue_blockers_resolved";
 
-export const issueBlockersResolvedWakePayloadSql =
-  sql`${agentWakeupRequests.payload}#>>'{_paperclipWakeContext,wakeReason}' = ${ISSUE_BLOCKERS_RESOLVED_WAKE_REASON}`;
+/** Resolved task blockers do not clear an exhausted or board-escalated repair. */
+export async function findIssueDependencyRecoveryHold(
+  db: Pick<Db, "select">,
+  companyId: string,
+  issueId: string,
+) {
+  const [hold] = await db.select({ id: issueRecoveryActions.id })
+    .from(issueRecoveryActions)
+    .where(and(
+      eq(issueRecoveryActions.companyId, companyId),
+      eq(issueRecoveryActions.sourceIssueId, issueId),
+      or(
+        eq(issueRecoveryActions.kind, "deliberate_wait_without_target"),
+        sql`${issueRecoveryActions.wakePolicy}->>'type' = 'board_escalation'`,
+      ),
+      eq(issueRecoveryActions.ownerType, "board"),
+      inArray(issueRecoveryActions.status, ["active", "escalated"]),
+    )).limit(1);
+  return hold ?? null;
+}
 
-export function isIssueBlockersResolvedWakePayload(payload: Record<string, unknown> | null | undefined): boolean {
+export const ISSUE_CHILDREN_COMPLETED_WAKE_REASON = "issue_children_completed";
+
+const DEPENDENCY_RESOLVED_WAKE_REASONS = [ISSUE_BLOCKERS_RESOLVED_WAKE_REASON, ISSUE_CHILDREN_COMPLETED_WAKE_REASON];
+
+export const dependencyResolvedWakePayloadSql =
+  sql`${agentWakeupRequests.payload}#>>'{_paperclipWakeContext,wakeReason}' in (${sql.join(
+    DEPENDENCY_RESOLVED_WAKE_REASONS.map(reason => sql`${reason}`), sql`, `)})`;
+
+export function isDependencyResolvedWakePayload(payload: Record<string, unknown> | null | undefined): boolean {
   const context = payload?._paperclipWakeContext;
   return context !== null && typeof context === "object" && !Array.isArray(context)
-    && (context as Record<string, unknown>).wakeReason === ISSUE_BLOCKERS_RESOLVED_WAKE_REASON;
+    && DEPENDENCY_RESOLVED_WAKE_REASONS.includes(String((context as Record<string, unknown>).wakeReason));
 }
 
 /**

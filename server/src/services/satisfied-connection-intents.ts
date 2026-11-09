@@ -96,12 +96,15 @@ export async function findSatisfiedToolConnection(db: Db, task: Task, intent: In
 
 /** Recheck both live requests and system-retired cards against the next run. */
 export async function connectionContinuationPendingResponse(db: Db, task: Task, responsibleUserId: string | null,
-  policyRunId?: string | null): Promise<"interaction" | "approval" | null> {
+  policyRunId?: string | null, answeredInteractionId?: string | null): Promise<"interaction" | "approval" | null> {
   const interactions = await db.select().from(issueThreadInteractions).where(and(
     eq(issueThreadInteractions.companyId, task.companyId), eq(issueThreadInteractions.issueId, task.id),
     or(eq(issueThreadInteractions.status, "pending"), and(eq(issueThreadInteractions.kind, "connection_intent"), eq(issueThreadInteractions.status, "expired"))),
   ));
   for (const interaction of interactions) {
+    // Only dispatch of a currently verified addressee supplies this ID. Other
+    // pending cards and approvals still block conversation continuations.
+    if (interaction.id === answeredInteractionId) continue;
     const retired = interaction.status === "expired" && interaction.result?.outcome === "expired"
       && "connectionId" in interaction.result && typeof interaction.result.connectionId === "string";
     if (interaction.status !== "pending" && !retired) continue;

@@ -1,3 +1,5 @@
+import { taskCompletionReceiptState } from "../../../services/task-completion-receipts.js";
+import { addressedInteractionWakeState } from "../../../services/addressed-interaction-wake.js";
 import { notifyExecutionRunWork } from "../../../services/execution-control-notifications.js";
 import { notifyDeferredExecutionWork } from "../../../services/deferred-execution-notifications.js";
 import { hasRequiredWorkspaceRecovery } from "../../../services/workspace-restore-recovery-state.js";
@@ -41,6 +43,7 @@ import { evaluateAgentInvokabilityFromDb } from "../../../services/agent-invokab
 import { budgetService, budgetServiceInTransaction, recheckAdmittedRunBudgetReadOnly } from "../../../services/budgets.js";
 import { lockRunBudgetRecoveryOwnerInTransaction, recheckRunBudgetReservationInTransaction } from "../../../services/budget-reservations.js";
 import { isCompletedOnboardingHandoffWake } from "../../../services/chat-completion-delivery.js";
+import { isUnstartedTaskQuestionAnswer } from "../../../services/unstarted-task-question-answer.js";
 import { isHeartbeatWakeOnDemandEnabled } from "../../../services/heartbeat-policy.js";
 import { notifyChatRunMilestones } from "../../../services/chat-run-milestone-notifications.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "../../../services/delivery-work-notifications.js";
@@ -50,6 +53,7 @@ import { legacyDispositionEpisode, legacyDispositionFingerprint } from "../../..
 import { appendHeartbeatRunEvent } from "../../../services/heartbeat-run-events.js";
 import { emitAgentTaskRun } from "../../../services/agent-task-run-telemetry.js";
 import { issueService } from "../../../services/issues.js";
+import { verifyBlockerStallWake } from "../../../services/recovery/blocker-stall-wakeups.js";
 import {
   issueTreeControlService,
   isVerifiedIssueTreeControlInteractionWake,
@@ -415,11 +419,16 @@ export function createPostgresRunDispatchAdapter(
 
     facts.issueStatus = issue.status;
     facts.issueAssigneeAgentId = issue.assigneeAgentId;
+    facts.addressedInteractionWake = await addressedInteractionWakeState(dbOrTx as Db, {
+      companyId: input.companyId, issueId, agentId: input.agentId, contextSnapshot: input.contextSnapshot,
+    });
+    facts.completionReceiptWake = await taskCompletionReceiptState(dbOrTx as Db, { companyId: input.companyId, issueId, agentId: input.agentId, contextSnapshot: input.contextSnapshot, runId: input.runId });
     facts.issueExecutionRunId = issue.executionRunId;
     facts.issueCheckoutRunId = issue.checkoutRunId;
     if (input.conversationContinuation || retryReason === "interrupted_preparation") {
       facts.pendingResponse = await connectionContinuationPendingResponse(dbOrTx as unknown as Db,
-        issue, input.responsibleUserId, input.runId);
+        issue, input.responsibleUserId, input.runId,
+        facts.addressedInteractionWake === "pending" ? readNonEmptyString(input.contextSnapshot.interactionId) : null);
     }
     facts.reviewParticipant = await readNativeReviewParticipantFacts(dbOrTx, {
       companyId: input.companyId, issueId, agentId: input.agentId,
@@ -478,8 +487,16 @@ export function createPostgresRunDispatchAdapter(
 
     const dependencyReadiness = await issuesSvcForRead.listDependencyReadiness(input.companyId, [issueId]);
     const readiness = dependencyReadiness.get(issueId);
+    // A verified stall wake runs while its stalled dependency is unresolved,
+    // including after a resource wait replaced it with a scheduled retry.
+    const stallAdmitted = readiness && !readiness.isDependencyReady && input.contextSnapshot.blockerStall
+      ? await verifyBlockerStallWake(db, { companyId: input.companyId, issueId, contextSnapshot: input.contextSnapshot,
+          requestedByActorType: input.wakeupRequestId ? await db.select({ actor: agentWakeupRequests.requestedByActorType })
+            .from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, input.companyId),
+              eq(agentWakeupRequests.id, input.wakeupRequestId))).then(rows => rows[0]?.actor ?? null) : null })
+      : false;
     facts.dependenciesBlocked =
-      readiness && !readiness.isDependencyReady
+      readiness && !readiness.isDependencyReady && !stallAdmitted
         ? {
             unresolvedBlockerIssueIds: readiness.unresolvedBlockerIssueIds,
             unresolvedBlockerCount: readiness.unresolvedBlockerCount,
@@ -642,12 +659,19 @@ export function createPostgresRunDispatchAdapter(
             .then((rows) => Boolean(rows[0]))
         : false;
 
+    const addressedInteractionWake = issue ? await addressedInteractionWakeState(dbOrTx as Db, {
+      companyId: input.companyId, issueId, agentId: input.agentId, contextSnapshot: context,
+    }) : null;
     const retryReasonKind = classifyRetryReasonKind(retryReason);
     // Dependency edges can change after scheduled promotion without changing
     // the displayed status. Read them again under the queued/final issue lock.
-    const readiness = issue && retryReasonKind === "native_safe_replacement"
+    const replacementReadiness = issue && retryReasonKind === "native_safe_replacement"
       ? (await issueService(dbOrTx).listDependencyReadiness(input.companyId, [issueId])).get(issueId)
       : null;
+    const readiness = replacementReadiness && !replacementReadiness.isDependencyReady && context.blockerStall
+      && await verifyBlockerStallWake(dbOrTx as unknown as Db, { companyId: input.companyId, issueId,
+        contextSnapshot: context, requestedByActorType: null })
+      ? null : replacementReadiness;
     return {
       runId: input.runId,
       runAgentId: input.agentId,
@@ -658,14 +682,19 @@ export function createPostgresRunDispatchAdapter(
         unresolvedBlockerCount: readiness.unresolvedBlockerCount,
       } : null,
       pendingResponse: issue && (input.conversationContinuation || retryReason === "interrupted_preparation" || context.connectionIntentResolution === "existing_connection")
-        ? await connectionContinuationPendingResponse(dbOrTx as unknown as Db, issue, input.responsibleUserId, input.runId)
+        ? await connectionContinuationPendingResponse(dbOrTx as unknown as Db, issue, input.responsibleUserId, input.runId,
+            addressedInteractionWake === "pending" ? readNonEmptyString(context.interactionId) : null)
         : null,
       issueFound: issue !== null,
       issueStatus: issue?.status ?? null,
       issueAssigneeAgentId: issue?.assigneeAgentId ?? null,
       issueExecutionRunId: issue?.executionRunId ?? null,
       issueCheckoutRunId: issue?.checkoutRunId ?? null,
+      addressedInteractionWake,
+      completionReceiptWake: issue ? await taskCompletionReceiptState(dbOrTx as Db, { companyId: input.companyId, issueId, agentId: input.agentId, contextSnapshot: context, runId: input.runId }) : null,
       isResolvedInteractionContinuation,
+      isUnstartedTaskQuestionAnswer: Boolean(isResolvedInteractionContinuation && issue?.status === "todo" &&
+        await isUnstartedTaskQuestionAnswer(dbOrTx, { companyId: input.companyId, issueId, interactionId: context.interactionId })),
       isConnectionContinuation: (isResolvedInteractionContinuation && context.interactionKind === "connection_intent")
         || context.source === "connection_tools.refreshed",
       isInteractionWake,
@@ -1332,14 +1361,15 @@ export function createPostgresRunDispatchAdapter(
       if (run.status !== input.expectedStatus) return { outcome: "lost_race" as const };
       const { issueId, facts, decision, executionBlocker } = await decideCurrentRunStaleness(tx, run, input.now, publications);
       if (!decision.stale || !issueId) {
-        if (input.expectedStatus === "queued" && facts?.isInteractionWake) {
+        if (input.expectedStatus === "queued" && (facts?.isInteractionWake || facts?.addressedInteractionWake === "pending" || facts?.completionReceiptWake === "pending")) {
           // Preserve the authority accepted under the issue/run locks. Later
           // preflight reads can observe a reassignment; they must not turn an
           // assignee comment into a non-assignee subscription-wait exception.
           await tx.update(heartbeatRuns).set({
             runnerProfileJson: {
               ...parseObject(run.runnerProfileJson),
-              aiConnectionNonAssigneeCommentWake: facts.issueAssigneeAgentId !== run.agentId,
+              aiConnectionNonAssigneeCommentWake: facts.isInteractionWake && facts.issueAssigneeAgentId !== run.agentId,
+              aiConnectionNonAssigneeInteractionWake: (facts.addressedInteractionWake === "pending" || facts.completionReceiptWake === "pending") && facts.issueAssigneeAgentId !== run.agentId,
             },
           }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId)));
         }
@@ -1373,7 +1403,7 @@ export function createPostgresRunDispatchAdapter(
         return { dispatched: false as const, cancellation: { outcome: "lost_race" as const } };
       }
       if (!stopRecovery && input.enforceContinuationOwnership !== false) {
-        const { issueId, decision: initialDecision } = await decideCurrentRunStaleness(
+        const { issueId, facts, decision: initialDecision } = await decideCurrentRunStaleness(
           tx,
           run,
           input.now,
@@ -1387,7 +1417,10 @@ export function createPostgresRunDispatchAdapter(
                 .where(and(eq(issues.id, issueId), eq(issues.companyId, run.companyId)))
                 .then((rows) => rows[0] ?? null)
                 .then((issue) =>
-                  issue?.executionRunId === run.id
+                  issue?.executionRunId === run.id ||
+                    // Verified attention receipts do not take worker ownership.
+                    // An unrelated executor must still finish before dispatch.
+                    ((facts?.addressedInteractionWake === "pending" || facts?.completionReceiptWake === "pending") && issue?.executionRunId === null)
                     ? initialDecision
                     : {
                         stale: true as const,
@@ -1491,7 +1524,9 @@ export function createPostgresRunDispatchAdapter(
             conversationContinuation: run.runtimeMode === "legacy" && hasConversationContinuationPolicy(run.resultJson),
             issueId, contextSnapshot, scheduledRetryReason: run.scheduledRetryReason }, input.now, tx);
           const semantic = decideQueuedRunStaleness(facts, input.now);
-          const decision = semantic.stale || facts.issueExecutionRunId === run.id ? semantic : {
+          const ownsDispatch = facts.issueExecutionRunId === run.id ||
+            ((facts.addressedInteractionWake === "pending" || facts.completionReceiptWake === "pending") && facts.issueExecutionRunId === null);
+          const decision = semantic.stale || ownsDispatch ? semantic : {
             stale: true as const, errorCode: "issue_execution_lock_changed" as const,
             reason: "Cancelled because continuation no longer owns the issue execution lock before adapter dispatch",
             details: { issueId, expectedExecutionRunId: run.id, currentExecutionRunId: facts.issueExecutionRunId },

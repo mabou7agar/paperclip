@@ -1,5 +1,5 @@
 import { isRetainedWorkspaceWorkerStopProof } from "./native-runtime/native-workspace-platform-proof.js";
-import { isPreDispatchReviewWait } from "./pre-dispatch-review-wait.js";
+import { isPreDispatchReviewWait, isCancelledQuotaWaitBeforeDispatchVerified } from "./pre-dispatch-review-wait.js";
 import { createHash } from "node:crypto";
 import { and, eq, gt, inArray, isNotNull, isNull, lte, or, sql } from "drizzle-orm";
 import { environmentLeases, heartbeatRunEvents, heartbeatRuns, issueTreeHolds, issueTreeHoldMembers, nativeRunFinalizations, nativeRunResults, type Db } from "@paperclipai/db";
@@ -261,7 +261,14 @@ export async function isCancelledNativeStartup(db: Db, run: Run, coordinator: Co
     (run.resultJson === null || cancellation?.beforeNativeSelection === true) &&
     Boolean(run.controllerBootId && run.controllerBootId !== legacyControllerBootId &&
       run.controllerLeaseExpiresAt && run.controllerLeaseExpiresAt <= new Date());
-  const beforeReviewDispatch = isPreDispatchReviewWait(run) && !coordinator;
+  // Quota cancellation verification needs the persisted retry lineage, which
+  // startup's bounded projection intentionally does not carry.
+  const [quotaWait] = !coordinator && run.errorCode === "cancelled"
+    ? await db.select().from(heartbeatRuns).where(and(
+      eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.id, run.id),
+    )).limit(1) : [];
+  const beforeReviewDispatch = !coordinator && (isPreDispatchReviewWait(run) ||
+    Boolean(quotaWait && await isCancelledQuotaWaitBeforeDispatchVerified(db, quotaWait)));
   const unclaimedWorkspaceRetry = !coordinator && await isCancelledUnclaimedWorkspaceWaitRetry(db, run);
   const beforeSelection = beforeReviewDispatch || unclaimedWorkspaceRetry || historicalBeforeSelection || run.runtimeMode === "legacy" && !run.runtimeModeResolvedAt &&
     !run.nativeSessionId && !coordinator && claimedAdapterType(run) === "paperclip_runner" &&

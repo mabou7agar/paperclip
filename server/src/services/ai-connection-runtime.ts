@@ -2,6 +2,8 @@ import { environmentTaskResultSchema } from "@paperclipai/plugin-sdk";
 import type { PluginTaskCredentialWritebackBinding } from "./plugin-task-credential-writeback.js";
 import { OPENROUTER_ATTRIBUTION_HEADERS, openRouterClaudeHeaders } from "@paperclipai/shared/openrouter-attribution";
 import { createHash } from "node:crypto";
+import { managedAiHomeEnvironment } from "@paperclipai/adapter-utils/managed-ai-session-fingerprint";
+export { managedAiSessionFingerprintConfig } from "@paperclipai/adapter-utils/managed-ai-session-fingerprint";
 import { HttpError, unprocessable } from "../errors.js";
 import { mkdtemp, mkdir, writeFile, readFile, realpath, rm } from "node:fs/promises";
 import os from "node:os";
@@ -15,6 +17,7 @@ import {
 } from "@paperclipai/shared";
 import { managedProviderRouting } from "./ai-provider-routing.js";
 import { aiConnectionService } from "./ai-connections.js";
+import { connectionUsageCapsService } from "./connection-usage-caps.js";
 import { subscriptionService } from "./subscriptions.js";
 import { refreshSubscriptionConnection } from "./subscription-refresh.js";
 import { secretService } from "./secrets.js";
@@ -206,40 +209,6 @@ done`,
   }
 }
 
-function managedAiHomeEnvironment(home: string): Record<string, string> {
-  const providerHome = path.join(home, "provider");
-  return {
-    HOME: home,
-    XDG_CONFIG_HOME: path.join(home, "config"),
-    XDG_DATA_HOME: path.join(home, "data"),
-    CODEX_HOME: providerHome,
-    GROK_HOME: providerHome,
-    CLAUDE_CONFIG_DIR: providerHome,
-    HERMES_HOME: providerHome,
-  };
-}
-
-/** Only the server-created credential home is volatile; retain all other config. */
-export function managedAiSessionFingerprintConfig(
-  config: Record<string, unknown>,
-  managedHome: string | undefined,
-): Record<string, unknown> {
-  if (!managedHome) return config;
-  const env = { ...(config.env as Record<string, unknown> | undefined) };
-  const stable = managedAiHomeEnvironment("<managed-ai-home>");
-  for (const [key, value] of Object.entries(managedAiHomeEnvironment(managedHome))) {
-    if (env[key] === value) env[key] = stable[key];
-  }
-  if (env.GEMINI_HOME === path.join(managedHome, "provider")) env.GEMINI_HOME = path.join("<managed-ai-home>", "provider");
-  const managed = config.managedAiConnection as Record<string, unknown> | undefined;
-  if (managed?.sessionIdentity) {
-    for (const key of ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "OPENAI_API_KEY", "CODEX_API_KEY", "OPENROUTER_API_KEY", "XAI_API_KEY", "GROK_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY", "OPENCODE_AUTH_JSON", "OPENCODE_CONFIG_CONTENT"]) {
-      if (env[key]) env[key] = "<managed-ai-credential>";
-    }
-  }
-  return { ...config, env, ...(managed?.sessionIdentity ? { managedAiConnection: { ...managed, identity: managed.sessionIdentity } } : {}) };
-}
-
 export async function prepareManagedAiRuntime(
   db: Db,
   input: {
@@ -251,6 +220,7 @@ export async function prepareManagedAiRuntime(
     allowUninstalledPersonal?: boolean;
     allowUninstalledShared?: boolean;
     allowLegacyValidation?: boolean;
+    enforceUsageCaps?: boolean;
     config: Record<string, unknown>;
   },
 ) {
@@ -284,6 +254,7 @@ export async function prepareManagedAiRuntime(
     runnerProvider: input.config.provider,
     acpxAgent: input.config.acpxAgent,
   });
+  if (input.enforceUsageCaps) await connectionUsageCapsService(db).assertAvailable(input.companyId,selection.connection.id);
   const retainedCleanupScope = { companyId: input.companyId, accountKey: selection.grant.id };
   void reconcileRetainedAiCleanup(retainedCleanupScope).catch(() => undefined);
   const subscriptionFile =

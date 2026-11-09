@@ -27,6 +27,7 @@ import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
+import { monitoringService } from "../services/monitoring.js";
 import { heartbeatService } from "../services/heartbeat.ts";
 import { normalizeIssueExecutionPolicy, parseIssueExecutionState } from "../services/issue-execution-policy.ts";
 import { PaperclipRunnerToolAuthority } from "../services/native-runtime/paperclip-runner-tool-authority.js";
@@ -307,6 +308,40 @@ describeEmbeddedPostgres("issue monitor scheduler", () => {
     expect(activity).toContain("issue.monitor_triggered");
   });
 
+  it("resumes an explicit bounded task continuation once under alert-only monitoring", async () => {
+    const { companyId, issueId } = await seedFixture({ monitorAttemptCount: 1, monitor: {
+      kind: "task_continuation", serviceName: "Owned validation result", externalRef: "job-candidate-stage",
+      timeoutAt: "2026-04-11T13:00:00.000Z", maxAttempts: 2,
+    } });
+    await monitoringService(db).savePolicy(companyId, { mode: "alert_only" }, "owner");
+    const heartbeat = heartbeatService(db);
+    expect((await heartbeat.tickTimers(new Date("2026-04-11T12:31:00.000Z"))).enqueued).toBe(1);
+    await heartbeat.drainActiveRunExecutions();
+    for (let i = 0; i < 3; i++) await heartbeat.tickTimers(new Date("2026-04-11T12:32:00.000Z"));
+    const wakes = (await db.select().from(agentWakeupRequests)).filter(wake => wake.reason === "issue_monitor_due");
+    expect(wakes).toHaveLength(1);
+    const [task] = await db.select().from(issues).where(eq(issues.id, issueId));
+    expect(task.monitorAttemptCount).toBe(2);
+    expect(task.monitorNextCheckAt).toBeNull();
+    expect(parseIssueExecutionState(task.executionState)?.monitor).toMatchObject({ kind: "task_continuation", status: "triggered" });
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, wakes[0].runId!));
+    expect(run.startedAt).not.toBeNull();
+    expect(run.status).not.toBe("cancelled");
+    const alerts = await monitoringService(db).alerts(companyId);
+    expect(alerts.filter(alert => JSON.stringify(alert.details).includes("issue_monitor_due") || alert.details?.kind === "monitor_due")).toHaveLength(0);
+  });
+
+  it.each(["ordinary", "unbounded"])("keeps %s monitor checks alert-only", async (kind) => {
+    const { companyId, issueId } = await seedFixture({ monitor: kind === "unbounded"
+      ? { kind: "task_continuation", serviceName: "Unbounded", externalRef: "job" } : {} });
+    await monitoringService(db).savePolicy(companyId, { mode: "alert_only" }, "owner");
+    const heartbeat = heartbeatService(db);
+    for (let i = 0; i < 3; i++) expect((await heartbeat.tickTimers(new Date("2026-04-11T12:31:00.000Z"))).enqueued).toBe(0);
+    expect(await db.select().from(agentWakeupRequests)).toHaveLength(0);
+    expect(await monitoringService(db).alerts(companyId)).toHaveLength(1);
+    expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0].monitorAttemptCount).toBe(0);
+  });
+
   it("preserves a due monitor through native execution and dispatches once after release", async () => {
     const { companyId, issueId, agentId, nextCheckAt } = await seedFixture();
     const runId = randomUUID();
@@ -500,6 +535,7 @@ describeEmbeddedPostgres("issue monitor scheduler", () => {
       issueStatus: "in_review",
       monitor: { serviceName: PROVIDER_QUOTA_MONITOR_SERVICE_NAME, externalRef: sourceRunId },
     });
+    await monitoringService(db).savePolicy(companyId, { mode: "alert_only" }, "owner");
     const participantAgentId = randomUUID();
     await db.insert(agents).values({
       id: participantAgentId,

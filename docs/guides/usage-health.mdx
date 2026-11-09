@@ -1,0 +1,77 @@
+---
+title: Usage health
+description: Inspect recorded token usage and receive report-only alerts.
+---
+
+Open **Activity → Costs → Usage health** to inspect recorded usage by agent,
+model and task for the selected date range. This screen makes no model requests.
+
+Input includes provider-reported cache writes. Cache writes are shown as a
+subset of input and are never added to the total again. Cache reads are separate;
+large warm-cache totals alone do not prove waste. Historical cache-write splits
+are recovered from saved run results where available. Unknown splits stay unknown.
+
+The report includes agent runs plus decision and fast-response cost events.
+Agent cost events with a matching run are excluded to avoid double counting.
+Standalone agent cost records are included.
+Cumulative usage checkpoints are not summed. Coverage distinguishes missing
+terminal receipts, pending runs and measured usage. The request-ID coverage
+indicator describes the available provider evidence: run totals cannot establish
+every HTTP request or a subscription's proprietary quota units. Manual provider
+calls outside Paperclip are outside this ledger.
+
+Company managers can enable in-app alerts and adjust input/output, task runs per
+hour, and cache-write thresholds. Agent overrides inherit unspecified company
+thresholds; choose **Inherit company defaults** to remove an override. Alerts are
+disabled until explicitly enabled. Reporting remains available when alerts are off.
+
+Alerts cover unusually large input/output, repeated task runs, high cache-write
+share in a reused session, missing usage and API/subscription billing mismatches.
+They are deterministic and deduplicated per observation and rule. Accounting
+retries cannot create additional provider turns. The monitor only reports and
+alerts; it never pauses work or changes model routing or existing budget gates.
+Gateway cost estimates are not evidence of the gateway's actual invoice.
+
+## API
+
+Use board authentication and the company's existing access permissions.
+
+- `GET /api/v1/companies/:companyId/usage-health?from=2026-11-01&to=2026-11-08`
+  returns totals, groups, flags, recent alerts and the effective policy. ISO
+  datetimes are also accepted. Responses use `Cache-Control: no-store`.
+- `PUT /api/v1/companies/:companyId/usage-health/policy` replaces the policy.
+  It requires company connection-management authority. Viewers cannot save.
+
+```json
+{
+  "enabled": true,
+  "thresholds": {
+    "inputTokensPerRun": 250000,
+    "outputTokensPerRun": 30000,
+    "runsPerTaskHour": 8,
+    "cacheWriteShare": 0.5,
+    "minCacheWriteTokens": 50000
+  },
+  "agentOverrides": {}
+}
+```
+
+## Confirming restored quota
+
+After verifying that a specific account is restored, an authorized board operator
+can post a reason to
+`POST /api/v1/companies/:companyId/ai-connections/:connectionId/quota-restored`.
+This records an audit acknowledgement and excludes older quota failures for that
+connection from cooldown decisions. Provider receipts remain unchanged. Other
+accounts, including subscriptions, retain their cooldowns. Later quota failures
+apply normally. This operation neither starts a task nor replenishes automatic
+retry or renewal allowances. Use the existing task controls to resume once.
+
+A native session that raises `SessionResumeRequiredError` requires repair rather
+than repeated automatic retries. Paperclip retains its conversation state and
+reports `acpx_session_resume_required`; it does not silently start a new native
+conversation. A phase-routing-only configuration edit is compatible with an
+otherwise unchanged phase session. Model, credential and permission changes
+still require the existing compatibility checks.
+
+The Bruno examples are in `/bruno/Usage Health`.

@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { DatabaseSync } from "node:sqlite";
 import { summarizeStartupReuse } from "../startup-reuse.js";
 import os from "node:os";
 import path from "node:path";
@@ -50,6 +51,7 @@ import {
 import { sessionCodec } from "./session-codec.js";
 import { runChildProcess } from "../server-utils.js";
 import { createPromptContextFixture } from "../test-fixtures/prompt-context.js";
+import { managedAiHomeEnvironment } from "../managed-ai-session-fingerprint.js";
 import { setExpensiveWorkspaceGitExecutor } from "../git-workspace-sync.js";
 import { createWorkspaceRestoreTeardown } from "../workspace-restore-teardown.js";
 import { withWorkspaceRestoreDiagnostics, withWorkspaceRestoreStep } from "../workspace-restore-diagnostics.js";
@@ -185,6 +187,7 @@ async function runExecutor(
     executionTransport?: Record<string, unknown>;
     authToken?: string;
     agentIdentity?: AdapterExecutionContext["agentIdentity"];
+    sessionFingerprintEnv?: Record<string, string>;
     observability?: AdapterExecutionContext["observability"];
     executionTarget?: Record<string, unknown>;
     runtimeMcp?: AdapterRuntimeMcpAccess;
@@ -232,6 +235,7 @@ async function runExecutor(
       context: options.context ?? {},
       executionTransport: options.executionTransport,
       authToken: options.authToken,
+      sessionFingerprintEnv: options.sessionFingerprintEnv,
       agentIdentity: options.agentIdentity,
       observability: options.observability,
       executionTarget: options.executionTarget,
@@ -249,7 +253,7 @@ async function runExecutor(
     onUsage: async (receipt: unknown) => { receipts.push(receipt); },
   } as never);
 
-  expect(result.exitCode).toBe(0);
+  expect(result.exitCode, result.errorMessage ?? result.summary ?? undefined).toBe(0);
   return { logs, meta, events, receipts, runtimeOptions, configOptions, sessionInputs, turnInputs, result };
 }
 
@@ -682,6 +686,29 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(meta[0]?.commandNotes).toContain(
       "Requested ACPX model: gpt-5.6-sol (set via CODEX_CONFIG at startup).",
     );
+  });
+
+  it("keeps identity and scoped API access while forwarding explicitly configured service tokens to Codex shells", async () => {
+    const { meta } = await runExecutor({ agent: "codex", env: { MY_SERVICE_TOKEN: "assigned-tool-token", PAPERCLIP_GITHUB_BROKER_TOKEN: "scoped-broker-token", PAPERCLIP_GITHUB_BRIDGE_TOKEN: "scoped-bridge-token" } }, {
+      authToken: "assigned-run-token",
+      agentIdentity: { keyId: "sha256:test", publicKeyPem: "public", privateKeyPem: "private" },
+    });
+    const config = JSON.parse(String((meta[0]?.env as Record<string, string>).CODEX_CONFIG));
+    expect(config.shell_environment_policy.include_only).toEqual(expect.arrayContaining([
+      "PAPERCLIP_API_KEY", "PAPERCLIP_AGENT_PRIVATE_KEY", "PAPERCLIP_GITHUB_BROKER_TOKEN", "PAPERCLIP_GITHUB_BRIDGE_TOKEN",
+    ]));
+    expect(config.shell_environment_policy.include_only).toContain("MY_SERVICE_TOKEN");
+    expect(JSON.stringify(config)).not.toContain("assigned-run-token");
+    expect(JSON.stringify(config)).not.toContain("assigned-tool-token");
+    expect(JSON.stringify(config)).not.toContain("scoped-broker-token");
+    expect(JSON.stringify(config)).not.toContain("scoped-bridge-token");
+  });
+
+  it("forwards the managed GitHub capability without an agent signing identity", async () => {
+    const { meta } = await runExecutor({ agent: "codex", env: { PAPERCLIP_GITHUB_BROKER_TOKEN: "scoped-broker-token" } });
+    const config = JSON.parse(String((meta[0]?.env as Record<string, string>).CODEX_CONFIG));
+    expect(config.shell_environment_policy.include_only).toContain("PAPERCLIP_GITHUB_BROKER_TOKEN");
+    expect(JSON.stringify(config)).not.toContain("scoped-broker-token");
   });
 
   it.each([true, false])("delivers configured service tokens to Codex shells while isolating host and provider credentials (identity: %s)", async (withIdentity) => {
@@ -1607,7 +1634,7 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(result.exitCode).toBe(0);
     expect(statusCalls).toBe(2);
     // Cache-write tokens count as input tokens; cached reads stay separate.
-    expect(result.usage).toEqual({ inputTokens: 150, outputTokens: 4500, cachedInputTokens: 900 });
+    expect(result.usage).toEqual({ inputTokens: 150, outputTokens: 4500, cachedInputTokens: 900, cacheWriteTokens: 30 });
     expect(result.usageBasis).toBe("per_run");
     // Agent-reported cost is cumulative; this run pays the delta.
     expect(result.costUsd).toBeCloseTo(0.75);
@@ -1658,8 +1685,8 @@ describe("shared ACPX engine runtime behavior", () => {
       provider: "anthropic", biller: "anthropic", billingType: "api" });
     expect(result.errorMessage).toContain("Receipt storage unavailable");
     expect(result.usage).toEqual(failedSave === "terminal"
-      ? { inputTokens: 150, outputTokens: 4500, cachedInputTokens: 900 }
-      : { inputTokens: 120, outputTokens: 4000, cachedInputTokens: 800 });
+      ? { inputTokens: 150, outputTokens: 4500, cachedInputTokens: 900, cacheWriteTokens: 30 }
+      : { inputTokens: 120, outputTokens: 4000, cachedInputTokens: 800, cacheWriteTokens: 20 });
     expect(result.costUsd).toBeCloseTo(failedSave === "terminal" ? 0.75 : 0.7);
     expect(onUsage).toHaveBeenCalledTimes(failedSave === "terminal" ? 2 : 1);
     expect(cancel).toHaveBeenCalledTimes(1);
@@ -2186,6 +2213,162 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(fp(sameEnvNewWake)).toBe(fp(first));
   });
 
+  it("reuses managed AI sessions across disposable homes but isolates account and credential epochs", async () => {
+    const root = await makeTempRoot();
+    const base = { agent: "claude", agentCommand: "node ./fake-acp.js", cwd: root, stateDir: path.join(root, "state") };
+    const configFor = (home: string, sessionIdentity = "grant:user:secret:1", token = "fixture-token") => ({
+      ...base,
+      managedAiConnection: { sessionIdentity, identity: `${sessionIdentity}:token-generation` },
+      env: {
+        HOME: home, XDG_CONFIG_HOME: path.join(home, "config"), XDG_DATA_HOME: path.join(home, "data"),
+        CLAUDE_CONFIG_DIR: path.join(home, "provider"), CODEX_HOME: path.join(home, "provider"),
+        GROK_HOME: path.join(home, "provider"), HERMES_HOME: path.join(home, "provider"),
+        CLAUDE_CODE_OAUTH_TOKEN: token,
+      },
+    });
+    const first = await runExecutor(configFor(path.join(root, "home-1")), { context: { taskId: "issue-1" } });
+    await fs.writeFile(path.join(root, "home-1", "provider", "projects", "fixture-session.jsonl"), "native transcript", "utf8");
+    await fs.writeFile(path.join(root, "home-1", "provider", ".credentials.json"), "private fixture", "utf8");
+    await fs.rm(path.join(root, "home-1"), { recursive: true, force: true });
+    const resumed = await runExecutor(configFor(path.join(root, "home-2"), undefined, "refreshed-fixture-token"), {
+      context: { taskId: "issue-1" }, runtime: { sessionParams: first.result.sessionParams },
+    });
+    expect(resumed.result.sessionParams?.configFingerprint).toBe(first.result.sessionParams?.configFingerprint);
+    expect(resumed.sessionInputs[0]?.resumeSessionId).toBe(first.result.sessionId);
+    const env = (resumed.sessionInputs[0]?.sessionOptions as { env: Record<string, string> }).env;
+    expect(env.CLAUDE_CONFIG_DIR).toBe(path.join(root, "home-2", "provider"));
+    expect(env.CLAUDE_CODE_OAUTH_TOKEN).toBe("refreshed-fixture-token");
+    expect(await fs.readFile(path.join(env.CLAUDE_CONFIG_DIR, "projects", "fixture-session.jsonl"), "utf8")).toBe("native transcript");
+    expect(await pathExists(path.join(env.CLAUDE_CONFIG_DIR, ".credentials.json"))).toBe(false);
+    for (const [index, identity] of ["grant:user:secret:2", "other-grant:user:secret:1"].entries()) {
+      const home = path.join(root, `changed-home-${index}`);
+      const changed = await runExecutor(configFor(home, identity), {
+        context: { taskId: "issue-1" }, runtime: { sessionParams: first.result.sessionParams },
+      });
+      expect(changed.result.sessionParams?.configFingerprint).not.toBe(first.result.sessionParams?.configFingerprint);
+      expect(changed.sessionInputs[0]?.resumeSessionId).toBeFalsy();
+      expect(await pathExists(path.join(home, "provider", "projects", "fixture-session.jsonl"))).toBe(false);
+    }
+  });
+
+  it("applies the native Codex mode before each fresh and resumed turn", async () => {
+    const root = await makeTempRoot();
+    const config = { agent: "codex", stateDir: path.join(root, "state"), codexSessionMode: "agent-full-access" };
+    const first = await runExecutor(config, { context: { taskId: "mode-issue" } });
+    const second = await runExecutor(config, { context: { taskId: "mode-issue" }, runtime: { sessionParams: first.result.sessionParams } });
+    for (const run of [first, second]) {
+      expect(run.result.exitCode).toBe(0);
+      expect(run.configOptions).toContainEqual({ key: "mode", value: "agent-full-access" });
+    }
+    expect(second.sessionInputs[0]?.resumeSessionId).toBe(first.result.sessionParams?.acpSessionId);
+  });
+
+  it("resumes managed Codex with new credentials and retained native state after disposable-home cleanup", async () => {
+    const root = await makeTempRoot();
+    const base = { agent: "codex", agentCommand: "node ./fake-acp.js", cwd: root, stateDir: path.join(root, "state") };
+    const configFor = (home: string, identity = "grant:user:secret:1", token = "fixture-key") => ({
+      ...base, managedAiConnection: { sessionIdentity: identity, identity: `${identity}:generation` },
+      env: { ...managedAiHomeEnvironment(home), OPENAI_API_KEY: token },
+    });
+    const firstHome = path.join(root, "home-1");
+    const first = await runExecutor(configFor(firstHome), { context: { taskId: "issue-1" } });
+    const firstEnv = (first.sessionInputs[0]?.sessionOptions as { env: Record<string, string> }).env;
+    await fs.writeFile(path.join(firstEnv.CODEX_HOME, "sessions", "fixture.jsonl"), "native Codex transcript");
+    await fs.writeFile(path.join(firstEnv.CODEX_HOME, "auth.json"), "private fixture");
+    await fs.rm(firstHome, { recursive: true, force: true });
+    const resumed = await runExecutor(configFor(path.join(root, "home-2"), undefined, "rotated-fixture-key"), {
+      context: { taskId: "issue-1" }, runtime: { sessionParams: first.result.sessionParams },
+    });
+    expect(resumed.result.sessionParams?.configFingerprint).toBe(first.result.sessionParams?.configFingerprint);
+    expect(resumed.sessionInputs[0]?.resumeSessionId).toBe(first.result.sessionId);
+    const env = (resumed.sessionInputs[0]?.sessionOptions as { env: Record<string, string> }).env;
+    expect(env.CODEX_HOME).toBe(path.join(root, "home-2", "provider"));
+    expect(env.CODEX_SQLITE_HOME).toBe(firstEnv.CODEX_SQLITE_HOME);
+    expect(env.OPENAI_API_KEY).toBe("rotated-fixture-key");
+    expect(await fs.readFile(path.join(env.CODEX_HOME, "sessions", "fixture.jsonl"), "utf8")).toBe("native Codex transcript");
+    expect(await pathExists(path.join(env.CODEX_HOME, "auth.json"))).toBe(false);
+    const changed = await runExecutor(configFor(path.join(root, "home-3"), "other-grant:user:secret:1"), {
+      context: { taskId: "issue-1" }, runtime: { sessionParams: first.result.sessionParams },
+    });
+    expect(changed.result.sessionParams?.configFingerprint).not.toBe(first.result.sessionParams?.configFingerprint);
+    expect(changed.sessionInputs[0]?.resumeSessionId).toBeFalsy();
+  });
+
+  it.each(["same_identity", "other_task", "other_account"])("repairs a retained Codex session without outer session params only for %s", async mode => {
+    const root = await makeTempRoot(), stateDir = path.join(root, "state");
+    const configFor = (home: string, identity = "account-one") => ({
+      agent: "codex", agentCommand: "node ./fake-acp.js", cwd: root, stateDir,
+      managedAiConnection: { sessionIdentity: identity, identity: `${identity}:generation` },
+      env: managedAiHomeEnvironment(home),
+    });
+    const firstHome = path.join(root, "first");
+    const first = await runExecutor(configFor(firstHome), { context: { taskId: "original-task" } });
+    const env = (first.sessionInputs[0]!.sessionOptions as { env: Record<string, string> }).env;
+    const threadId = "11111111-1111-4111-8111-111111111111";
+    const rollout = path.join(env.CODEX_HOME, "sessions", `rollout-exact-${threadId}.jsonl`);
+    const content = JSON.stringify({ type: "session_meta", payload: { id: threadId, history_mode: "legacy" } }) + "\n";
+    await fs.writeFile(rollout, content);
+    const sqlite = path.join(env.CODEX_SQLITE_HOME, "state_5.sqlite");
+    const database = new DatabaseSync(sqlite);
+    database.exec("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, history_mode TEXT, title TEXT)");
+    database.prepare("INSERT INTO threads VALUES (?, ?, 'legacy', 'Keep context')").run(threadId, rollout);
+    database.close();
+    const key = first.sessionInputs[0]!.sessionKey as string;
+    await (first.runtimeOptions[0]!.sessionStore as AcpSessionStore).save({
+      schema: "acpx.session.v1", acpxRecordId: key, acpSessionId: threadId,
+      agentCommand: "node ./fake-acp.js", cwd: root, name: key,
+      createdAt: "2026-11-08T00:00:00.000Z", lastUsedAt: "2026-11-08T00:00:01.000Z", lastSeq: 0,
+      eventLog: { active_path: path.join(stateDir, "fixture.jsonl"), segment_count: 1, max_segment_bytes: 1024, max_segments: 2 },
+      messages: [], updated_at: "2026-11-08T00:00:01.000Z", cumulative_token_usage: {}, request_token_usage: {},
+    });
+    await fs.rm(firstHome, { recursive: true, force: true });
+    const second = await runExecutor(configFor(path.join(root, "second"), mode === "other_account" ? "account-two" : "account-one"), {
+      context: { taskId: mode === "other_task" ? "other-task" : "original-task" },
+      // Deliberately no Paperclip runtime.sessionParams: ACP's durable record remains.
+    });
+    expect(second.sessionInputs).toHaveLength(1);
+    expect(second.turnInputs).toHaveLength(1);
+    const check = new DatabaseSync(sqlite, { readOnly: true });
+    try {
+      const row = check.prepare("SELECT * FROM threads WHERE id = ?").get(threadId);
+      expect(row?.title).toBe("Keep context");
+      if (mode === "same_identity") {
+        expect(second.sessionInputs[0]?.resumeSessionId).toBe(threadId);
+        const retained = await fs.realpath(path.join(env.CODEX_SQLITE_HOME, "..", "sessions", path.basename(rollout)));
+        expect(row?.rollout_path).toBe(retained);
+        expect(await fs.readFile(retained, "utf8")).toBe(content);
+      } else {
+        expect(second.sessionInputs[0]?.resumeSessionId).toBeFalsy();
+        expect(row?.rollout_path).toBe(rollout);
+      }
+    } finally { check.close(); }
+  });
+
+  it("reuses the CTO session on worker return with fresh launcher credentials and exact planning context", async () => {
+    const root = await makeTempRoot();
+    const config = { agent: "codex", agentCommand: "node ./fake-acp.js", cwd: root, stateDir: path.join(root, "state") };
+    const stable = { PATH: "/usr/bin", OPERATOR_SETTING: "one", PAPERCLIP_CLOUD_PROVIDER_TOKEN: "configured-one" };
+    const launch = (run: string) => ({ ...config, env: { ...stable,
+      PATH: `/tmp/github-${run}:/usr/bin`, ZDOTDIR: `/tmp/github-${run}`,
+      PAPERCLIP_GITHUB_BROKER_TOKEN: `token-${run}`, PAPERCLIP_RUN_SCRATCH_DIR: `/tmp/${run}` } });
+    const first = await runExecutor(launch("plan"), { sessionFingerprintEnv: stable,
+      context: { taskId: "cto-task", paperclipTaskMarkdown: "Frozen plan ROUTINGPLAN-123: batch size 3", paperclipTaskMarkdownCompact: "Frozen plan ROUTINGPLAN-123: batch size 3" } });
+    const returned = await runExecutor(launch("return"), { sessionFingerprintEnv: stable,
+      runtime: { sessionParams: first.result.sessionParams },
+      context: { taskId: "cto-task", wakeReason: "issue_commented", wakeCommentId: "worker-result",
+        paperclipTaskMarkdown: "Frozen plan ROUTINGPLAN-123: batch size 3", paperclipTaskMarkdownCompact: "Frozen plan ROUTINGPLAN-123: batch size 3", wakeCommentBody: "Worker implemented the frozen plan" } });
+    expect(returned.result.sessionParams?.configFingerprint).toBe(first.result.sessionParams?.configFingerprint);
+    expect(returned.sessionInputs[0]?.resumeSessionId).toBe(first.result.sessionId);
+    const env = (returned.sessionInputs[0]?.sessionOptions as { env: Record<string, string> }).env;
+    expect(env.PAPERCLIP_GITHUB_BROKER_TOKEN).toBe("token-return");
+    expect(env.PATH).toContain("github-return");
+    expect(returned.turnInputs).toHaveLength(1);
+    expect(JSON.stringify(returned.turnInputs)).toContain("ROUTINGPLAN-123");
+    const changed = await runExecutor(launch("changed"), { sessionFingerprintEnv: { ...stable, PAPERCLIP_CLOUD_PROVIDER_TOKEN: "configured-two" },
+      runtime: { sessionParams: first.result.sessionParams }, context: { taskId: "cto-task" } });
+    expect(changed.sessionInputs[0]?.resumeSessionId).toBeFalsy();
+  });
+
   it("keeps rotated run scratch paths out of session identity while retaining user temp overrides", async () => {
     const root = await makeTempRoot();
     const config = { agentCommand: "node ./fake-acp.js", stateDir: path.join(root, "state") };
@@ -2536,6 +2719,43 @@ describe("shared ACPX engine runtime behavior", () => {
       (second.sessionInputs[0]!.sessionOptions as { env: Record<string, string> }).env
         .PAPERCLIP_API_KEY,
     ).toBe("second");
+  });
+
+  it("preserves a native conversation and stops blind retries when configuration requires session repair", async () => {
+    const root = await makeTempRoot();
+    const turn = vi.fn();
+    const execute = createAcpxEngineExecutor({
+      createRuntime: () => buildRuntime(() => {
+        const error = new Error("Persistent ACP session could not be resumed: Internal error");
+        error.name = "SessionResumeRequiredError";
+        Object.assign(error, { retryable: true });
+        throw error;
+      }, undefined, turn) as never,
+    });
+    const result = await execute({
+      runId: "run-resume", agent: { id: "agent-1", companyId: "company-1" }, runtime: {},
+      config: { agent: "custom", agentCommand: "node ./fake-acp.js", model: "fixture-model", stateDir: root },
+      context: {}, onLog: async () => {}, onMeta: async () => {},
+    } as never);
+    expect(result).toMatchObject({ exitCode: 1, errorCode: "acpx_session_resume_required",
+      errorMeta: { phase: "configure_session", retryable: false, recoveryAction: "repair_existing_session" } });
+    expect(result.clearSession).not.toBe(true);
+    expect(turn).not.toHaveBeenCalled();
+  });
+
+  it("does not retry a retained-session repair error during handshake", async () => {
+    const root = await makeTempRoot(), config = { agent: "custom", agentCommand: "node ./fake-acp.js", stateDir: root };
+    const first = await runExecutor(config);
+    const ensure = vi.fn(async () => { const error = new Error("Persistent ACP session could not be resumed");
+      error.name = "SessionResumeRequiredError"; throw error; });
+    const turn = vi.fn();
+    const execute = createAcpxEngineExecutor({ createRuntime: () => ({ ...buildRuntime(undefined, undefined, turn), ensureSession: ensure }) as never });
+    const result = await execute({ runId: "resume-handshake", agent: { id: "agent-1", companyId: "company-1" },
+      runtime: { sessionParams: first.result.sessionParams }, config, context: {}, onLog: async () => {}, onMeta: async () => {} } as never);
+    expect(result.errorCode).toBe("acpx_session_resume_required");
+    expect(result.clearSession).not.toBe(true);
+    expect(ensure).toHaveBeenCalledTimes(1);
+    expect(turn).not.toHaveBeenCalled();
   });
 
   it.each(["create_runtime", "ensure_session", "configure_session", "turn"])(

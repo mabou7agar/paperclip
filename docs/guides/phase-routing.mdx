@@ -1,0 +1,163 @@
+---
+title: "Responsibility routing and quota fallbacks"
+description: "Company model defaults with per-agent overrides and ordered quota fallbacks."
+---
+
+Company settings contain **Default models by responsibility**. Enable
+the policy, choose a model and connection for each phase, and add or reorder any
+number of fallback levels. Each level has its own optional reasoning effort.
+The initial template uses Claude then Codex for planning, and Codex for
+implementation. Model ids and connections remain editable; no connection or
+paid API account is created automatically.
+
+Agents inherit company defaults. In an agent's Harness / Runtime settings,
+uncheck **Use company model and fallback defaults** to edit its own policy or
+disable phase routing for that agent. Re-enable inheritance to remove the
+override. Company defaults require accounts installed for the whole company;
+an override can use an account installed for that agent.
+
+Saving only phase models or fallbacks checks their account access and model
+compatibility without probing the unchanged regular connection. A regular
+connection, harness, model/configuration, or environment change still runs its
+normal connection validation. The agent's runtime Test checks that regular
+connection; a quota-limited Claude test does not describe a Codex fallback.
+
+Ordinary (`standard`) tasks select a chain by responsibility, in this order:
+
+1. The agent's `runtimeConfig.executionResponsibility` override.
+2. The company policy's `roleResponsibilities[agent.role]` mapping.
+3. The company policy's `defaultResponsibility`, or `implementation` for older policies.
+
+The three responsibilities are `planning` (planning and coordination),
+`implementation`, and `review`. Chain inheritance is independent of the agent's
+responsibility: a CTO can inherit the company's planning chain, while a Tech Lead
+with the same generic `engineer` role can explicitly select review. Agent chain
+overrides inherit omitted review and responsibility defaults from the company.
+Explicit `planning` task mode still selects planning for every agent.
+A selected review responsibility without a review chain stops with a configuration
+error; it never silently switches to implementation. Older policies with no new
+fields preserve their existing behavior.
+
+This changes model selection, not delegation or authority. Existing child tasks,
+self-contained handoff briefs, frozen revisions, acceptance criteria, review
+verdicts, and escalation rules remain the communication contract. Routing does
+not automatically copy private parent documents or approve plans. The task context
+records the actual routed provider and reminds agents to apply existing independent
+review rules to it. Cross-provider review is an existing company instruction,
+not a new server-enforced review policy. Configure eligible review fallbacks;
+Astra and Sol are both OpenAI and cannot independently review one another where
+that company rule applies. Plan acceptance still uses the existing approval
+workflow. Ask, chat, other work modes, and agents using other harnesses retain
+their regular configuration. This extension supports the existing Claude,
+Codex and OpenCode adapters. Select OpenCode and a connected OpenRouter account
+to use a supported GLM model from its model catalog.
+
+## Scoped task exceptions
+
+Advanced API configuration may include `taskOverrides`, keyed by task UUID.
+Each entry may override `planning`, `implementation` or `review` with the same
+ordered profile schema. Unspecified responsibilities and tasks inherit their
+normal company/agent chains. Company exceptions require the existing board
+connection-management permission and validate every referenced account; agent
+exceptions use the existing board-only agent configuration controls. The task id
+is considered both at dispatch and at quota fallback, so an exception cannot
+silently fall back into a different task's policy.
+
+For example, a frozen Claude-authored patch can explicitly use an OpenAI review
+fallback after verifying authorship, without changing review routing for other
+Sol-authored work. This is an operator-configured exception, not automatic
+authorship inference or a new review authorization rule. Existing independent
+review instructions still apply. Remove an exception when it is no longer needed.
+The current settings form preserves these entries; edit them through the versioned
+policy API (Bruno example included).
+
+## Quota safety and session reuse
+
+Only the adapter's typed `provider_quota` outcome triggers a quota fallback.
+Authentication errors require configuration; ordinary failures retain their
+existing recovery policy. A company-scoped cooldown uses immutable account
+attribution from completed run receipts, including receipts written before this
+feature. A provider reset time is respected; if absent, the configurable
+cooldown defaults to one hour. Reading these receipts does not call a model or
+probe an exhausted subscription.
+
+The selected adapter and account are recorded when the server claims the run.
+Recovery keeps that selection. New fallback runs retain the same task, agent,
+workspace and authorization gates. Provider-native session ids are isolated by
+phase, harness, model, and resolved account. Later wakes reuse the same selected
+profile's session; moving between providers uses the existing task handoff and
+plan documents rather than passing incompatible native conversation ids.
+
+Local managed Codex ACP runs retain their rollout directories and SQLite state
+in a private account/credential-epoch namespace. `auth.json` remains in the
+disposable credentials home. SQLite uses the documented
+[`CODEX_SQLITE_HOME`](https://learn.chatgpt.com/docs/config-file/environment-variables#core-locations)
+setting. Disposable credential and skill-home paths do not reset the conversation
+fingerprint. The heartbeat controller separately supplies the configured environment
+before adding disposable GitHub launcher paths and broker credentials. ACP hashes
+that stable environment while forwarding fresh launch values on every resumed turn.
+Configured environment, model, account, permission and network-policy changes still
+invalidate incompatible sessions. Custom operator homes retain their existing storage contract;
+remote Codex storage behavior is unchanged.
+Codex's `state_5.sqlite` index retains an exact rollout filename. Resume relocates
+only that path into private retained storage after matching the thread header
+and history mode. The shared path-relocation helper also serves native cleanup;
+unknown schemas, update triggers, and cascading topology are refused. Other
+thread metadata and history remain unchanged.
+
+Codex ACP applies the adapter's existing **Bypass approvals and sandbox** setting
+to its native session mode before every fresh or resumed turn. Full access is
+the existing Codex adapter default, intended for a controlled runner/container;
+turn the setting off for workspace sandboxing. ACP tool approval alone does not
+disable Codex's sandbox. Explicit read-only permissions and network denials take
+precedence. The outer container, connection authorization and Paperclip's task
+approval gates still apply. A rejected native mode change fails setup before
+any model turn.
+
+One automatic chain has at most `number of configured levels - 1` fallback
+attempts. Existing retry accounting, Stop, budget, task ownership and pause
+gates still apply. When all accounts are cooling down, provider work is skipped
+and at most one reset wait is scheduled by the phase routing path. Run lifecycle
+events show the selected profile and skipped accounts.
+
+The saved reset timestamp is the earliest eligible dispatch time; the next
+scheduler sweep resumes the same task with its durable plan and comments.
+Competing sweeps share the persisted retry claim. Completed or cancelled tasks
+are not reopened, and a provider that still reports quota after renewal remains
+subject to the bounded retry limits. Each automatic chain has one renewal wait;
+switching fallback levels does not replenish that separate allowance. Fresh
+quota failures that exhaust the chain use the same renewal mechanism.
+
+Phase profiles share task/workspace/instruction and permission settings.
+Custom harness commands, extra CLI arguments, provider state directories, and
+authentication environment variables are deliberately excluded from profile
+switches. Connect accounts using the existing managed connection controls.
+Operators requiring custom harness commands should keep that agent's phase
+routing disabled.
+
+## API
+
+- `GET /api/v1/companies/:companyId/phase-routing` returns `{ policy }` (`null`
+  until configured).
+- `PUT /api/v1/companies/:companyId/phase-routing` validates and replaces the
+  company policy. It requires board access and connection-management permission.
+- Per-agent responsibility uses `runtimeConfig.executionResponsibility`; omit it to
+  inherit the company role/default. Only the board may change this setting.
+- Per-agent policies use the existing compatible agent update API's optional
+  `runtimeConfig.phaseRouting` field. Omit the field from the complete runtime
+  configuration to inherit. An explicit disabled policy opts out. Existing
+  `runtimeConfig.aiConnection` and other runtime settings must be retained.
+
+The Bruno collection in `/bruno/Phase Routing` includes read/save examples.
+Use a board API token. Credentials and tokens do not belong in policy JSON.
+
+## Maintained fork
+
+The implementation lives on a branch above the pinned upstream release. Keep
+`upstream` pointing to `paperclipai/paperclip` and `origin` pointing to the
+maintained fork. Integrate upstream updates through a review branch and rerun
+session, scheduling, company-scoping and quota tests before deployment.
+
+Claude calendar reset hints with an explicit timezone (for example `Nov 8, 7pm (UTC)`) are honored for new runs and historical quota receipts. Historical hints are anchored to the original failure time; reading them never edits provider receipts or extends the once-only renewal budget. Unrecognized hints retain the configured unknown-reset cooldown.
+
+Multiple accounts for the same harness can occupy separate levels, such as a Claude subscription followed by a Claude Messages API connection. Choose the API account explicitly: a responsible-user binding follows that user’s provider default, even when its wire method is labeled `api_key`. Quota receipts are scoped to the selected connection. To prioritize subscriptions, place all eligible subscription levels before a paid API level in each responsibility chain.

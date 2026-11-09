@@ -45,6 +45,31 @@ describe("classifyAdapterFailureForRecovery", () => {
     expect(classifyContinuationFailure(run as never).kind).toBe("default");
   });
 
+  it("never upgrades a control-plane backoff into a provider reset", () => {
+    const now = new Date("2026-07-15T20:00:00.000Z");
+    const retryAt = "2026-07-15T21:00:00.000Z";
+    expect(classifyAdapterFailureForRecovery({ errorCode: "provider_quota", error: "Weekly quota exhausted", resultJson: {
+      errorFamily: "provider_quota", providerQuotaResetSource: "backoff", retryNotBefore: retryAt,
+    } }, now)).toEqual({ kind: "provider_quota", retryAt: new Date(retryAt), parsedResetTime: false });
+  });
+
+  it.each([
+    ["a provider quota", "model is at capacity", { kind: "provider_quota" }],
+    ["a configuration blocker", "missing credentials", { kind: "configuration_incomplete" }],
+  ])("classifies a refused exact resume from its refusal, not an earlier %s", (_name, earlier, own) => {
+    const refusal = "Plugin Runner retained session is not authorized";
+    const refused = {
+      errorCode: "adapter_failed",
+      error: `native_session_interrupted: ${earlier}; exact checkpoint resume refused: ${refusal}`,
+      resultJson: { nativeExactResumeRefusal: { originalFailureCode: "native_session_interrupted",
+        originalMessage: earlier, interruptedAttempt: 1, refusal } },
+    };
+    expect(classifyAdapterFailureForRecovery(refused)).toBeNull();
+    // The same text as the run's own failure still chooses that recovery.
+    expect(classifyAdapterFailureForRecovery({ errorCode: "adapter_failed", error: earlier, resultJson: null }))
+      .toMatchObject(own);
+  });
+
   it("uses a typed ACP quota reset without needing the provider's original message", () => {
     const now = new Date("2026-07-15T20:00:00.000Z");
     expect(classifyAdapterFailureForRecovery({

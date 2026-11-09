@@ -75,6 +75,12 @@ const mockSecretsApi = vi.hoisted(() => ({
   listUserSecretDefinitions: vi.fn(async () => [] as unknown[]),
 }));
 
+// The phase settings panel is part of the rendered form; an unrelated network
+// failure must not masquerade as a runner-upgrade validation error.
+vi.mock("../api/phase-routing", () => ({
+  phaseRoutingApi: { get: vi.fn(async () => ({ policy: null })) },
+}));
+
 vi.mock("../api/agents", () => ({
   agentsApi: mockAgentsApi,
 }));
