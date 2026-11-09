@@ -188,6 +188,7 @@ export function phaseRoutingService(db: Db) {
           if (state !== "applied") return { phase, workMode, profile: null, connectionId: null, grantId: null,
             maxFallbackAttempts: 0, retryAt: null, notes: [state === "expired"
               ? "The controlled availability drill activation deadline expired. Remove the task exception before continuing."
+              : state === "conflict" ? "The controlled availability drill id belongs to another operation. Remove the task exception before continuing."
               : "The controlled availability drill is no longer eligible."] };
           notes.push(`${profile.id}: controlled task-only availability fault ${drill.id}; no provider quota failure or shared cooldown`);
           continue;

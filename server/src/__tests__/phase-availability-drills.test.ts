@@ -5,8 +5,9 @@ import { activityLog, agents, agentTaskSessions, companies, createDb, heartbeatR
 import { phaseRoutingSchema, type PhaseAvailabilityDrill } from "@paperclipai/shared";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { phaseAvailabilityDrillRepository } from "../repositories/phase-availability-drills.js";
-import { phaseAvailabilityDrillService } from "../services/phase-availability-drills.js";
+import { phaseAvailabilityDrillService, phaseRoutingDrillChangeScope } from "../services/phase-availability-drills.js";
 import { phaseRoutingSettingsRepository } from "../repositories/phase-routing-settings.js";
+import { providerQuotaProbeRepository } from "../repositories/provider-quota-probes.js";
 
 describe("board-owned task availability drills", () => {
   let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>, db: ReturnType<typeof createDb>;
@@ -92,7 +93,43 @@ describe("board-owned task availability drills", () => {
   });
   it("does not accept a claim id belonging to a different operation", async () => {
     await db.insert(activityLog).values({ id: drill.id, companyId, actorId: "fixture", action: "unrelated", entityType: "issue", entityId: issueId });
-    await expect(phaseAvailabilityDrillRepository(db).apply(companyId, issueId, drill)).rejects.toThrow("different operation");
+    await expect(validate()).rejects.toThrow("fresh id");
+    expect(await phaseAvailabilityDrillRepository(db).apply(companyId, issueId, drill)).toBe("conflict");
     expect((await db.select().from(activityLog).where(eq(activityLog.id, drill.id)))[0].action).toBe("unrelated");
+  });
+  it("does not block fallback return behind another transaction's task row lock", async () => {
+    const repository = phaseAvailabilityDrillRepository(db);
+    expect(await repository.apply(companyId, issueId, drill)).toBe("applied");
+    let ready!: () => void, release!: () => void;
+    const acquired = new Promise<void>(resolve => { ready = resolve; });
+    const unlock = new Promise<void>(resolve => { release = resolve; });
+    const owner = db.transaction(async tx => {
+      await tx.select().from(issues).where(eq(issues.id, issueId)).for("update");
+      ready(); await unlock;
+    });
+    await acquired;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const deadline = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error("Fallback selection blocked behind the task mutation")), 5_000); });
+      expect(await Promise.race([repository.apply(companyId, issueId, drill), deadline])).toBe("applied");
+    } finally { clearTimeout(timer); release(); await owner; }
+  }, 15_000);
+  it("scopes drill policy notifications and capacity-wait reads to the affected task", async () => {
+    const next = policy(), before = { ...next, taskOverrides: undefined };
+    expect(phaseRoutingDrillChangeScope(before, next)).toEqual([issueId]);
+    expect(phaseRoutingDrillChangeScope(next, before)).toEqual([issueId]);
+    expect(phaseRoutingDrillChangeScope(next, next)).toBeNull();
+    expect(phaseRoutingDrillChangeScope(before, { ...next, planning: [{ ...next.planning[0], model: "different" }, next.planning[1]] })).toBeNull();
+    const otherId = randomUUID();
+    await db.insert(issues).values({ id: otherId, companyId, title: "Unrelated wait", status: "blocked" });
+    for (const id of [issueId, otherId]) {
+      const source = randomUUID();
+      await db.insert(heartbeatRuns).values({ id: source, companyId, agentId, issueId: id, scopeKind: "issue", status: "failed", resultJson: { connectionUsageCapWait: true } });
+      await db.insert(heartbeatRuns).values({ companyId, agentId, issueId: id, scopeKind: "issue", status: "scheduled_retry", scheduledRetryReason: "ai_connection_pool_wait", retryOfRunId: source });
+    }
+    const waits = await providerQuotaProbeRepository(db).capacityWaits(companyId, [issueId]);
+    expect(waits).toHaveLength(1);
+    expect(waits[0].issueId).toBe(issueId);
+    expect(await providerQuotaProbeRepository(db).capacityWaits(companyId, [])).toHaveLength(0);
   });
 });

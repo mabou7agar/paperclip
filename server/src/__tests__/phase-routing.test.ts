@@ -57,6 +57,8 @@ describe("phase routing", () => {
     expect(await service().resolve({ ...input, runtimeConfig: {}, issueId: taskId, now: new Date(drill.expiresAt) })).toMatchObject({ profile: null, retryAt: null, maxFallbackAttempts: 0 });
     applyDrill.mockResolvedValue("inactive");
     expect(await service().resolve({ ...input, runtimeConfig: {}, issueId: taskId, now })).toMatchObject({ profile: null, retryAt: null, maxFallbackAttempts: 0 });
+    applyDrill.mockResolvedValue("conflict");
+    expect(await service().resolve({ ...input, runtimeConfig: {}, issueId: taskId, now })).toMatchObject({ profile: null, retryAt: null, maxFallbackAttempts: 0 });
   });
   it.each([
     { runtimeConfig: {} }, { runtimeConfig: { phaseRouting: { ...policy, enabled: false } } },

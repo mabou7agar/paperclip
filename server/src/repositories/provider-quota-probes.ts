@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { and, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import {
   connectionGrants,
   companies,
@@ -225,8 +225,9 @@ export function providerQuotaProbeRepository(db: Db) {
             sql`${heartbeatRuns.createdAt} <= ${before.toISOString()}::timestamptz`,
           ),
         ),
-    capacityWaits: (companyId?:string) => db.select().from(heartbeatRuns).where(and(
+    capacityWaits: (companyId?:string, issueIds?:string[]) => db.select().from(heartbeatRuns).where(and(
       companyId?eq(heartbeatRuns.companyId,companyId):undefined,
+      issueIds ? or(inArray(heartbeatRuns.issueId, issueIds), inArray(sql<string>`${heartbeatRuns.contextSnapshot}->>'issueId'`, issueIds)) : undefined,
       eq(heartbeatRuns.status,"scheduled_retry"),eq(heartbeatRuns.scheduledRetryReason,"ai_connection_pool_wait"),
       sql`exists(select 1 from heartbeat_runs source where source.id=${heartbeatRuns.retryOfRunId} and source.company_id=${heartbeatRuns.companyId} and source.result_json->>'connectionUsageCapWait'='true')`,
     )),

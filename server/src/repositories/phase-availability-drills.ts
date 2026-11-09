@@ -1,7 +1,6 @@
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { activityLog, heartbeatRuns, issues, type Db } from "@paperclipai/db";
 import type { PhaseAvailabilityDrill } from "@paperclipai/shared";
-import { conflict } from "../errors.js";
 
 const action = "phase_routing.controlled_availability_fault";
 const sameDrill = (details: Record<string, unknown> | null, drill: PhaseAvailabilityDrill) =>
@@ -10,6 +9,9 @@ const sameDrill = (details: Record<string, unknown> | null, drill: PhaseAvailabi
 /** The activity primary key is the durable one-use claim, including across restarts. */
 export function phaseAvailabilityDrillRepository(db: Db) {
   return {
+    async isUnusedId(id: string) {
+      return !(await db.select({ id: activityLog.id }).from(activityLog).where(eq(activityLog.id, id)).limit(1)).length;
+    },
     async isUnstartedTask(companyId: string, issueId: string) {
       const [row] = await db.select({ id: issues.id }).from(issues).where(and(
         eq(issues.companyId, companyId), eq(issues.id, issueId),
@@ -22,8 +24,11 @@ export function phaseAvailabilityDrillRepository(db: Db) {
     },
     async apply(companyId: string, issueId: string, drill: PhaseAvailabilityDrill) {
       return db.transaction(async tx => {
+        // This diagnostic selects a profile; it never authorizes execution.
+        // Admission/dispatch own task mutation fences. Do not acquire a task
+        // write lock from a separate connection during selection or resume.
         const [issue] = await tx.select({ id: issues.id, status: issues.status }).from(issues)
-          .where(and(eq(issues.companyId, companyId), eq(issues.id, issueId))).for("update");
+          .where(and(eq(issues.companyId, companyId), eq(issues.id, issueId)));
         if (!issue || ["done", "cancelled"].includes(issue.status)) return "inactive" as const;
         let [receipt] = await tx.select().from(activityLog).where(eq(activityLog.id, drill.id));
         if (!receipt) {
@@ -37,7 +42,7 @@ export function phaseAvailabilityDrillRepository(db: Db) {
         }
         if (!receipt || receipt.companyId !== companyId || receipt.entityType !== "issue"
           || receipt.entityId !== issueId || receipt.action !== action || !sameDrill(receipt.details, drill)) {
-          throw conflict("The controlled availability drill id is already used by a different operation");
+          return "conflict" as const;
         }
         // Expiry bounds first activation, not an already accepted session's
         // return path. The task's terminal state retires this affinity pin.

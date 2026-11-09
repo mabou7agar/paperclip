@@ -6,7 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ZodError } from "zod";
 import { phaseRoutingSchema } from "@paperclipai/shared";
 
-const mocks = vi.hoisted(() => ({ get: vi.fn(), save: vi.fn(), company: vi.fn(), manage: vi.fn(), activity: vi.fn() }));
+const mocks = vi.hoisted(() => ({ get: vi.fn(), save: vi.fn(), company: vi.fn(), manage: vi.fn(), activity: vi.fn(), saved: vi.fn() }));
 vi.mock("../services/phase-routing.js", () => ({ phaseRoutingService: () => ({ getCompanyDefaults: mocks.get, saveCompanyDefaults: mocks.save }) }));
 vi.mock("../services/companies.js", () => ({ companyService: () => ({ getById: mocks.company }) }));
 vi.mock("../routes/ai-connections.js", () => ({ canManageAiConnections: mocks.manage }));
@@ -18,7 +18,7 @@ function app(actor = { type: "board", source: "session", userId: "user", company
   const application = express();
   application.use(express.json());
   application.use((req, _res, next) => { req.actor = actor as never; next(); });
-  application.use("/api", phaseRoutingRoutes({} as never));
+  application.use("/api", phaseRoutingRoutes({} as never, mocks.saved));
   application.use((error: Error & { status?: number }, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     res.status(error instanceof ZodError ? 400 : error.status ?? 500).json({ error: error.message });
   });
@@ -55,6 +55,7 @@ describe("versioned phase routing API", () => {
       availabilityDrill: { id: "40000000-0000-4000-8000-000000000001", phase: "planning", profileId: "claude", expiresAt: new Date(Date.now() + 600_000).toISOString() },
     } } };
     expect((await request(app()).put(path).send(scoped)).body).toEqual({ policy: scoped });
+    expect(mocks.saved).toHaveBeenCalledWith("company", { issueIds: ["30000000-0000-4000-8000-000000000001"] });
     expect((await request(app({ type: "agent" } as never)).put(path).send(scoped)).status).toBe(403);
     const invalid = { ...scoped, taskOverrides: { "30000000-0000-4000-8000-000000000001": { availabilityDrill: { ...scoped.taskOverrides["30000000-0000-4000-8000-000000000001"].availabilityDrill, id: "invalid" } } } };
     expect((await request(app()).put(path).send(invalid)).status).toBe(400);

@@ -2,8 +2,21 @@ import type { PhaseAvailabilityDrill, PhaseRouting } from "@paperclipai/shared";
 import type { Db } from "@paperclipai/db";
 import { phaseAvailabilityDrillRepository } from "../repositories/phase-availability-drills.js";
 import { unprocessable } from "../errors.js";
+import { canonicalJson } from "@paperclipai/shared/portability-hash";
 
 export const MAX_AVAILABILITY_DRILL_MS = 30 * 60 * 1_000;
+
+/** A drill-only PUT must not probe accounts or promote other tasks' waits. */
+export function phaseRoutingDrillChangeScope(previous: PhaseRouting | null, next: PhaseRouting): string[] | null {
+  if (!previous) return null;
+  const { taskOverrides: before = {}, ...oldShared } = previous;
+  const { taskOverrides: after = {}, ...newShared } = next;
+  if (canonicalJson(oldShared) !== canonicalJson(newShared)) return null;
+  const changed = [...new Set([...Object.keys(before), ...Object.keys(after)])]
+    .filter(id => canonicalJson(before[id] ?? null) !== canonicalJson(after[id] ?? null));
+  return changed.length && changed.every(id => before[id]?.availabilityDrill || after[id]?.availabilityDrill)
+    ? changed : null;
+}
 
 /** A controlled eligibility fault exercises fallback without forging quota evidence. */
 export function phaseAvailabilityDrillService(db: Db) {
@@ -22,6 +35,9 @@ export function phaseAvailabilityDrillService(db: Db) {
         // PostgreSQL JSONB does not retain JavaScript property order.
         const old = previous?.taskOverrides?.[issueId]?.availabilityDrill;
         if (old?.id === drill.id && old.phase === drill.phase && old.profileId === drill.profileId && old.expiresAt === drill.expiresAt) continue;
+        if (!await repository.isUnusedId(drill.id)) {
+          throw unprocessable("A new controlled availability drill must use a fresh id");
+        }
         const remaining = Date.parse(drill.expiresAt) - now.getTime();
         if (!policy.enabled || remaining <= 0 || remaining > MAX_AVAILABILITY_DRILL_MS) {
           throw unprocessable("A new controlled availability drill must expire within 30 minutes and use enabled routing");
