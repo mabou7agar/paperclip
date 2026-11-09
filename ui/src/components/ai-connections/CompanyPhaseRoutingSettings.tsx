@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { phaseRoutingSchema, type PhaseRouting } from "@paperclipai/shared";
 import { phaseRoutingApi } from "@/api/phase-routing";
+import { describeError } from "@/api/errors";
 import { useTranslation } from "@/i18n";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
@@ -44,7 +45,7 @@ export function CompanyPhaseRoutingSettings({
       <h2 className="text-sm font-semibold">{t("companyTitle")}</h2>
       {defaults.isPending ? (
         <p className="text-sm text-muted-foreground">{t("loading")}</p>
-      ) : defaults.error ? (
+      ) : defaults.error && !defaults.data ? (
         <p role="alert" className="text-sm text-destructive">
           {t("defaultsLoadError")}
         </p>
@@ -104,7 +105,7 @@ export function CompanyPhaseRoutingSettings({
           />
           {save.error && (
             <p role="alert" className="text-sm text-destructive">
-              {save.error.message}
+              {describeError(save.error).body}
             </p>
           )}
           <div className="flex items-center justify-between gap-2">

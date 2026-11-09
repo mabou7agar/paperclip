@@ -546,7 +546,8 @@ export function useLiveRunTranscripts({
     for (const run of readableRuns) {
       refreshByRunRef.current.set(run.id, (force = false) => {
         if (force) { pendingRefresh.add(run.id); missingTerminalLogRunIdsRef.current.delete(run.id); }
-        });
+        void readRunLog(run);
+      });
     }
     const readAll = async () => {
       // Let current output load first; historical reads share a bounded queue.

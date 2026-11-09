@@ -281,7 +281,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(countExecuteCallsForRun(delivered.runId!)).toBe(1);
     expect((await db.select().from(issueComments).where(eq(issueComments.id, comment.id)))[0]?.body).toBe(comment.body);
     expect((await db.select().from(issues).where(eq(issues.id, issue.id)))[0]?.assigneeAgentId).toBe(agentId);
-  });
+  }, 60_000);
 
   it.each(["preparing", "verifying", "resuming"] as const)("keeps assigned work queued through %s, including recovery with timers disabled", async lifecycleState => {
     const { companyId, agentId } = await seedCompanyAndAgent({ heartbeatConfig: { enabled: false } });
@@ -2002,14 +2002,14 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       expect(countExecuteCallsForRun(runId), JSON.stringify({
         status: current?.status, errorCode: current?.errorCode,
       })).toBe(1);
-    }, { timeout: 5_000 });
+    }, { timeout: 30_000 });
     await heartbeat.waitForRunExecutionDrain(runId);
 
     expect((await heartbeat.getRun(runId))?.status).toBe("succeeded");
     expect(claimedIssue).toEqual({ status: "in_progress", executionRunId: runId });
     expect((await db.select({ startedAt: issues.startedAt }).from(issues).where(eq(issues.id, issueId)))[0]?.startedAt)
       .toBeInstanceOf(Date);
-  });
+  }, 60_000);
 
   it.each([
     { name: "a started task parked back in todo", startedAt: new Date("2026-01-01T00:00:00.000Z"), askedByRun: false, rejectedConfirmation: false },

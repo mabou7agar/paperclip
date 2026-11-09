@@ -152,9 +152,25 @@ describe("agent-created hires use managed AI connections", () => {
     }
   }, 30_000);
 
-  it("still requires a successful hello before adopting an explicitly changed subscription binding", async () => {
+  it("adopts a healthy saved subscription binding without another provider hello", async () => {
     const f = await fixture("anthropic", "subscription", true);
     await db.insert(principalPermissionGrants).values({ companyId: f.companyId, principalType: "user", principalId: f.userId, permissionKey: "agents:configure" });
+    const original = getServerAdapter(f.adapterType);
+    const probe = vi.fn(async () => { throw new Error("A configuration save must not send another hello"); });
+    registerServerAdapter({ ...original, testEnvironment: probe });
+    try {
+      const binding = { ...f.binding, mode: "delegated", ...f.account };
+      const response = await request(f.app).patch(`/api/agents/${f.agentId}`).send({ runtimeConfig: { aiConnection: binding } });
+      expect(response.status, JSON.stringify(response.body)).toBe(200);
+      expect(response.body.runtimeConfig.aiConnection).toEqual(binding);
+      expect(probe).not.toHaveBeenCalled();
+    } finally { unregisterServerAdapter(f.adapterType); }
+  });
+
+  it("still requires a successful hello before adopting an unverified legacy subscription binding", async () => {
+    const f = await fixture("anthropic", "subscription", true);
+    await db.insert(principalPermissionGrants).values({ companyId: f.companyId, principalType: "user", principalId: f.userId, permissionKey: "agents:configure" });
+    await markLegacyAdoption(f.account.connectionId);
     const original = getServerAdapter(f.adapterType);
     const probe = vi.fn(async () => ({ adapterType: f.adapterType, status: "warn" as const, testedAt: new Date().toISOString(),
       checks: [{ code: "claude_hello_probe_usage_limited", level: "warn" as const, message: "Quota exhausted" }] }));

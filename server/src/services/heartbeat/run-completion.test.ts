@@ -1235,6 +1235,9 @@ describe.skipIf(!support.supported && !process.env.PAPERCLIP_TEST_DATABASE_URL)(
     await interactions.answerQuestions(issue, interaction.id, { answers: [{ questionId: "choice", optionIds: ["yes"] }] },
       { userId: "local-board" });
     const heartbeat = heartbeatService(db);
+    // This fixture manually admits the queued answer below; it must not also
+    // dispatch through the background execution path.
+    heartbeat.startTaskDrain();
     const answerHeartbeat = legacy ? { ...heartbeat, wakeup: (...[agentId, options]: Parameters<typeof heartbeat.wakeup>) => {
       const contextSnapshot = { ...options?.contextSnapshot };
       delete contextSnapshot.mutation;
