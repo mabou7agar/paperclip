@@ -72,3 +72,17 @@ test("package lanes form a complete, non-overlapping, balanced cover of the Vite
   const heaviest = Math.max(...inventory.map(weight));
   for (const lane of lanes) assert.ok(lane.estimatedMs <= total / laneCount + heaviest, `lane ${lane.index} is unbalanced`);
 });
+
+
+test("native lanes prepare their release daemon before bounded integration hooks", () => {
+  for (const args of [["--native-server"], ["--shard=2/2"]]) {
+    const plan = wrapperPlan(args, { GITHUB_WORKFLOW: "PR" });
+    const commands = plan.plannedCommands;
+    const release = commands.findIndex(command => command.args.join(" ") === "run build:binary");
+    const nativeTests = commands.findIndex(command => command.args.includes("general-server-native-runner"));
+    assert.ok(release >= 0 && release < nativeTests, "cold release compilation must finish before native fixtures start");
+    assert.equal(commands.filter(command => command.args.join(" ") === "run build:binary").length, 1);
+  }
+  const packageOnly = wrapperPlan(["--package-lane=1/3"], { GITHUB_WORKFLOW: "PR" });
+  assert.ok(!packageOnly.plannedCommands.some(command => command.args.includes("build:binary")));
+});
