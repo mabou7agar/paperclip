@@ -11349,6 +11349,7 @@ async function createRunnerdBackendWithinSessionClaim(
         eq(agents.id, input.execution.binding.agentId), eq(agents.companyId, input.execution.binding.companyId),
       )).limit(1).then(rows => rows[0]) : undefined;
   const authority = new PaperclipRunnerToolAuthority(input.db, {
+    completionReceipt: reviewRun?.contextSnapshot?.wakeReason === "task_completion_receipt",
     ...(nativeReview ? { nativeReview } : {}),
     connectorAssignments: connectorAssignments.filter((assignment) => pinnedSkills.has(assignment.skillKey)),
     assignedMcpTools,

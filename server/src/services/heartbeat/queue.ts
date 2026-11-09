@@ -1,3 +1,4 @@
+import { completionReceiptSourceReady, taskCompletionReceiptState, TASK_COMPLETION_RECEIPT_REASON } from "../task-completion-receipts.js";
 import { addressedInteractionWakeState } from "../addressed-interaction-wake.js";
 import { monitoringService } from "../monitoring.js";
 import { isAgentAwaitingSetup } from "../../modules/agent-lifecycle/index.js";
@@ -4576,7 +4577,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         readNonEmptyString(wakeContext.issueId) ??
         null;
       const scopeKey = issueId
-        ? `${candidate.companyId}:${candidate.agentId}:${issueId}:${readNativeReviewAssignmentContext(wakeContext)?.nativeReviewInteractionId ?? ""}`
+        ? `${candidate.companyId}:${candidate.agentId}:${issueId}:${readNativeReviewAssignmentContext(wakeContext)?.nativeReviewInteractionId ?? wakeContext.completionReceiptId ?? ""}`
         : null;
       const priorDelivery = scopeKey
         ? deliveredByIssueScope.get(scopeKey)
@@ -4619,6 +4620,13 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               contextSnapshot: wakeContext,
             })
           : null;
+        const completionReceipt = candidate.reason === TASK_COMPLETION_RECEIPT_REASON && await taskCompletionReceiptState(db, { companyId: candidate.companyId, issueId, agentId: candidate.agentId, contextSnapshot: wakeContext }) === "pending";
+        if (completionReceipt && !await completionReceiptSourceReady(db, { companyId: candidate.companyId, issueId, agentId: candidate.agentId, contextSnapshot: wakeContext })) {
+          await db.update(agentWakeupRequests).set({ status: "queued", claimedAt: null, updatedAt: new Date() })
+            .where(and(eq(agentWakeupRequests.id, candidate.id), isNull(agentWakeupRequests.runId)));
+          deferred += 1;
+          continue;
+        }
         const onboardingResultReport = targetIssue?.status === "done" && await isCompletedOnboardingHandoffWake(db, {
           companyId: candidate.companyId, issueId, agentId: candidate.agentId,
           reason: candidate.reason, contextSnapshot: wakeContext,
@@ -4626,8 +4634,8 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         if (onboardingResultReport) completedOnboardingGuard = { assigneeAgentId: candidate.agentId, statuses: ["done"], statusVersion: targetIssue!.statusVersion };
         if (
           !targetIssue ||
-          (["done", "cancelled"].includes(targetIssue.status) && !onboardingResultReport) ||
-          (targetIssue.assigneeAgentId !== candidate.agentId && !nativeReview) ||
+          (["done", "cancelled"].includes(targetIssue.status) && !onboardingResultReport && !completionReceipt) ||
+          (targetIssue.assigneeAgentId !== candidate.agentId && !nativeReview && !completionReceipt) ||
           (candidate.reason === "native_completion_review" && !nativeReview)
         ) {
           await db
