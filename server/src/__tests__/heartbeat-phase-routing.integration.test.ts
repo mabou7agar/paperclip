@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { agents, agentConfigRevisions, agentTaskSessions, agentWakeupRequests, companies, createDb, heartbeatRuns, heartbeatRunEvents, issueComments, issueRelations, issues } from "@paperclipai/db";
+import { agents, authUsers, companyMemberships, agentConfigRevisions, agentTaskSessions, agentWakeupRequests, companies, createDb, heartbeatRuns, heartbeatRunEvents, issueComments, issueRelations, issues } from "@paperclipai/db";
 import type { AdapterExecutionContext, AdapterExecutionResult } from "@paperclipai/adapter-utils";
 import { phaseRoutingSchema } from "@paperclipai/shared";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -66,7 +66,10 @@ async function eventually(check: () => Promise<boolean>, attempts = 200) {
 
   async function seed(workMode: "standard" | "planning" = "standard") {
     const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID();
+    await db.insert(authUsers).values({ id: "user", name: "Fixture owner", email: "phase-owner@example.invalid",
+      createdAt: new Date(), updatedAt: new Date() }).onConflictDoNothing();
     await db.insert(companies).values({ id: companyId, name: "Phase routing", issuePrefix: `P${companyId.slice(0, 6)}`, requireBoardApprovalForNewAgents: false, defaultResponsibleUserId: "user" });
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "user", status: "active", membershipRole: "owner" });
     await db.insert(agents).values({ id: agentId, companyId, name: "Worker", role: "engineer", status: "active", adapterType: "claude_local",
       adapterConfig: { model: "claude-test", command: "must-not-leak" }, permissions: {},
       runtimeConfig: { phaseRouting: policy, heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } } });
@@ -86,7 +89,7 @@ async function eventually(check: () => Promise<boolean>, attempts = 200) {
     const { companyId, agentId: ctoId, issueId: parentId } = await seed();
     const workerId = randomUUID(), reviewerId = randomUUID(), workerTask = randomUUID(), reviewTask = randomUUID();
     const marker = `delegated-context-${randomUUID()}`;
-    const companyPolicy = { ...policy, review: [claude], roleResponsibilities: { cto: "planning" as const } };
+    const companyPolicy = phaseRoutingSchema.parse({ ...policy, review: [claude], roleResponsibilities: { cto: "planning" } });
     await phaseRoutingSettingsRepository(db).save(companyId, companyPolicy);
     await db.update(agents).set({ role: "cto", runtimeConfig: { heartbeat: { wakeOnDemand: true } } }).where(eq(agents.id, ctoId));
     for (const [id, name, responsibility] of [[workerId, "Worker", "implementation"], [reviewerId, "Tech Lead", "review"]]) {

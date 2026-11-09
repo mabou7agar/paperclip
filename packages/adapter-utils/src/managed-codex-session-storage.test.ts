@@ -43,7 +43,7 @@ it("preserves explicit homes and rejects foreign state paths", async () => {
   await expect(prepareManagedCodexSessionStorage({ stateDir: directory, sessionIdentity: "account", env: managed })).rejects.toThrow("conflicts");
 });
 
-it.each(["valid", "wrong_header", "wrong_history", "update_trigger"])("relocates only the indexed immutable rollout with %s evidence", async mode => {
+it.each(["valid", "wrong_header", "wrong_history", "update_trigger", "foreign_target"])("relocates only the indexed immutable rollout with %s evidence", async mode => {
   const directory = await root(), stateDir = path.join(directory, "state");
   const first = envFor(directory, "first");
   await prepareManagedCodexSessionStorage({ stateDir, sessionIdentity: "account", env: first });
@@ -51,6 +51,12 @@ it.each(["valid", "wrong_header", "wrong_history", "update_trigger"])("relocates
   const name = `rollout-indexed-${threadId}.jsonl`;
   const rollout = path.join(first.CODEX_HOME, "sessions", name);
   await fs.writeFile(rollout, JSON.stringify({ type: "session_meta", payload: { id: mode === "wrong_header" ? "other" : threadId, history_mode: "legacy" } }) + "\n");
+  if (mode === "foreign_target") {
+    const outside = path.join(directory, "foreign.jsonl");
+    await fs.copyFile(rollout, outside);
+    await fs.rm(rollout);
+    await fs.symlink(outside, rollout);
+  }
   // A different rollout for the same thread must never replace the indexed one.
   await fs.writeFile(path.join(first.CODEX_HOME, "sessions", `rollout-other-${threadId}.jsonl`), "another immutable revision");
   const sqlite = path.join(first.CODEX_SQLITE_HOME, "state_5.sqlite");

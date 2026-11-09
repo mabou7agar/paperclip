@@ -1,0 +1,83 @@
+---
+title: "Upgrading a fork with retained execution state"
+description: "Migration and execution boundaries when bringing configurable routing onto upstream."
+---
+
+This integration brings the configurable phase-routing fork onto upstream commit
+`6383eb80331ef1721ff8d3caa9173f3cce784129`. The previous custom branch was based
+on `1b4c803816e82b0265c8422e1a804327a7ed8c54`; the GitHub fork master was newer
+than that custom branch. Creating a fork does not update a separately based branch.
+
+The integration retains configurable company routing and agent overrides,
+connection usage caps, subscription-first fallback order, usage-health reporting,
+account quota recovery, bounded task continuations, scoped history lookups,
+managed provider session storage and durable completion acknowledgements.
+These remain generic opt-in capabilities; no company IDs, task IDs, credentials,
+organization chart, or live scheduling decisions are embedded in the package.
+
+## Accounting and migration cutover
+
+Upstream owns accounting admission, the financial ledger, project concurrency,
+run dispatch linearization and shutdown. Do not restore the old synchronous
+budget counters or the previous global execution-control polling loop.
+Subscription token tracking is separate from billed API cost.
+
+Eight fork migrations now occupy `0452` through `0459`, after upstream's `0451`.
+Their SQL bytes and SHA256 hashes are unchanged. The migrator recognizes an
+already-applied migration by hash, including when its filename changed. It applies
+only missing upstream migrations. Do not delete the old applied journal rows or
+replay the renamed SQL against a live database.
+
+`packages/db/src/fork-upstream-migration.test.ts` reconstructs the historical base
+and fork migrations in a disposable database, retains sample sessions, task
+context, routing policy and quota receipts, upgrades with the current migrator,
+and checks that a second migration is a no-op. The retained schema snapshot is
+generated from the combined schema and checked by the existing drift test.
+This synthetic upgrade does not replace a pre-deployment clone of the actual
+instance, verified backup/restore, or release qualification.
+
+The upstream independent accounting ledger changes rollback semantics. A database
+that has completed the accounting cutover must not be run by the old binary.
+Before production rollout, use upstream's documented accounting migration and
+reconciliation procedure and a coordinated application/database recovery plan.
+
+## Sessions and guarded delivery
+
+Saved provider history remains scoped to the task and compatible connection
+identity. Disposable authentication homes do not define conversation identity.
+Managed Claude storage and proven Codex rollout-index relocation retain history;
+unknown or incompatible saved identity must remain visible and must not trigger
+an unbounded fresh-session retry.
+
+A completion receipt gives its recipient bounded read-and-acknowledge authority
+on the original task. It does not transfer the worker's ownership or permit test
+execution. Both upstream dispatch gates revalidate the receipt/question and
+require an empty execution lock for non-owning attention. An unrelated executor,
+changed receipt, pause, authorization denial, or budget denial still blocks work.
+The budget reservation generation also prevents duplicate provider dispatch.
+
+## Quota health scheduling
+
+Configured API quota checks use the upstream delivery coordinator. New terminal
+failures and policy changes notify a dedicated private deadline worker. Startup
+reconstructs its next deadline from persisted claims and quota evidence. No
+eligible evidence means no repeating deadline. Account claims bound each probe,
+preserve backoff and renewal times, and deduplicate task recovery separately from
+provider I/O. The scheduler reads metadata and never resolves credentials.
+
+Shutdown/drain fences stop new probes and task continuations. A settled account
+has no continuing health wake until fresh quota evidence appears. General
+monitoring remains separate and can stay alert-only; a health check does not
+justify a repair wake or another proof/test execution.
+
+## Scope of verification
+
+Run the repository's affected verification and required CI for the final commit.
+Use isolated databases and simulated adapters for routing/loop regressions; keep
+real subscription/API operations out of test fixtures. Record original failures
+and the changes that explain passing reruns. Unit, source-build, live readback,
+provider execution and production deployment are separate claims.
+
+Task/story turn budgets, class capacity reservations, risk-based acceptance and
+mandatory different-provider review are separate enforcement work. Organization
+instructions alone do not establish those server gates.

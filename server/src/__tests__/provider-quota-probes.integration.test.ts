@@ -41,6 +41,7 @@ import { connectionUsageCapsService } from "../services/connection-usage-caps.js
 import { connectionUsageRepository } from "../repositories/connection-usage.js";
 import { connectionCapacityRecoveryService } from "../services/connection-capacity-recovery.js";
 import { phaseRoutingService } from "../services/phase-routing.js";
+import { providerQuotaHealthSchedule } from "../services/provider-quota-health-schedule.js";
 import { providerQuotaProbeService } from "../services/provider-quota-probes.js";
 import { providerQuotaProbeRepository } from "../repositories/provider-quota-probes.js";
 import { providerQuotaRepository } from "../repositories/provider-quota.js";
@@ -219,6 +220,51 @@ const support = await getEmbeddedPostgresTestSupport();
         policy,
       };
     }
+    it("reconstructs configured health deadlines without resolving credentials and disarms recovered accounts", async () => {
+      const f = await fixture(60_000);
+      const schedule = providerQuotaHealthSchedule(db, () => f.now);
+      expect(await schedule.next()).toBe(f.now.getTime() + 1_740_000);
+      expect(mocks.credential).not.toHaveBeenCalled();
+      expect(mocks.select).not.toHaveBeenCalled();
+      const due = new Date(f.now.getTime() + 1_740_000);
+      const repository = providerQuotaProbeRepository(db);
+      const claim = await repository.claim({ companyId: f.companyId, connectionId: f.connectionId,
+        grantId: f.grantId, sourceRunId: f.sourceId, model: "test-model", intervalSeconds: 1800, now: due });
+      expect(claim).not.toBeNull();
+      await repository.complete(claim!.id, { outcome: "available", usage: {
+        inputTokens: 1, outputTokens: 1, cachedInputTokens: 0, cacheWriteTokens: 0,
+      }, retryAfterSeconds: null }, due);
+      await db.update(companies).set({ status: "paused" }).where(eq(companies.id, f.companyId));
+      expect(await schedule.next()).toBeNull();
+      await db.update(companies).set({ status: "active" }).where(eq(companies.id, f.companyId));
+      // Recovery remains due until its durable delivery receipt is stored.
+      expect(await schedule.next()).toBe(f.now.getTime());
+      const recovery = await repository.claimRecovery(claim!.id, due);
+      await repository.delivered(claim!.id, recovery!.recoveryClaimId!, due);
+      expect(await schedule.next()).toBeNull();
+    });
+    it("preserves claim retry deadlines and stops scheduling disabled policies", async () => {
+      const f = await fixture();
+      const repository = providerQuotaProbeRepository(db);
+      const claim = await repository.claim({ companyId: f.companyId, connectionId: f.connectionId,
+        grantId: f.grantId, sourceRunId: f.sourceId, model: "test-model", intervalSeconds: 1800, now: f.now });
+      await repository.complete(claim!.id, { outcome: "quota", usage: {
+        inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheWriteTokens: 0,
+      }, retryAfterSeconds: 7200 }, f.now);
+      expect(await providerQuotaHealthSchedule(db, () => f.now).next()).toBe(f.now.getTime() + 7_200_000);
+      await db.update(companyPhaseRouting).set({ policy: { ...f.policy, apiQuotaRecheckSeconds: 0 } })
+        .where(eq(companyPhaseRouting.companyId, f.companyId));
+      expect(await providerQuotaHealthSchedule(db, () => f.now).next()).toBeNull();
+    });
+    it("does not probe or promote a capacity wait while draining", async () => {
+      const f = await fixture(), retry = vi.fn(), request = vi.fn();
+      expect(await providerQuotaProbeService(db, retry, request, () => f.now).sweep(f.now, () => false))
+        .toEqual({ checked: 0, recovered: 0 });
+      expect(await connectionCapacityRecoveryService(db, retry).reconcile(f.companyId, f.now, () => false))
+        .toEqual({ promoted: 0 });
+      expect(mocks.select).not.toHaveBeenCalled(); expect(mocks.credential).not.toHaveBeenCalled();
+      expect(retry).not.toHaveBeenCalled(); expect(request).not.toHaveBeenCalled();
+    });
     const success = () =>
       new Response(
         JSON.stringify({

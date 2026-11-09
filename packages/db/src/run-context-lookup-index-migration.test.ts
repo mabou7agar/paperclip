@@ -31,7 +31,7 @@ suite("run-context lookup migration", () => {
     const lookup = () => sql`select id from heartbeat_runs where company_id=${company} and (context_snapshot->>'issueId'='target' or context_snapshot->'paperclipIssue'->>'id'='target') order by id`;
     const before = await lookup();
     expect(before.map(row => row.id)).toEqual(runs.slice(0,2).map(row => row.id));
-    const migration = await readFile(new URL("./migrations/0337_run_context_lookup_indexes.sql", import.meta.url), "utf8");
+    const migration = await readFile(new URL("./migrations/0455_run_context_lookup_indexes.sql", import.meta.url), "utf8");
     for (let replay=0; replay<2; replay++) for (const statement of migration.split("--> statement-breakpoint").filter(x=>x.trim())) await sql.unsafe(statement);
     expect(await lookup()).toEqual(before);
     expect((await sql`select id from heartbeat_runs where company_id=${company} and context_snapshot->'aiConnection'->>'connectionId'='account'`).map(row=>row.id)).toEqual([runs[1].id]);

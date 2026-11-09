@@ -1,3 +1,22 @@
+import { RUNNER_REVISION_WAIT_RETRY_REASON } from "./runner-revision-mismatch.js";
+import { PROVIDER_ATTEMPT_CREDIT_GENERATION_LIMIT } from "./native-runtime/provider-attempt-outcome.js";
+
+/**
+ * A preparation that a restart interrupted before any provider work started
+ * (its certificate records `providerWorkStarted: false`) spent no provider
+ * work, so it never charges the failure budget (durable-ownership plan,
+ * section F). Its own counter keeps a crash loop bounded, at the same limit
+ * as the native controller-generation cap.
+ */
+export const INTERRUPTED_PREPARATION_RETRY_REASON = "interrupted_preparation";
+export const INTERRUPTED_PREPARATION_RETRY_MAX_ATTEMPTS = PROVIDER_ATTEMPT_CREDIT_GENERATION_LIMIT;
+
+/** Retry lanes that keep their own counter and never spend failures. */
+const UNCHARGED_RETRY_LANES: ReadonlySet<string> = new Set([
+  "workspace_busy", "ai_connection_busy", "ai_connection_pool_wait", RUNNER_REVISION_WAIT_RETRY_REASON,
+  INTERRUPTED_PREPARATION_RETRY_REASON,
+]);
+
 type RetryRun = {
   scheduledRetryAttempt?: number | null;
   scheduledRetryReason?: string | null;
@@ -11,6 +30,11 @@ export interface ExecutionRetryAccounting {
   failureRetries: number;
   maxTurnContinuations: number;
   quotaRenewalWaits?: number;
+  /**
+   * Interrupted-preparation retries in this chain. Saved with the chain, so a
+   * wait retry in between never resets it. Omitted while zero.
+   */
+  interruptedPreparations?: number;
 }
 
 function count(value: unknown): number | null {
@@ -25,8 +49,10 @@ function savedAccounting(run: RetryRun): ExecutionRetryAccounting | null {
   const maxTurnContinuations = count(saved.maxTurnContinuations);
   if (saved.version !== 1 || failureRetries === null || maxTurnContinuations === null) return null;
   const quotaRenewalWaits = count(saved.quotaRenewalWaits) ?? 0;
+  const interruptedPreparations = count(saved.interruptedPreparations) ?? 0;
   return { version: 1, failureRetries, maxTurnContinuations,
-    ...(quotaRenewalWaits > 0 ? { quotaRenewalWaits } : {}) };
+    ...(quotaRenewalWaits > 0 ? { quotaRenewalWaits } : {}),
+    ...(interruptedPreparations > 0 ? { interruptedPreparations } : {}) };
 }
 
 function historicalFailureCount(run: RetryRun): number {
@@ -46,13 +72,17 @@ function historicalFailureCount(run: RetryRun): number {
 export function executionRetryAccounting(run: RetryRun): ExecutionRetryAccounting {
   const saved = savedAccounting(run);
   const quotaRenewalWaits = executionQuotaRenewalWaitCount(run);
-  const nonFailureLane = ["max_turns_continuation", "issue_disposition_repair", "workspace_busy", "ai_connection_busy", "ai_connection_pool_wait"].includes(run.scheduledRetryReason ?? "");
+  const reason = run.scheduledRetryReason ?? "";
+  const nonFailureLane = reason === "max_turns_continuation" || reason === "issue_disposition_repair" || UNCHARGED_RETRY_LANES.has(reason);
+  const interruptedPreparations = Math.max(saved?.interruptedPreparations ?? 0,
+    reason === INTERRUPTED_PREPARATION_RETRY_REASON ? count(run.scheduledRetryAttempt) ?? 0 : 0);
   return {
     version: 1,
     failureRetries: Math.max(saved?.failureRetries ?? 0, saved && nonFailureLane ? 0 : historicalFailureCount(run)),
     maxTurnContinuations: Math.max(saved?.maxTurnContinuations ?? 0,
       run.scheduledRetryReason === "max_turns_continuation" ? count(run.scheduledRetryAttempt) ?? 0 : 0),
     ...(quotaRenewalWaits > 0 ? { quotaRenewalWaits } : {}),
+    ...(interruptedPreparations > 0 ? { interruptedPreparations } : {}),
   };
 }
 
@@ -62,7 +92,8 @@ export function executionFailureRetryCount(run: RetryRun): number {
 }
 
 export function executionRetryAttemptCount(run: RetryRun, reason: string): number {
-  if (reason === "workspace_busy" || reason === "ai_connection_busy" || reason === "ai_connection_pool_wait") {
+  if (reason === INTERRUPTED_PREPARATION_RETRY_REASON) return executionRetryAccounting(run).interruptedPreparations ?? 0;
+  if (UNCHARGED_RETRY_LANES.has(reason)) {
     return run.scheduledRetryReason === reason ? count(run.scheduledRetryAttempt) ?? 0 : 0;
   }
   const accounting = executionRetryAccounting(run);
@@ -80,6 +111,7 @@ export function accountingForScheduledRetry(run: RetryRun, reason: string, attem
   const accounting = executionRetryAccounting(run);
   if (options.quotaRenewalWait) accounting.quotaRenewalWaits = attempt;
   if (reason === "max_turns_continuation") accounting.maxTurnContinuations = attempt;
-  else if (reason !== "workspace_busy" && reason !== "ai_connection_busy" && reason !== "ai_connection_pool_wait") accounting.failureRetries = attempt;
+  else if (reason === INTERRUPTED_PREPARATION_RETRY_REASON) accounting.interruptedPreparations = attempt;
+  else if (!UNCHARGED_RETRY_LANES.has(reason)) accounting.failureRetries = attempt;
   return accounting;
 }

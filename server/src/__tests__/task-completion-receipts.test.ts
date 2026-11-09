@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { agents, authUsers, agentWakeupRequests, companies, createDb, heartbeatRuns, issueComments, issues } from "@paperclipai/db";
+import { agents, authUsers, companyMemberships, agentWakeupRequests, companies, createDb, heartbeatRuns, issueComments, issues } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { issueService } from "../services/issues.js";
 import { heartbeatService, shouldQueueFollowupForRunningIssueWake } from "../services/heartbeat.js";
@@ -22,6 +22,7 @@ const support = await getEmbeddedPostgresTestSupport();
     const companyId = randomUUID(), brain = randomUUID(), worker = randomUUID();
     await db.insert(authUsers).values({ id: "responsible-user", name: "Fixture owner", email: "receipt-fixture@example.invalid", createdAt: new Date(), updatedAt: new Date() }).onConflictDoNothing();
     await db.insert(companies).values({ id: companyId, name: "Receipt company", issuePrefix: `R${companyId.slice(0, 5)}`, defaultResponsibleUserId: "responsible-user", requireBoardApprovalForNewAgents: false });
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "responsible-user", status: "active", membershipRole: "owner" });
     await db.insert(agents).values([brain, worker].map((id, i) => ({ id, companyId, name: i ? "Worker" : "Delegator", role: i ? "engineer" : "cto", status: "active", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } }, permissions: {} })));
     const [parent] = await db.insert(issues).values({ companyId, title: "Delegator disposition", status: parentStatus, assigneeAgentId: brain }).returning();
     const [child] = await db.insert(issues).values({ companyId, parentId: parent.id, title: "Frozen implementation", description: "Plan revision A; exact candidate abc123; completed evidence must not be re-executed", status: "in_progress", assigneeAgentId: worker }).returning();

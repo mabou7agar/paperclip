@@ -26,14 +26,16 @@ export function providerQuotaProbeService(
     quota = providerQuotaRepository(db),
     accounts = aiConnectionService(db);
   return {
-    async sweep(now = clock()) {
+    async sweep(now = clock(), canContinue: () => boolean = () => true) {
       let checked = 0,
         recovered = 0;
+      if (!canContinue()) return { checked, recovered };
       for (const company of await repository.policies()) {
+        if (!canContinue()) break;
         for (const connection of await repository.connections(
           company.companyId,
         )) {
-          if (checked >= 4) break;
+          if (checked >= 4 || !canContinue()) break;
           const seconds =
             company.policy.apiQuotaRecheckOverrides?.[connection.id] ??
             company.policy.apiQuotaRecheckSeconds ??
@@ -94,6 +96,7 @@ export function providerQuotaProbeService(
               ? messagesQuotaDestination(selectedMeta.data)
               : null;
             if (!destination || evidence.model.length > 200) continue;
+            if (!canContinue()) break;
             const claim = await repository.claim({
               companyId: company.companyId,
               connectionId: connection.id,
@@ -123,6 +126,12 @@ export function providerQuotaProbeService(
                 clock(),
               );
               continue;
+            }
+            if (!canContinue()) {
+              await repository.complete(claim.id, { outcome: "unavailable", usage: {
+                inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheWriteTokens: 0,
+              }, retryAfterSeconds: null }, clock());
+              break;
             }
             checked++;
             const result = await probeMessagesQuota(
@@ -183,6 +192,7 @@ export function providerQuotaProbeService(
         }
       }
       for (const pending of await repository.pendingRecoveries()) {
+        if (!canContinue()) break;
         const probe = await repository.claimRecovery(pending.id, clock());
         if (!probe?.recoveryClaimId) continue;
         let owned = true;
@@ -244,6 +254,7 @@ export function providerQuotaProbeService(
               owned = false;
               break;
             }
+            if (!canContinue()) { owned = false; break; }
             await retryNow({
               issueId,
               expectedRunId: wait.id,
@@ -255,7 +266,7 @@ export function providerQuotaProbeService(
         if (owned)
           await repository.delivered(probe.id, probe.recoveryClaimId, clock());
       }
-      await connectionCapacityRecoveryService(db,retryNow).reconcile();
+      if (canContinue()) await connectionCapacityRecoveryService(db,retryNow).reconcile(undefined, now, canContinue);
       return { checked, recovered };
     },
   };

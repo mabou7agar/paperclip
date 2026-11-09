@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { and, desc, eq, isNull, sql } from "drizzle-orm";
 import {
   connectionGrants,
+  companies,
   agents,
   issues,
   companyPhaseRouting,
@@ -14,7 +15,16 @@ import type { ApiQuotaProbeOutcome } from "../types/api-quota-probe.js";
 
 export function providerQuotaProbeRepository(db: Db) {
   return {
-    policies: () => db.select().from(companyPhaseRouting),
+    policies: () => db.select({ companyId: companyPhaseRouting.companyId, policy: companyPhaseRouting.policy })
+      .from(companyPhaseRouting).innerJoin(companies, eq(companies.id, companyPhaseRouting.companyId))
+      .where(eq(companies.status, "active")),
+    latest: (companyId: string, connectionId: string, grantId: string) => db.select({
+      startedAt: providerQuotaProbes.startedAt, nextCheckAt: providerQuotaProbes.nextCheckAt,
+      outcome: providerQuotaProbes.outcome,
+    }).from(providerQuotaProbes).where(and(eq(providerQuotaProbes.companyId, companyId),
+      eq(providerQuotaProbes.connectionId, connectionId), eq(providerQuotaProbes.grantId, grantId)))
+      .orderBy(desc(providerQuotaProbes.startedAt), desc(providerQuotaProbes.id)).limit(1)
+      .then(rows => rows[0] ?? null),
     connections: (companyId: string) =>
       db
         .select({
@@ -140,16 +150,18 @@ export function providerQuotaProbeRepository(db: Db) {
     },
     pendingRecoveries: () =>
       db
-        .select()
+        .select({ probe: providerQuotaProbes })
         .from(providerQuotaProbes)
+        .innerJoin(companies, eq(companies.id, providerQuotaProbes.companyId))
         .where(
           and(
+            eq(companies.status, "active"),
             eq(providerQuotaProbes.outcome, "available"),
             isNull(providerQuotaProbes.recoveryDeliveredAt),
           ),
         )
         .orderBy(providerQuotaProbes.completedAt)
-        .limit(20),
+        .limit(20).then(rows => rows.map(row => row.probe)),
     claimRecovery: (id: string, now: Date) =>
       db
         .update(providerQuotaProbes)

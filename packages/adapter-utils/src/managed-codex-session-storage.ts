@@ -38,7 +38,7 @@ export async function prepareManagedCodexSessionStorage(input: {
     const directoryIndex = Math.max(parts.lastIndexOf("sessions"), parts.lastIndexOf("archived_sessions"));
     if (directoryIndex < 0 || !parts.at(-1)?.endsWith(`-${threadId}.jsonl`)) throw new Error("codex_session_index_path_unproven");
     const target = realpathSync(path.join(storage, ...parts.slice(directoryIndex)));
-    if (!target.startsWith(path.resolve(storage) + path.sep)) throw new Error("codex_session_index_path_unproven");
+    if (!target.startsWith(realpathSync(storage) + path.sep)) throw new Error("codex_session_index_path_unproven");
     const file = openSync(target, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
     let first: { type?: unknown; payload?: { id?: unknown; history_mode?: unknown } };
     try {
