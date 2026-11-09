@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { agents, authUsers, companyMemberships, agentConfigRevisions, agentTaskSessions, agentWakeupRequests, companies, createDb, heartbeatRuns, heartbeatRunEvents, issueComments, issueRelations, issues } from "@paperclipai/db";
+import { activityLog, agents, authUsers, companyMemberships, agentConfigRevisions, agentTaskSessions, agentWakeupRequests, companies, createDb, heartbeatRuns, heartbeatRunEvents, issueComments, issueRelations, issues } from "@paperclipai/db";
 import type { AdapterExecutionContext, AdapterExecutionResult } from "@paperclipai/adapter-utils";
 import { phaseRoutingSchema } from "@paperclipai/shared";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -96,6 +96,36 @@ async function eventually(check: () => Promise<boolean>, attempts = 1200) {
     return heartbeat.wakeup(agentId, { source: "assignment", reason: "issue_assigned", payload: { issueId }, contextSnapshot: { issueId, wakeReason: "issue_assigned" } });
   }
   const success = (sessionId = randomUUID()): AdapterExecutionResult => ({ exitCode: 0, signal: null, timedOut: false, errorMessage: null, summary: "Finished fake run", provider: "test", model: "test", sessionId, sessionParams: { sessionId } });
+
+  it("resumes an activated task fallback after its arming deadline without quota failure or retry", async () => {
+    const { companyId, agentId, issueId } = await seed("planning");
+    const drill = { id: randomUUID(), phase: "planning" as const, profileId: "claude", expiresAt: new Date(Date.now() - 1_000).toISOString() };
+    await phaseRoutingSettingsRepository(db).save(companyId, phaseRoutingSchema.parse({ ...policy,
+      taskOverrides: { [issueId]: { availabilityDrill: drill } } }));
+    await db.insert(activityLog).values({ id: drill.id, companyId, actorType: "system", actorId: "phase-routing",
+      action: "phase_routing.controlled_availability_fault", entityType: "issue", entityId: issueId,
+      details: { ...drill, synthetic: true, providerWorkStarted: false, sharedQuotaChanged: false },
+      createdAt: new Date(Date.parse(drill.expiresAt) - 1_000) });
+    const sessionId = randomUUID();
+    mocks.execute.mockImplementation(async ctx => {
+      expect(ctx.config.model).toBe("codex-test");
+      return success(sessionId);
+    });
+    for (let turn = 0; turn < 2; turn++) {
+      await wake(agentId, issueId);
+      await eventually(async () => mocks.execute.mock.calls.length === turn + 1);
+      await heartbeat.drainActiveRunExecutions();
+    }
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId));
+    expect(runs).toHaveLength(2);
+    expect(runs.every(run => run.status === "succeeded" && !run.retryOfRunId && !run.scheduledRetryAt)).toBe(true);
+    expect(runs.find(run => run.sessionIdBefore === sessionId)?.sessionIdAfter).toBe(sessionId);
+    const claims = await db.select().from(activityLog).where(eq(activityLog.id, drill.id));
+    expect(claims).toHaveLength(1);
+    expect(await providerQuotaRepository(db).latestEvidence(companyId, claudeId, new Date(), grantId)).toBeNull();
+    expect(await providerQuotaRepository(db).latestEvidence(companyId, codexId, new Date(), grantId)).toBeNull();
+    expect((await phaseRoutingSettingsRepository(db).get(companyId))?.planning[0].id).toBe("claude");
+  }, 60_000);
 
   it("routes a standard CTO to worker to Tech Lead review and back without repeating work", async () => {
     const { companyId, agentId: ctoId, issueId: parentId } = await seed();

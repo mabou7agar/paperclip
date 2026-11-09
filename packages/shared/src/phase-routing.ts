@@ -7,6 +7,14 @@ export const EXECUTION_RESPONSIBILITIES = ["planning", "implementation", "review
 export const executionResponsibilitySchema = z.enum(EXECUTION_RESPONSIBILITIES);
 
 export const PHASE_ROUTING_ADAPTERS = ["claude_local", "codex_local", "opencode_local"] as const;
+/** Board-owned task eligibility fault, never a provider quota receipt. */
+export const phaseAvailabilityDrillSchema = z.object({
+  id: z.string().uuid(),
+  phase: executionResponsibilitySchema,
+  profileId: z.string().trim().min(1).max(80),
+  expiresAt: z.string().datetime(),
+}).strict();
+export type PhaseAvailabilityDrill = z.infer<typeof phaseAvailabilityDrillSchema>;
 export const phaseRouteProfileSchema = z.object({
   id: z.string().trim().min(1).max(80),
   adapterType: z.enum(PHASE_ROUTING_ADAPTERS),
@@ -38,6 +46,7 @@ export const phaseRoutingSchema = z.object({
     planning: phaseProfilesSchema.optional(),
     implementation: phaseProfilesSchema.optional(),
     review: phaseProfilesSchema.optional(),
+    availabilityDrill: phaseAvailabilityDrillSchema.optional(),
   }).strict()).optional(),
   /** Connection health checks do not run agents. Omitted/0 preserves a manual hold. */
   apiQuotaRecheckSeconds: z.number().int().min(0).max(86400).refine(v => v === 0 || v >= 300).optional(),

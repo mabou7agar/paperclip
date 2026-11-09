@@ -73,6 +73,39 @@ policy API (Bruno example included).
 
 ## Quota safety and session reuse
 
+### Controlled task availability drills
+
+The versioned company-policy API also accepts a task exception with
+`availabilityDrill: { id, phase, profileId, expiresAt }`. This is a board-owned
+eligibility fault, not a simulated provider response. Only an unassigned,
+unstarted backlog task in the same company can be newly armed. Use a fresh UUID,
+the phase's primary profile, at least one fallback, and a deadline within 30
+minutes. Agent overrides cannot arm drills. The Bruno collection contains an
+example; GET and preserve the complete policy before its replacement PUT.
+
+Normal admission and account authorization still apply. The selected primary is
+treated as unavailable only for that exact task and phase. The ordinary fallback
+selector chooses the next eligible profile. One activity-log diagnostic is claimed
+atomically across concurrent resolution and server restart. It never writes a
+provider quota failure, changes a shared account cooldown, invokes the primary,
+or schedules a retry. Other tasks and child tasks keep their ordinary chains.
+
+The deadline bounds first activation. A previously accepted diagnostic remains
+valid for the original nonterminal task, so a long implementation does not change
+the CTO's fallback profile or compatible saved session on return. An unactivated
+expired drill or a changed effective chain fails closed with an operator-action
+message; there is no automatic reset, renewal wake, or silent return to the primary.
+The full effective chain must match the board's chain, including models, accounts
+and effort; an agent override cannot silently replace its profiles.
+Remove the exception after the task completes. Remove it
+before rolling back to a release whose strict policy schema predates this field.
+Existing policies with no drill retain their behavior and saved session keys.
+
+Real-provider execution after this controlled eligibility fault proves fallback
+selection, context transfer and return routing. It does not prove that a provider
+actually rejected a request for quota; quota-response classification has its own
+isolated tests.
+
 Only the adapter's typed `provider_quota` outcome triggers a quota fallback.
 Authentication errors require configuration; ordinary failures retain their
 existing recovery policy. A company-scoped cooldown uses immutable account

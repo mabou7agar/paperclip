@@ -50,6 +50,16 @@ describe("versioned phase routing API", () => {
     expect(response.body).toEqual({ policy: scoped });
     expect((await request(app({ type: "agent" } as never)).put(path).send(scoped)).status).toBe(403);
   });
+  it("keeps controlled fault configuration board-only and validates its shape", async () => {
+    const scoped = { ...policy, taskOverrides: { "30000000-0000-4000-8000-000000000001": {
+      availabilityDrill: { id: "40000000-0000-4000-8000-000000000001", phase: "planning", profileId: "claude", expiresAt: new Date(Date.now() + 600_000).toISOString() },
+    } } };
+    expect((await request(app()).put(path).send(scoped)).body).toEqual({ policy: scoped });
+    expect((await request(app({ type: "agent" } as never)).put(path).send(scoped)).status).toBe(403);
+    const invalid = { ...scoped, taskOverrides: { "30000000-0000-4000-8000-000000000001": { availabilityDrill: { ...scoped.taskOverrides["30000000-0000-4000-8000-000000000001"].availabilityDrill, id: "invalid" } } } };
+    expect((await request(app()).put(path).send(invalid)).status).toBe(400);
+    expect((await request(app()).put(path).send({ ...scoped, taskOverrides: { invalid: scoped.taskOverrides["30000000-0000-4000-8000-000000000001"] } })).status).toBe(400);
+  });
   it("rejects foreign-company, agent, and insufficient-permission mutations", async () => {
     expect((await request(app()).get("/api/v1/companies/foreign/phase-routing")).status).toBe(403);
     expect((await request(app({ type: "agent" } as never)).get(path)).status).toBe(403);
@@ -66,8 +76,9 @@ describe("versioned phase routing API", () => {
     try {
       const get = await curl("curl", ["--fail-with-body", "--silent", "--show-error", url]);
       expect(JSON.parse(get.stdout)).toEqual({ policy });
-      const put = await curl("curl", ["--fail-with-body", "--silent", "--show-error", "--request", "PUT", "--header", "Content-Type: application/json", "--data-binary", JSON.stringify({ ...policy, review: policy.planning, defaultResponsibility: "implementation", roleResponsibilities: { cto: "planning" }, taskOverrides: { "30000000-0000-4000-8000-000000000001": { review: policy.planning } } }), url]);
-      expect(JSON.parse(put.stdout)).toEqual({ policy: { ...policy, review: policy.planning, defaultResponsibility: "implementation", roleResponsibilities: { cto: "planning" }, taskOverrides: { "30000000-0000-4000-8000-000000000001": { review: policy.planning } } } });
+      const payload = { ...policy, review: policy.planning, defaultResponsibility: "implementation", roleResponsibilities: { cto: "planning" }, taskOverrides: { "30000000-0000-4000-8000-000000000001": { review: policy.planning, availabilityDrill: { id: "40000000-0000-4000-8000-000000000001", phase: "planning", profileId: "claude", expiresAt: new Date(Date.now() + 600_000).toISOString() } } } };
+      const put = await curl("curl", ["--fail-with-body", "--silent", "--show-error", "--request", "PUT", "--header", "Content-Type: application/json", "--data-binary", JSON.stringify(payload), url]);
+      expect(JSON.parse(put.stdout)).toEqual({ policy: payload });
     } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
   });
 });

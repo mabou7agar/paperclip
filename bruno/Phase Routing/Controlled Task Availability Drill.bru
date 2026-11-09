@@ -1,0 +1,42 @@
+meta {
+  name: Controlled Task Availability Drill
+  type: http
+  seq: 6
+}
+put {
+  url: {{baseUrl}}/api/v1/companies/{{companyId}}/phase-routing
+  body: json
+  auth: bearer
+}
+auth:bearer {
+  token: {{boardToken}}
+}
+body:json {
+  {
+    "enabled": true,
+    "planning": [
+      {"id":"claude","adapterType":"claude_local","model":"claude-opus-5-5","binding":{"mode":"responsible_user","provider":"anthropic","method":"subscription"}},
+      {"id":"astra","adapterType":"codex_local","model":"gpt-6-astra","binding":{"mode":"responsible_user","provider":"openai","method":"subscription"}}
+    ],
+    "implementation": [{"id":"sol","adapterType":"codex_local","model":"gpt-6.1-sol","binding":{"mode":"responsible_user","provider":"openai","method":"subscription"}}],
+    "taskOverrides": {
+      "{{taskId}}": {
+        "availabilityDrill": {"id":"{{drillId}}","phase":"planning","profileId":"claude","expiresAt":"{{drillExpiresAt}}"}
+      }
+    }
+  }
+}
+docs {
+  GET the current complete policy and preserve all its fields before using this PUT replacement.
+  Use a fresh drill UUID and an expiry within 30 minutes. taskId must identify an unassigned,
+  unstarted backlog task in the company. After saving, assign/start that task normally.
+  The primary profile is unavailable only for this exact task and phase. The ordinary fallback
+  selector and all execution gates still apply. One activity receipt is recorded durably.
+  No provider quota receipt, account cooldown, session reset or automatic retry is created.
+  The deadline bounds first activation. An unactivated expired drill fails closed, with no
+  renewal. A previously activated drill keeps its fallback affinity until the task is terminal,
+  so the CTO can resume its saved session after a long implementation. The effective chain
+  must match the full board-owned profile identities; agent overrides cannot replace it.
+  After completion remove this task exception, preserving all other policy fields. Remove it
+  before rolling back to a release whose strict policy schema predates availabilityDrill.
+}
