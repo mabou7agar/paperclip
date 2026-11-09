@@ -124,9 +124,16 @@ async function eventually(check: () => Promise<boolean>, attempts = 1200) {
     });
     for (let turn = 0; turn < 2; turn++) {
       if (turn) await db.update(issues).set({ status: "done" }).where(eq(issues.id, blockerId));
-      await wake(agentId, issueId);
+      // A dependency completion is a continuation, not a new assignment
+      // (issue_assigned deliberately starts fresh in the production guard).
+      const run = turn ? await heartbeat.wakeup(agentId, { source: "automation", reason: "issue_blockers_resolved",
+        payload: { issueId }, contextSnapshot: { issueId, wakeReason: "issue_blockers_resolved" } }) : await wake(agentId, issueId);
       await eventually(async () => mocks.execute.mock.calls.length === turn + 1);
       await heartbeat.drainActiveRunExecutions();
+      // Dispatch notification can precede durable completion settlement.
+      await eventually(async () => !["queued", "running"].includes((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run!.id)))[0]?.status));
+      const [settled] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run!.id));
+      expect(settled.status, JSON.stringify({ code: settled.errorCode, error: settled.error, before: settled.sessionIdBefore, after: settled.sessionIdAfter })).toBe("succeeded");
     }
     const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId));
     expect(mocks.execute).toHaveBeenCalledTimes(2);
