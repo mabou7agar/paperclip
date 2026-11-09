@@ -29,6 +29,7 @@ export function restartProcessStartMatches(observed: string, expected: string, p
 }
 
 export const UNCERTAIN_GROUP_IDENTITY = "Owned process group identity became uncertain";
+export const PROCESS_INSPECTION_UNAVAILABLE = "Could not inspect owned process identities";
 
 /**
  * Under load or during a graceful drain a whole group can turn over between
@@ -39,11 +40,19 @@ export const UNCERTAIN_GROUP_IDENTITY = "Owned process group identity became unc
  * meanwhile; a straggler that outlives the deadline keeps the original error.
  */
 export async function settleUncertainIdentity<T>(step: () => Promise<T>, until: () => number, pollMs = 100): Promise<T> {
+  let inspectionRetried = false;
   for (;;) {
     try { return await step(); }
     catch (error) {
-      if (!String(error).includes(UNCERTAIN_GROUP_IDENTITY) || Date.now() >= until()) throw error;
-      await new Promise(resolve => setTimeout(resolve, pollMs));
+      const unavailable = error instanceof Error && error.message === PROCESS_INSPECTION_UNAVAILABLE;
+      const uncertain = String(error).includes(UNCERTAIN_GROUP_IDENTITY);
+      if (Date.now() >= until() || (!uncertain && (!unavailable || inspectionRetried))) throw error;
+      // One unavailable OS snapshot may be transient. It grants no authority:
+      // obtain a fresh proven table before any group signal, without extending
+      // the original phase deadline. A second failure retains the fail-closed path.
+      if (unavailable) inspectionRetried = true;
+      await new Promise(resolve => setTimeout(resolve, Math.min(pollMs, Math.max(0, until() - Date.now()))));
+      if (Date.now() >= until()) throw error;
     }
   }
 }
@@ -69,7 +78,7 @@ export function createProcessTreeOwner(root: ChildProcess, options: {
     if (observing) return observing;
     observing = (async () => {
       const next = await readTable();
-      if (!next) throw new Error("Could not inspect owned process identities");
+      if (!next) throw new Error(PROCESS_INSPECTION_UNAVAILABLE);
       const callerGroup = next.find(row => row.pid === process.pid)?.processGroupId;
       if (callerGroup === undefined) throw new Error("Cleanup caller group identity is unavailable");
       const rootRow = next.find(row => row.pid === root.pid);

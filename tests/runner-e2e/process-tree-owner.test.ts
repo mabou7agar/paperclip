@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { expect, it } from "vitest";
-import { createProcessTreeOwner, stopOwnedProcessTree } from "./process-tree-owner.js";
+import { expect, it, vi } from "vitest";
+import { createProcessTreeOwner, stopOwnedProcessTree, PROCESS_INSPECTION_UNAVAILABLE, settleUncertainIdentity } from "./process-tree-owner.js";
 import { readProcessTable, type ProcessObservation } from "./process-tree.js";
 
 function row(pid: number, parentPid: number, processGroupId: number, started = `start-${pid}`, state = "S"): ProcessObservation {
@@ -279,4 +279,75 @@ it.skipIf(process.platform === "win32")("keeps an uncertainty that starts at SIG
     expect(elapsed).toBeLessThan(gracefulMs + forcedMs + 250);
     expect(signals.filter(([, signal]) => signal === "SIGKILL")).toEqual([]);
   } finally { owner.stopObserving(); }
+});
+
+
+it.skipIf(process.platform === "win32").each([1, 2])("requires a fresh proven snapshot after %i unavailable inspection(s)", async failures => {
+  const self = row(process.pid, 1, 10);
+  const table = [self, row(100, process.pid, 100)];
+  const signals: Array<[number, NodeJS.Signals]> = [];
+  const direct: NodeJS.Signals[] = [];
+  const child = { pid: 100, exitCode: null as number | null, signalCode: null as NodeJS.Signals | null,
+    kill: (signal: NodeJS.Signals) => { direct.push(signal); child.exitCode = 0; return true; } };
+  let stopping = false, missing = 0;
+  const owner = createProcessTreeOwner(child as unknown as ChildProcess, {
+    readTable: async () => {
+      if (stopping && missing < failures) {
+        expect(signals).toEqual([]);
+        missing++;
+        return null;
+      }
+      return child.exitCode === null ? table : [self];
+    },
+    signalGroup: (pid, signal) => { signals.push([pid, signal]); child.exitCode = 0; },
+  });
+  try {
+    await owner.observe(); owner.stopObserving(); stopping = true;
+    const stop = stopOwnedProcessTree(child as unknown as ChildProcess, owner, 1_000, 100);
+    if (failures === 1) {
+      await stop;
+      expect(signals).toEqual([[100, "SIGTERM"]]);
+      expect(direct).toEqual([]);
+    } else {
+      await expect(stop).rejects.toThrow(PROCESS_INSPECTION_UNAVAILABLE);
+      expect(signals).toEqual([]);
+      expect(direct).toEqual(["SIGTERM"]);
+    }
+    expect(missing).toBe(failures);
+  } finally { owner.stopObserving(); }
+});
+
+it.skipIf(process.platform === "win32")("does not renew an expired cleanup deadline to retry an unavailable snapshot", async () => {
+  const self = row(process.pid, 1, 10);
+  let stopping = false, missing = 0;
+  const signals: unknown[] = [];
+  const child = { pid: 100, exitCode: null as number | null, signalCode: null as NodeJS.Signals | null,
+    kill: () => { child.exitCode = 0; return true; } };
+  const owner = createProcessTreeOwner(child as unknown as ChildProcess, {
+    readTable: async () => { if (stopping) { missing++; return null; } return [self, row(100, process.pid, 100)]; },
+    signalGroup: (...args) => { signals.push(args); },
+  });
+  try {
+    await owner.observe(); owner.stopObserving(); stopping = true;
+    await expect(stopOwnedProcessTree(child as unknown as ChildProcess, owner, 0, 100)).rejects.toThrow(PROCESS_INSPECTION_UNAVAILABLE);
+    expect(missing).toBe(1);
+    expect(signals).toEqual([]);
+  } finally { owner.stopObserving(); }
+});
+
+
+it("does not start the second inspection after its original deadline expires during backoff", async () => {
+  vi.useFakeTimers({ toFake: ["Date", "setTimeout"] });
+  let inspections = 0;
+  try {
+    const deadline = Date.now() + 50;
+    const stopping = settleUncertainIdentity(async () => {
+      inspections++;
+      throw new Error(PROCESS_INSPECTION_UNAVAILABLE);
+    }, () => deadline, 100);
+    const rejected = expect(stopping).rejects.toThrow(PROCESS_INSPECTION_UNAVAILABLE);
+    await vi.advanceTimersByTimeAsync(100);
+    await rejected;
+    expect(inspections).toBe(1);
+  } finally { vi.useRealTimers(); }
 });

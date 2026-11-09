@@ -91,6 +91,12 @@ if (laneMatch) {
 const plannedCommands = [
   { command: "pnpm", args: ["run", "ensure:eval-build-deps"], cwd: packageRoot },
   { command: "pnpm", args: ["run", "build:rust"], cwd: packageRoot },
+  // Native server fixtures need the release daemon. Build it once before their
+  // bounded hooks run; a cold release compile must not race other test files
+  // for Cargo's build lock inside a five-minute beforeAll budget.
+  ...(runNativeRunnerGroup
+    ? [{ command: "pnpm", args: ["run", "build:binary"], cwd: packageRoot }]
+    : []),
   ...(runPackageTests
     ? [{ command: "pnpm", args: ["exec", "vitest", "run", ...packageArgs], cwd: packageRoot }]
     : []),

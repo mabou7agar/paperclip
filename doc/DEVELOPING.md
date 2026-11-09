@@ -155,6 +155,22 @@ are not on this list. They hold attested provider pins, so change them by hand
 
 ## Trusted PR Workflow
 
+### PR quality-check authentication
+
+The commitperclip quality workflow uses the repository-scoped `GITHUB_TOKEN`.
+Fork maintainers do not need the upstream GitHub App private key. The token can
+read repository contents and write pull-request comments. The workflow checks out
+the trusted `pull_request_target` base snapshot with persisted credentials disabled.
+It does not execute source, install dependencies, or consume artifacts from a PR.
+Dependency changes are inspected as data.
+
+Quality reports reuse a signed comment from either the legacy commitperclip bot
+or `github-actions[bot]`. Per-PR concurrency serializes report updates. Body edits
+rerun the gates. These are metadata and dependency checks, not an independent
+code review or permission to merge. Changes to this privileged workflow take effect
+only after separate review and merge into the base branch.
+
+
 The PR caller uses `paperclipai/paperclip/.github/workflows/pr-trusted.yml@master`.
 The AWS runner group `paperclip-public-pr` must allow
 `paperclipai/paperclip/.github/workflows/pr-trusted.yml@refs/heads/master`.

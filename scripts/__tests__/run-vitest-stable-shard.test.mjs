@@ -534,13 +534,14 @@ const nativeCommand = {
 };
 
 // Master's trusted workflow keeps sending the --shard commands until the
-// package-lane matrix merges, so their exact plans must not move.
-test("the master-pinned --shard lane commands plan exactly what they did before package lanes", () => {
+// package-lane matrix merges. Preserve that workload selection and explicitly
+// prepare the release daemon before the native group starts.
+test("the master-pinned --shard lane commands preserve workload separation and prepare native release fixtures", () => {
   assert.deepEqual(wrapperPlan(["--shard=1/2"], { GITHUB_WORKFLOW: "PR" }).plannedCommands, [
     ...prepCommands,
     { command: "pnpm", args: ["exec", "vitest", "run"], cwd: runnerRoot },
   ]);
-  assert.deepEqual(wrapperPlan(["--shard=2/2"], { GITHUB_WORKFLOW: "PR" }).plannedCommands, [...prepCommands, nativeCommand]);
+  assert.deepEqual(wrapperPlan(["--shard=2/2"], { GITHUB_WORKFLOW: "PR" }).plannedCommands, [...prepCommands, { command: "pnpm", args: ["run", "build:binary"], cwd: runnerRoot }, nativeCommand]);
   for (const plan of [wrapperPlan(["--shard=1/2"], { GITHUB_WORKFLOW: "PR" }), wrapperPlan(["--shard=2/2"], { GITHUB_WORKFLOW: "PR" })]) {
     assert.equal(plan.packageLane, undefined);
   }
@@ -549,7 +550,7 @@ test("the master-pinned --shard lane commands plan exactly what they did before 
 test("--native-server runs only the native group under any workflow", () => {
   for (const envOverrides of [{ GITHUB_WORKFLOW: "PR" }, {}]) {
     const plan = wrapperPlan(["--native-server"], envOverrides);
-    assert.deepEqual(plan.plannedCommands, [...prepCommands, nativeCommand]);
+    assert.deepEqual(plan.plannedCommands, [...prepCommands, { command: "pnpm", args: ["run", "build:binary"], cwd: runnerRoot }, nativeCommand]);
     assert.equal(plan.runPackageTests, false);
     assert.equal(plan.runNativeRunnerGroup, true);
   }
