@@ -1,0 +1,28 @@
+meta {
+  name: Get Completion Acknowledgement
+  type: http
+  seq: 5
+}
+
+get {
+  url: {{baseUrl}}/api/issues/{{issueId}}/comments
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{apiToken}}
+}
+
+tests {
+  test("saved completion acknowledgement remains on the original task", function () {
+    expect(res.status).to.equal(200);
+    expect(res.body).to.be.an("array");
+    const comments = res.body.filter(comment => !comment.deletedAt);
+    expect(new Set(comments.map(comment => comment.id)).size).to.equal(comments.length);
+    comments.forEach(comment => {
+      expect(comment.issueId).to.be.a("string");
+      expect(comment.body).to.be.a("string");
+    });
+  });
+}

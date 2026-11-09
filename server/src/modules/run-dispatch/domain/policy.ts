@@ -78,6 +78,7 @@ export type GateDecision =
 
 export type ScheduledRetryFacts = {
   addressedInteractionWake?: "pending" | "stale" | null;
+  completionReceiptWake?: "pending" | "stale" | null;
   runId: string;
   runAgentId: string;
   issueId: string | null;
@@ -134,6 +135,7 @@ export type StalenessDecision =
 
 export type QueuedRunFacts = {
   addressedInteractionWake?: "pending" | "stale" | null;
+  completionReceiptWake?: "pending" | "stale" | null;
   pendingResponse?: "interaction" | "approval" | null;
   /** Rechecked for automatic native replacements immediately before dispatch. */
   dependenciesBlocked?: DependencyBlockFacts | null;
@@ -177,6 +179,7 @@ type OwnershipFacts = {
   isNonAssigneeWorkspaceBusyRetry: boolean;
   isInteractionWake?: boolean;
   addressedInteractionWake?: "pending" | "stale" | null;
+  completionReceiptWake?: "pending" | "stale" | null;
   isCurrentReviewParticipant?: boolean;
   isAuthorizedSourceScopedRecovery?: boolean;
 };
@@ -191,7 +194,7 @@ type OwnershipOutcome = "current_owner" | "reassigned";
 function decideIssueOwnership(facts: OwnershipFacts): OwnershipOutcome {
   if (facts.issueAssigneeAgentId === facts.runAgentId) return "current_owner";
   if (facts.isNonAssigneeWorkspaceBusyRetry) return "current_owner";
-  if (facts.isInteractionWake || facts.addressedInteractionWake === "pending") return "current_owner";
+  if (facts.isInteractionWake || facts.addressedInteractionWake === "pending" || facts.completionReceiptWake === "pending") return "current_owner";
   if (facts.isCurrentReviewParticipant) return "current_owner";
   if (facts.isAuthorizedSourceScopedRecovery) return "current_owner";
   return "reassigned";
@@ -355,6 +358,7 @@ export function decideScheduledRetryGate(
     issueAssigneeAgentId: facts.issueAssigneeAgentId,
     isNonAssigneeWorkspaceBusyRetry: facts.isNonAssigneeWorkspaceBusyRetry,
     addressedInteractionWake: facts.addressedInteractionWake,
+    completionReceiptWake: facts.completionReceiptWake,
     isCurrentReviewParticipant:
       facts.reviewParticipant.isInReview &&
       facts.reviewParticipant.hasParticipant &&
@@ -582,6 +586,8 @@ export function decideQueuedRunStaleness(
     };
   }
 
+  if (facts.completionReceiptWake === "stale") return { stale: true, errorCode: "issue_assignee_changed", reason: "Completion receipt is no longer current or was already acknowledged", details: { issueId: facts.issueId } };
+
   if (facts.addressedInteractionWake === "stale") {
     return { stale: true, errorCode: "issue_interaction_changed",
       reason: "Cancelled because the addressed interaction was resolved, changed, or is no longer authorized",
@@ -593,6 +599,7 @@ export function decideQueuedRunStaleness(
     issueAssigneeAgentId: facts.issueAssigneeAgentId,
     isNonAssigneeWorkspaceBusyRetry: facts.isNonAssigneeWorkspaceBusyRetry,
     addressedInteractionWake: facts.addressedInteractionWake,
+    completionReceiptWake: facts.completionReceiptWake,
     isInteractionWake: facts.isInteractionWake,
     isCurrentReviewParticipant:
       facts.reviewParticipant.isInReview &&
@@ -639,7 +646,7 @@ export function decideQueuedRunStaleness(
   const statusOutcome = decideIssueStatus({
     status: facts.issueStatus,
     requiresInProgress,
-    terminalBypass: facts.resumeIntent || facts.wakeCommentIdPresent || (
+    terminalBypass: facts.resumeIntent || facts.wakeCommentIdPresent || (facts.completionReceiptWake === "pending" && facts.issueStatus === "done") || (
       facts.isCompletedOnboardingHandoffWake === true &&
       facts.wakeReason === "issue_children_completed" && facts.issueStatus === "done"
     ),

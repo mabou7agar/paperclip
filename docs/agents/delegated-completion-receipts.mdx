@@ -1,0 +1,43 @@
+---
+title: Delegated completion receipts
+---
+
+An open parent keeps the existing child-completion flow. When a delegator has
+already closed its parent task, a worker's later Done transition still owes that
+delegator the result. The status transaction records a durable completion receipt
+in the existing wake queue. It does not reopen either task.
+
+The normal scheduler delivers this reporting turn on the original worker task,
+to the closed parent's current agent. Its existing compatible task session,
+model/account routing, plan, accepted reviews, documents and saved result remain
+available. Provider-native history is reused only within its compatible route;
+history from different providers is never presented as an identical session.
+
+The receipt authorizes saved-task reads and one acknowledgement comment. It
+does not authorize checkout, reassignment, status changes, tests, commands,
+installation, new reviews, approval, delegation or another monitor. In the native
+semantic tool interface, use `report_progress` with a stable idempotency key to
+save the acknowledgement. Standard task comment APIs remain available to other
+adapters under their normal authentication and access rules.
+
+The receipt is scoped to company, original task, Done status version, closed
+parent and recipient. Dispatch rechecks these facts and the persisted server
+wake under the issue lock. Reopening, cancellation, reparenting, recipient change
+or an existing acknowledgement makes old input stale. Acknowledgement publication
+is serialized with task changes and has a durable comment identity. A duplicate
+publication returns that comment, including after restart. Ordinary comments do
+not create completion receipts or reawaken the worker.
+
+The scheduler's existing concurrency, cleanup, access, pause, quota and budget
+checks remain. Completion acknowledgements do not schedule automatic failure
+retries. Watchdog children, conversations, cancelled parents and same-agent
+parent/child tasks do not enter this closed-delegator path. The existing general
+monitoring policy is unchanged.
+
+An operator repairing a missed historical delivery may call the scoped
+`reconcileTaskCompletionReceipt(db, companyId, issueId)` service. It locks and
+revalidates the existing completed task, and records the same deterministic
+receipt only when absent. It does not replay a status decision, provider run,
+test or installation. Delivery and acknowledgement still use the live scheduler
+and the agent's normal tools; no operator-authored result report substitutes for
+the agent's acknowledgement.

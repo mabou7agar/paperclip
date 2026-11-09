@@ -1,3 +1,4 @@
+import { completionReceiptForRun } from "../task-completion-receipts.js";
 import { TaskAttachmentReadCache, TASK_ATTACHMENT_DEFINITIONS, TASK_ATTACHMENT_SCHEMAS, listTaskAttachments, readTaskAttachment } from "./runner-task-attachments.js";
 import { RUNNER_BRIDGE_SCHEMAS, runnerBridgeDefinitions, readAssignedSkill, executeWorkspaceTool, readWorkspaceUploadFile, settleRunnerBridgeRead, assertRunnerWorkspacePathAllowed } from "./runner-bridge-tools.js";
 import type { NativeRuntimeContextSnapshot } from "../../vendor/paperclip-runner/index.js";
@@ -120,6 +121,8 @@ const NATIVE_REVIEW_READ_TOOLS = new Set([
 ]);
 
 type Binding = {
+  /** Set from the persisted wake by the runtime, never by a provider tool. */
+  completionReceipt?: boolean;
   /** Server-derived scope for one addressed native completion review. */
   nativeReview?: NativeReviewAssignmentContext;
   companyId: string;
@@ -209,6 +212,9 @@ export class PaperclipRunnerToolAuthority {
   constructor(readonly db: Db, readonly binding: Binding) {}
 
   definitions(): Array<Record<string, unknown>> {
+    if (this.binding.completionReceipt) return CAPABILITY_SEMANTIC_TOOL_CATALOG
+      .filter(tool => NATIVE_REVIEW_READ_TOOLS.has(tool.operationId) || tool.operationId === "report_progress")
+      .map(tool => ({ name: tool.operationId, description: tool.description, inputSchema: tool.inputSchema }));
     if (this.binding.nativeReview) {
       // Scope Paperclip control-plane actions. Provider file and shell access
       // still follow the configured agent/environment policy, including tests.
@@ -296,6 +302,18 @@ export class PaperclipRunnerToolAuthority {
     callId: string;
     arguments: unknown;
   }): Promise<unknown> {
+    const completionReceipt = this.binding.completionReceipt ? await completionReceiptForRun(this.db, this.binding.runId, true) : null;
+    if (completionReceipt) {
+      if (call.tool === "report_progress") {
+        await this.#boundContext();
+        const args = record(call.arguments);
+        const body = requiredString(args.body);
+        const comment = await issueService(this.db).addComment(this.binding.issueId, body,
+          { agentId: this.binding.agentId, runId: this.binding.runId }, { authorizationReason: "completion_receipt_acknowledgement" });
+        return { commentId: comment.id, issueId: this.binding.issueId, disposition: "applied" };
+      }
+      if (!NATIVE_REVIEW_READ_TOOLS.has(call.tool)) throw forbidden("Completion receipts permit saved-task reads and one acknowledgement only; execution and other mutations are unavailable.");
+    }
     if (this.binding.nativeReview) {
       if (call.tool === "resolve_review") return this.#resolveReview(call.arguments);
       if (!NATIVE_REVIEW_READ_TOOLS.has(call.tool)) {
@@ -949,6 +967,7 @@ export class PaperclipRunnerToolAuthority {
   }
 
   async #boundContext() {
+    const completionReceipt = this.binding.completionReceipt ? await completionReceiptForRun(this.db, this.binding.runId, true) : null;
     const [row] = await this.db.select({ issue: issues, actor: agents, run: heartbeatRuns })
       .from(heartbeatRuns)
       .innerJoin(issues, eq(issues.id, this.binding.issueId))
@@ -959,7 +978,7 @@ export class PaperclipRunnerToolAuthority {
         eq(heartbeatRuns.agentId, this.binding.agentId),
         eq(heartbeatRuns.nativeIssueId, this.binding.issueId),
         eq(issues.companyId, this.binding.companyId),
-        ...(this.binding.nativeReview ? [] : [
+        ...(this.binding.nativeReview || completionReceipt ? [] : [
           eq(issues.assigneeAgentId, this.binding.agentId),
           eq(issues.executionRunId, this.binding.runId),
         ]),

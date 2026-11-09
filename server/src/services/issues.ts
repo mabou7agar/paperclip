@@ -1,3 +1,5 @@
+import { recordTaskCompletionReceipt, completionReceiptForRun } from "./task-completion-receipts.js";
+import { completionAcknowledgement, acknowledgeCompletionReceipt } from "../repositories/task-completion-receipts.js";
 import { notifyChatPublicationWork } from "./chat-work-notifications.js";
 import { recordChatHandoff, recordChatCompletion, existingChatCompletionReply, acknowledgeChatCompletionReply } from "./chat-completion-delivery.js";
 import { mirrorSlackBoardComment, slackBoardReplyBindings } from "./slack-board-messages.js";
@@ -110,7 +112,7 @@ import {
   isUuidLike,
   normalizeIssueIdentifier as normalizeIssueReferenceIdentifier,
 } from "@paperclipai/shared";
-import { conflict, HttpError, notFound, unprocessable } from "../errors.js";
+import { conflict, forbidden, HttpError, notFound, unprocessable } from "../errors.js";
 import { isForeignKeyViolation } from "../db-errors.js";
 import { logger } from "../middleware/logger.js";
 import { parseObject } from "../adapters/utils.js";
@@ -11310,6 +11312,7 @@ export function issueService(db: Db) {
           userId: actorUserId ?? null,
         });
         await recordChatCompletion(tx, receiptExisting, updated);
+        if (receiptExisting.status !== "done" && updated.status === "done") await recordTaskCompletionReceipt(tx as unknown as Db, updated);
         // An operator explicitly choosing a disposition owns that decision,
         // including choosing In Review while the conversation is Idle.
         if (actorUserId && issueData.status !== undefined) {
@@ -12534,6 +12537,7 @@ export function issueService(db: Db) {
 
       if (!issue) throw notFound("Issue not found");
 
+
       if (issue.conversationAgentId && actor.userId && !(await instanceSettingsService(dbOrTx).getExperimental()).enableAgentChat) {
         throw unprocessable("Agent Chat is disabled in Experimental settings");
       }
@@ -12545,6 +12549,13 @@ export function issueService(db: Db) {
           .censorUsernameInLogs,
       };
       const redactedBody = redactCurrentUserText(body, currentUserRedactionOptions);
+      const completionReceipt = actor.agentId && actor.runId ? await completionReceiptForRun(dbOrTx, actor.runId, true) : null;
+      if (completionReceipt) {
+        if (completionReceipt.issueId !== issueId || completionReceipt.agentId !== actor.agentId) throw forbidden("Completion receipt is limited to its original task");
+        const acknowledged = await completionAcknowledgement(dbOrTx, completionReceipt);
+        if (acknowledged) return redactIssueComment(acknowledged, currentUserRedactionOptions.enabled);
+      }
+
       if (actor.userId && options?.clientRequestId) {
         const [existing] = await dbOrTx.select().from(issueComments).where(and(eq(issueComments.issueId, issueId),
           eq(issueComments.authorUserId, actor.userId), eq(issueComments.clientRequestId, options.clientRequestId)));
@@ -12798,6 +12809,7 @@ export function issueService(db: Db) {
           .returning();
       }
       if (!comment) throw new Error("Failed to create issue comment");
+      if (completionReceipt) await acknowledgeCompletionReceipt(dbOrTx, completionReceipt, comment.id);
       if (options?.completionReply && actor.agentId && createdByRunId) await acknowledgeChatCompletionReply(dbOrTx, createdByRunId, comment.id);
 
       const boundAttachments: Array<{

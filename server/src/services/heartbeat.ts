@@ -1,3 +1,4 @@
+import { taskCompletionReceiptInstruction } from "./task-completion-receipts.js";
 import { isAddressedInteractionWakeContext } from "./addressed-interaction-wake.js";
 import { ConnectionUsageCapReached } from "./connection-usage-caps.js";
 import { selectHeartbeatEnvironment } from "./heartbeat/environment-selection.js";
@@ -2965,23 +2966,23 @@ export function heartbeatService(
       // Unlike the frozen initial communication preferences, live-call context
       // must also reach resumed turns. Rebuild it from server records each wake.
       const liveVoiceTaskPrefix = liveVoiceGuidance ? `${liveVoiceGuidance}\n\n` : "";
-      let taskMarkdown = liveVoiceTaskPrefix + buildPaperclipTaskMarkdown({ ...taskMarkdownInput, taskPlan }) + chatCompletionInstruction(context);
+      let taskMarkdown = liveVoiceTaskPrefix + buildPaperclipTaskMarkdown({ ...taskMarkdownInput, taskPlan }) + chatCompletionInstruction(context) + taskCompletionReceiptInstruction(context);
       let taskMarkdownAssignment = liveVoiceTaskPrefix + buildPaperclipTaskMarkdown({
         ...taskMarkdownInput,
         taskPlan,
         includeWakeComments: false,
-      }) + chatCompletionInstruction(context);
+      }) + chatCompletionInstruction(context) + taskCompletionReceiptInstruction(context);
       const taskMarkdownCompact = liveVoiceTaskPrefix + buildPaperclipTaskMarkdown({
         ...taskMarkdownInput,
         taskPlan,
         includeDescription: false,
-      }) + chatCompletionInstruction(context);
+      }) + chatCompletionInstruction(context) + taskCompletionReceiptInstruction(context);
       const taskMarkdownAssignmentCompact = liveVoiceTaskPrefix + buildPaperclipTaskMarkdown({
         ...taskMarkdownInput,
         taskPlan,
         includeDescription: false,
         includeWakeComments: false,
-      }) + chatCompletionInstruction(context);
+      }) + chatCompletionInstruction(context) + taskCompletionReceiptInstruction(context);
       if (issueRef) {
         context.paperclipIssue = {
           id: issueRef.id,
@@ -3611,7 +3612,7 @@ export function heartbeatService(
         }
         if (
           !issueId ||
-          (!isResolvedInteractionContinuationWakeContext(context) && !isAddressedInteractionWakeContext(context) &&
+          (!isResolvedInteractionContinuationWakeContext(context) && !isAddressedInteractionWakeContext(context) && context.wakeReason !== "task_completion_receipt" &&
             !["native_safe_replacement", "native_provider_overloaded"].includes(run.scheduledRetryReason ?? ""))
         ) {
           return { dispatched: true, resultPromise: dispatch(() => {}) };

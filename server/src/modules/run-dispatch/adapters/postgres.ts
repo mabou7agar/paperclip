@@ -1,3 +1,4 @@
+import { taskCompletionReceiptState } from "../../../services/task-completion-receipts.js";
 import { addressedInteractionWakeState } from "../../../services/addressed-interaction-wake.js";
 import { hasConversationContinuationPolicy } from "../../../services/conversation-continuation.js";
 import { getExecutionBlocker } from "../../../services/execution-blocker.js";
@@ -369,6 +370,7 @@ export function createPostgresRunDispatchAdapter(
     facts.addressedInteractionWake = await addressedInteractionWakeState(dbOrTx as Db, {
       companyId: input.companyId, issueId, agentId: input.agentId, contextSnapshot: input.contextSnapshot,
     });
+    facts.completionReceiptWake = await taskCompletionReceiptState(dbOrTx as Db, { companyId: input.companyId, issueId, agentId: input.agentId, contextSnapshot: input.contextSnapshot, runId: input.runId });
     facts.issueExecutionRunId = issue.executionRunId;
     facts.issueCheckoutRunId = issue.checkoutRunId;
     if (input.conversationContinuation) {
@@ -615,6 +617,7 @@ export function createPostgresRunDispatchAdapter(
       issueExecutionRunId: issue?.executionRunId ?? null,
       issueCheckoutRunId: issue?.checkoutRunId ?? null,
       addressedInteractionWake,
+      completionReceiptWake: issue ? await taskCompletionReceiptState(dbOrTx as Db, { companyId: input.companyId, issueId, agentId: input.agentId, contextSnapshot: context, runId: input.runId }) : null,
       isResolvedInteractionContinuation,
       isConnectionContinuation: (isResolvedInteractionContinuation && context.interactionKind === "connection_intent")
         || context.source === "connection_tools.refreshed",
@@ -1084,7 +1087,7 @@ export function createPostgresRunDispatchAdapter(
       if (run.status !== input.expectedStatus) return { outcome: "lost_race" as const };
       const { issueId, facts, decision, executionBlocker } = await decideCurrentRunStaleness(tx, run, input.now);
       if (!decision.stale || !issueId) {
-        if (input.expectedStatus === "queued" && (facts?.isInteractionWake || facts?.addressedInteractionWake === "pending")) {
+        if (input.expectedStatus === "queued" && (facts?.isInteractionWake || facts?.addressedInteractionWake === "pending" || facts?.completionReceiptWake === "pending")) {
           // Preserve the authority accepted under the issue/run locks. Later
           // preflight reads can observe a reassignment; they must not turn an
           // assignee comment into a non-assignee subscription-wait exception.
@@ -1092,7 +1095,7 @@ export function createPostgresRunDispatchAdapter(
             runnerProfileJson: {
               ...parseObject(run.runnerProfileJson),
               aiConnectionNonAssigneeCommentWake: facts.isInteractionWake && facts.issueAssigneeAgentId !== run.agentId,
-              aiConnectionNonAssigneeInteractionWake: facts.addressedInteractionWake === "pending" && facts.issueAssigneeAgentId !== run.agentId,
+              aiConnectionNonAssigneeInteractionWake: (facts.addressedInteractionWake === "pending" || facts.completionReceiptWake === "pending") && facts.issueAssigneeAgentId !== run.agentId,
             },
           }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId)));
         }
@@ -1140,7 +1143,7 @@ export function createPostgresRunDispatchAdapter(
                 issue?.executionRunId === run.id ||
                   // Attention does not acquire task ownership. Permit its empty
                   // lock, but never dispatch over a different active executor.
-                  (facts?.addressedInteractionWake === "pending" && issue?.executionRunId === null)
+                  ((facts?.addressedInteractionWake === "pending" || facts?.completionReceiptWake === "pending") && issue?.executionRunId === null)
                   ? initialDecision
                   : {
                       stale: true as const,
