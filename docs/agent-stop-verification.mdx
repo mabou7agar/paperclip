@@ -1,0 +1,36 @@
+---
+title: Agent Stop verification
+---
+
+Agent pause and termination verify that execution has stopped before completing
+their lifecycle transition. The history scan selects execution metadata, rather
+than loading every historical prompt and provider response. Exceptional
+cancellation checks read one run at a time and summarize large output fields.
+
+Older Claude and Codex preparations can be cancelled before invoking a provider,
+then finish their controller cleanup without an execution-cancellation ACK.
+Their adapter claim alone is insufficient proof that nothing ran. Compatibility
+verification requires all of the following:
+
+- A cancelled legacy run with a finished, sealed controller from an earlier
+  server boot, no remaining controller lease, and no returned provider session,
+  process identity or external execution reference.
+- A complete retained event journal from sequence one through the run's saved
+  next-sequence boundary, with no adapter invocation, process launch, provider,
+  session or tool-execution evidence.
+- No provider output, provider usage, native result, unresolved environment
+  cleanup, coordinator or workspace-recovery obligation. Only the explicitly
+  recognized pre-dispatch control-plane refusals may retain a preparation
+  diagnostic without failing this check.
+
+This exception applies only to the built-in Claude and Codex adapters. They await
+invocation-event publication before launching a classic CLI execution or sending
+an ACP provider prompt. Unknown adapters, incomplete journals and contradictory
+evidence cannot use this exception; their existing Stop and recovery rules still
+apply. Updating these adapter boundaries must
+preserve that contract or remove their eligibility for this verification.
+
+Successful verification releases only the agent lifecycle Stop check. It never
+adds a fabricated provider ACK, clears a session, resolves a task recovery hold,
+changes task ownership, or schedules a retry. Existing task-specific outcome,
+approval, review, quota and dependency guards continue to govern subsequent work.
