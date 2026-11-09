@@ -73,6 +73,7 @@ import {
 } from "./heartbeat/scheduling.js";
 import { canApplyTaskWorkspaceSelectionAtAdmission, taskWorkspaceRuntimeSelectionEnabled } from "./execution-workspace-policy.js";
 import { agentExecutionsHaveStopped } from "./agent-execution-stop.js";
+import { listAgentExecutionStopObservations } from "../repositories/agent-execution-stop.js";
 import {
   cancelHeartbeatNativeRun,
   terminateHeartbeatRunProcess,
@@ -4239,7 +4240,7 @@ export function heartbeatService(
 
   async function stopInvocationsForAgents(agentIds: string[], reason: string, options: StopInvocationOptions = {}) {
     await cancelInvocationsForAgentsInternal(agentIds, reason, options);
-    const runs = await db.select().from(heartbeatRuns).where(inArray(heartbeatRuns.agentId, agentIds));
+    const runs = await listAgentExecutionStopObservations(db, agentIds);
     const leasesToRelease = await db.select({ runId: environmentLeases.heartbeatRunId }).from(environmentLeases)
       .innerJoin(heartbeatRuns, eq(heartbeatRuns.id, environmentLeases.heartbeatRunId))
       .where(and(inArray(heartbeatRuns.agentId, agentIds),

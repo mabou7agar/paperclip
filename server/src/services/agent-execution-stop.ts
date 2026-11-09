@@ -1,3 +1,6 @@
+import { listAgentExecutionStopObservations, readCancelledExecutionStopRun,
+  type AgentExecutionStopObservation, type CancelledExecutionStopRun } from "../repositories/agent-execution-stop.js";
+import { hasSettledLegacyPreparation } from "./settled-legacy-preparation.js";
 import { readProcessStartedAt } from "./hot-restart.js";
 import { runUsedConversationAdapter } from "./conversation-continuation.js";
 import { and, eq, inArray, isNull, or, sql } from "drizzle-orm";
@@ -6,10 +9,17 @@ import { hasNativeLocalProcessStop } from "./native-local-process-stop.js";
 import { hasRemoteTerminationReceipt } from "./remote-execution-termination.js";
 import { isCancelledNativeStartup } from "./cancelled-native-startup.js";
 
+function matchesStopObservation(observed: AgentExecutionStopObservation, current: CancelledExecutionStopRun) {
+  return (Object.keys(observed) as Array<keyof AgentExecutionStopObservation>).every(key => {
+    const before = observed[key], after = current[key];
+    return before instanceof Date && after instanceof Date ? before.getTime() === after.getTime() : before === after;
+  });
+}
+
 /** Cancellation changes admission. Process and lease evidence controls cleanup. */
 export async function agentExecutionsHaveStopped(db: Db, agentIds: string[]) {
   if (!agentIds.length) return true;
-  const runs = await db.select().from(heartbeatRuns).where(inArray(heartbeatRuns.agentId, agentIds));
+  const runs = await listAgentExecutionStopObservations(db, agentIds);
   const runIds = db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(inArray(heartbeatRuns.agentId, agentIds));
   const leases = await db.select().from(environmentLeases).where(or(
     inArray(environmentLeases.heartbeatRunId, runIds),
@@ -51,13 +61,17 @@ export async function agentExecutionsHaveStopped(db: Db, agentIds: string[]) {
     }
     if (processAlive || groupAlive) return false;
     if (run.status !== "cancelled" || !run.startedAt) continue;
-    if (run.runtimeMode === "native" && !run.processPid && !run.processGroupId &&
+    if (run.processPid || run.processGroupId) continue;
+    const cancelled = await readCancelledExecutionStopRun(db, run);
+    if (!cancelled || !matchesStopObservation(run, cancelled)) return false;
+    if (cancelled.runtimeMode === "native" && !cancelled.processPid && !cancelled.processGroupId &&
         !await hasNativeLocalProcessStop(db, run.companyId, run.id) &&
-        !await isCancelledNativeStartup(db, run, coordinators.find(row => row.runId === run.id))) return false;
-    if (run.runtimeMode === "legacy" && !run.processPid && !run.processGroupId &&
-        (run.resultJson?.executionCancellation as Record<string, unknown> | undefined)?.state !== "acknowledged" &&
-        !(run.executionStage === "settled" && !await runUsedConversationAdapter(db, run)) &&
-        !await isCancelledNativeStartup(db, run, coordinators.find(row => row.runId === run.id))) return false;
+        !await isCancelledNativeStartup(db, cancelled, coordinators.find(row => row.runId === run.id))) return false;
+    if (cancelled.runtimeMode === "legacy" && !cancelled.processPid && !cancelled.processGroupId &&
+        (cancelled.resultJson?.executionCancellation as Record<string, unknown> | undefined)?.state !== "acknowledged" &&
+        !(cancelled.executionStage === "settled" && !await runUsedConversationAdapter(db, cancelled)) &&
+        !await isCancelledNativeStartup(db, cancelled, coordinators.find(row => row.runId === run.id)) &&
+        (coordinators.some(row => row.runId === run.id) || !await hasSettledLegacyPreparation(db, cancelled))) return false;
   }
   // Release an expired owner only after its cancelled execution has stop proof.
   for (const coordinator of abandoned) {
