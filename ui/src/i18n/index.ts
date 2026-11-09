@@ -30,5 +30,5 @@ export function t(key: string, options: TOptions = {}) {
   return i18n.t(key, options);
 }
 
-export const useTranslation = useReactI18nextTranslation;
+export const useTranslation: typeof useReactI18nextTranslation = useReactI18nextTranslation;
 export { i18n };

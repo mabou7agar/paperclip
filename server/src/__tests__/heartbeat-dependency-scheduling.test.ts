@@ -208,6 +208,7 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     const blockedAt = new Date("2026-11-06T11:00:00Z");
     await db.insert(companies).values({ id: companyId, name: "Recovery guard", issuePrefix: `R${companyId.slice(0, 6).toUpperCase()}`,
       requireBoardApprovalForNewAgents: false, defaultResponsibleUserId: "responsible-user" });
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "responsible-user", status: "active", membershipRole: "member" });
     await db.insert(agents).values({ id: agentId, companyId, name: "Worker", role: "engineer", status: "active",
       adapterType: "codex_local", adapterConfig: {}, runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } }, permissions: {} });
     await db.insert(issues).values({ id: issueId, companyId, title: "Waiting for operator repair", status: "blocked",
@@ -902,6 +903,7 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
   it("resumes normal work once after a child completes during the parent's restricted triage turn", async () => {
     const companyId = randomUUID(), agentId = randomUUID(), blockerId = randomUUID(), issueId = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "Triage handoff", issuePrefix: "TH", requireBoardApprovalForNewAgents: false });
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "responsible-user", status: "active", membershipRole: "member" });
     await db.insert(agents).values({ id: agentId, companyId, name: "Coordinator", role: "engineer", status: "active",
       adapterType: "codex_local", adapterConfig: {}, runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } }, permissions: {} });
     await db.insert(issues).values([

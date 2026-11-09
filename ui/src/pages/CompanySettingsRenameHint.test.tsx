@@ -147,7 +147,7 @@ describe("CompanySettings rename hint", () => {
     flushSync(() => root.unmount());
   });
 
-  it("keeps routing and decision panels unique across company settings refreshes", async () => {
+  it("keeps routing unique across refreshes and decision models on the connections page", async () => {
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const root = render(SELF_HOSTED_HEALTH, false, client);
     try {
@@ -156,7 +156,9 @@ describe("CompanySettings rename hint", () => {
         await new Promise(resolve => setTimeout(resolve, 0));
         flushSync(() => {});
         expect(container.querySelectorAll("[data-testid=phase-routing-settings]")).toHaveLength(1);
-        expect(container.querySelectorAll("[data-testid=decision-model-settings]")).toHaveLength(1);
+        // Upstream moved decision-model settings to CompanyConnections. Do not
+        // restore a second panel while retaining the fork's routing controls.
+        expect(container.querySelectorAll("[data-testid=decision-model-settings]")).toHaveLength(0);
       }
     } finally { flushSync(() => root.unmount()); client.clear(); }
   });

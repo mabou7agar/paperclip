@@ -31,7 +31,6 @@ import {
   ToggleField,
 } from "../components/agent-config-primitives";
 import { InstanceGeneralSettings } from "./InstanceGeneralSettings";
-import { DecisionModelSettingsSection } from "../components/decision-models/DecisionModelSettings";
 import { useFastResponsesEnabled } from "../hooks/useFastResponsesEnabled";
 import { CompanyPhaseRoutingSettings } from "../components/ai-connections/CompanyPhaseRoutingSettings";
 
