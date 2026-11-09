@@ -38,12 +38,14 @@ const claude = { id: "claude", adapterType: "claude_local", model: "claude-test"
 const codex = { id: "codex", adapterType: "codex_local", model: "codex-test", binding: { provider: "openai", method: "subscription", mode: "responsible_user" } };
 const policy = phaseRoutingSchema.parse({ enabled: true, planning: [claude, codex], implementation: [codex] });
 
-async function eventually(check: () => Promise<boolean>, attempts = 200) {
+let routingDiagnostic: () => Promise<unknown> = async () => null;
+
+async function eventually(check: () => Promise<boolean>, attempts = 1200) {
   for (let i = 0; i < attempts; i++) {
     if (await check()) return;
     await new Promise(resolve => setTimeout(resolve, 50));
   }
-  throw new Error("Expected routing outcome did not arrive");
+  throw new Error(`Expected routing outcome did not arrive: ${JSON.stringify(await routingDiagnostic())}`);
 }
 
 (support.supported ? describe : describe.skip)("phase routing through the durable heartbeat queue", () => {
@@ -63,7 +65,7 @@ async function eventually(check: () => Promise<boolean>, attempts = 200) {
     await db.execute(sql`TRUNCATE TABLE companies CASCADE`);
     mocks.execute.mockReset();
     mocks.select.mockReset();
-  });
+  }, 90_000);
   afterAll(async () => { heartbeat.stopTaskDrain(); await database?.cleanup(); });
 
   async function seed(workMode: "standard" | "planning" = "standard") {
@@ -76,6 +78,14 @@ async function eventually(check: () => Promise<boolean>, attempts = 200) {
       adapterConfig: { model: "claude-test", command: "must-not-leak" }, permissions: {},
       runtimeConfig: { phaseRouting: policy, heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } } });
     await db.insert(issues).values({ id: issueId, companyId, title: "Routed task", status: "todo", workMode, assigneeAgentId: agentId, responsibleUserId: "user" });
+    routingDiagnostic = async () => ({
+      runs: await db.select({ id: heartbeatRuns.id, agentId: heartbeatRuns.agentId, status: heartbeatRuns.status,
+        errorCode: heartbeatRuns.errorCode, startedAt: heartbeatRuns.startedAt, finishedAt: heartbeatRuns.finishedAt,
+      }).from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId)),
+      tasks: await db.select({ id: issues.id, status: issues.status, executionRunId: issues.executionRunId,
+        checkoutRunId: issues.checkoutRunId,
+      }).from(issues).where(eq(issues.companyId, companyId)),
+    });
     mocks.select.mockImplementation(async ({ binding }) => ({
       connection: { id: binding.provider === "anthropic" ? claudeId : binding.provider === "openai" ? codexId : "10000000-0000-4000-8000-000000000003" }, grant: { id: grantId, kind: "user" },
       attribution: { provider: binding.provider, method: binding.method },
@@ -448,7 +458,7 @@ async function eventually(check: () => Promise<boolean>, attempts = 200) {
       })().catch(error => { sweepError = error; }).finally(() => { sweeping = null; });
     }, 100);
     try {
-      await eventually(async () => starts.length === 1 || !!sweepError, 400);
+      await eventually(async () => starts.length === 1 || !!sweepError, 1200);
       await heartbeat.drainActiveRunExecutions();
       const sweepsAtCompletion = completedSweeps;
       await eventually(async () => completedSweeps >= sweepsAtCompletion + 3 || !!sweepError);

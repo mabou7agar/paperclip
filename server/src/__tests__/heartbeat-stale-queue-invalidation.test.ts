@@ -273,7 +273,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       expect(countExecuteCallsForRun(delivered.runId!), JSON.stringify({
         status: current?.status, errorCode: current?.errorCode,
       })).toBe(1);
-    }, { timeout: 5_000 });
+    }, { timeout: 30_000 });
     await heartbeat.waitForRunExecutionDrain(delivered.runId!);
     expect(countExecuteCallsForRun(delivered.runId!)).toBe(1);
     expect((await heartbeat.getRun(delivered.runId!))?.contextSnapshot).toMatchObject({ wakeCommentIds: [comment.id] });

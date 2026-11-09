@@ -1434,6 +1434,7 @@ const browserUseOperations = [
 const BOARD_ONLY_OPERATIONS = new Set([
   "GET /api/v1/companies/{companyId}/phase-routing",
   "PUT /api/v1/companies/{companyId}/phase-routing",
+  "GET /api/v1/companies/{companyId}/phase-routing/usage",
   "GET /api/v1/companies/{companyId}/monitoring",
   "PUT /api/v1/companies/{companyId}/monitoring",
   "GET /api/v1/companies/{companyId}/usage-health",
@@ -11579,6 +11580,22 @@ for (const [method, summary] of [
   responses: {
     200: r.ok(z.object({ policy: method === "get" ? phaseRoutingSchema.nullable() : phaseRoutingSchema })),
     400: r.badRequest, 401: r.unauthorized, 403: r.forbidden, 404: r.notFound, 422: r.unprocessable,
+  },
+});
+
+registerCurrentRoute({
+  method: "get", path: "/api/v1/companies/{companyId}/phase-routing/usage", tags: ["phase-routing"],
+  summary: "Read shared connection usage windows and renewal times as a connection manager",
+  responses: {
+    200: r.ok(z.object({ connections: z.array(z.object({
+      connectionId: z.string().uuid(), blocked: z.boolean(), retryAt: z.string().nullable(),
+      windows: z.array(z.object({
+        window: z.enum(["rolling5h", "daily", "weekly"]), tokens: z.number().nullable(), apiCostUsd: z.string().nullable(),
+        knownTokens: z.number(), knownApiCostUsd: z.string(), tokenCap: z.number().optional(), apiCostCapUsd: z.string().optional(),
+        blocked: z.boolean(), retryAt: z.string().nullable(),
+      })),
+    })) })),
+    401: r.unauthorized, 403: r.forbidden, 404: r.notFound,
   },
 });
 

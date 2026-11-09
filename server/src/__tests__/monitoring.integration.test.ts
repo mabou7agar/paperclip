@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 import express from "express";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { agents, companies, createDb, heartbeatRuns, issueRelations, issues, agentWakeupRequests } from "@paperclipai/db";
+import { agents, authUsers, companyMemberships, companies, createDb, heartbeatRuns, issueRelations, issues, agentWakeupRequests } from "@paperclipai/db";
 import { monitoringPolicySchema } from "@paperclipai/shared";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
@@ -60,6 +60,9 @@ const support = await getEmbeddedPostgresTestSupport();
   async function seed(status = "in_progress") {
     const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID(), runId = randomUUID();
     await db.insert(companies).values({ id: companyId, name: "Monitoring", issuePrefix: `M${companyId.slice(0, 6)}`, defaultResponsibleUserId: "owner" });
+    await db.insert(authUsers).values({ id: "owner", name: "Monitoring fixture owner", email: "monitoring-owner@example.invalid",
+      createdAt: new Date(), updatedAt: new Date() }).onConflictDoNothing();
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "owner", status: "active", membershipRole: "owner" });
     await db.insert(agents).values({ id: agentId, companyId, name: "Worker", status: "idle", adapterType: "process", adapterConfig: {},
       runtimeConfig: { heartbeat: { enabled: false, wakeOnDemand: true, maxConcurrentRuns: 1 } } });
     await db.insert(issues).values({ id: issueId, companyId, title: "Retain existing plan", status, assigneeAgentId: agentId, responsibleUserId: "owner" });

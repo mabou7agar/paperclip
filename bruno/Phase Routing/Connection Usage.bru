@@ -15,5 +15,10 @@ tests {
   test("returns shared connection window status", function () {
     expect(res.getStatus()).to.equal(200);
     expect(res.getBody().connections).to.be.an("array");
+    for (const connection of res.getBody().connections) {
+      expect(connection.connectionId).to.be.a("string");
+      expect(connection.blocked).to.be.a("boolean");
+      expect(connection.windows).to.be.an("array");
+    }
   });
 }
