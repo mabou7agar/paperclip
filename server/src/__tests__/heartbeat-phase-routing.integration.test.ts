@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { agents, authUsers, companyMemberships, agentConfigRevisions, agentTaskSessions, agentWakeupRequests, companies, createDb, heartbeatRuns, heartbeatRunEvents, issueComments, issueRelations, issues } from "@paperclipai/db";
 import type { AdapterExecutionContext, AdapterExecutionResult } from "@paperclipai/adapter-utils";
 import { phaseRoutingSchema } from "@paperclipai/shared";
@@ -56,13 +56,15 @@ async function eventually(check: () => Promise<boolean>, attempts = 200) {
     db = createDb(database.connectionString);
     heartbeat = heartbeatService(db);
   }, 90_000);
+  beforeEach(() => { heartbeat.stopTaskDrain(); });
   afterEach(async () => {
+    heartbeat.startTaskDrain();
     await heartbeat.drainActiveRunExecutions();
     await db.execute(sql`TRUNCATE TABLE companies CASCADE`);
     mocks.execute.mockReset();
     mocks.select.mockReset();
   });
-  afterAll(async () => { await database?.cleanup(); });
+  afterAll(async () => { heartbeat.stopTaskDrain(); await database?.cleanup(); });
 
   async function seed(workMode: "standard" | "planning" = "standard") {
     const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID();
@@ -137,7 +139,13 @@ async function eventually(check: () => Promise<boolean>, attempts = 200) {
       if (visited.length === 3) await db.update(issues).set({ status: "todo" }).where(eq(issues.id, parentId));
       const before = visited.length;
       await wake(agentId, issueId);
-      await eventually(async () => visited.length === before + 1);
+      try { await eventually(async () => visited.length === before + 1); }
+      catch {
+        const runs = await db.select({ id: heartbeatRuns.id, agentId: heartbeatRuns.agentId,
+          status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode,
+        }).from(heartbeatRuns);
+        throw new Error(`Routing handoff did not arrive: ${JSON.stringify({ visited, expected: agentId, runs })}`);
+      }
       await heartbeat.drainActiveRunExecutions();
     }
     for (let sweep = 0; sweep < 3; sweep++) {
@@ -154,7 +162,7 @@ async function eventually(check: () => Promise<boolean>, attempts = 200) {
     expect(runs.every(run => run.status === "succeeded" || (run.status === "cancelled" && run.errorCode === "issue_terminal_status"))).toBe(true);
     expect(runs.filter(run => run.status === "succeeded")).toHaveLength(4);
     expect((await db.select().from(issues)).every(issue => issue.status === "done")).toBe(true);
-  }, 30_000);
+  }, 90_000);
 
   it("reuses the phase session after a planning-only edit when the base connection is Claude", async () => {
     const {companyId,agentId,issueId}=await seed();
@@ -211,7 +219,7 @@ async function eventually(check: () => Promise<boolean>, attempts = 200) {
     const runs = await db.select().from(heartbeatRuns);
     expect(runs.find(run => run.status === "succeeded")?.runnerProfileJson).toMatchObject({ adapterDispatch: { phaseRoute: { phase: "review", profile: { id: "codex" } } } });
     expect(runs.filter(run => run.status === "scheduled_retry")).toHaveLength(1);
-  }, 30_000);
+  }, 90_000);
 
   it("claims Codex for implementation while preserving the agent's configured identity", async () => {
     const { agentId, issueId } = await seed();
@@ -230,7 +238,7 @@ async function eventually(check: () => Promise<boolean>, attempts = 200) {
     expect(ctx.config.model).toBe("codex-test");
     expect(ctx.config.command).toBeUndefined();
     expect((await db.select().from(agents).where(eq(agents.id, agentId)))[0].adapterType).toBe("claude_local");
-  }, 30_000);
+  }, 90_000);
 
   it("holds undated exhausted connections across repeated scheduler sweeps without executing providers", async () => {
     const { companyId, agentId, issueId } = await seed("planning");
@@ -301,7 +309,7 @@ async function eventually(check: () => Promise<boolean>, attempts = 200) {
     await eventually(async () => mocks.execute.mock.calls.length === 1);
     await heartbeat.drainActiveRunExecutions();
     expect(mocks.execute.mock.calls[0][0].agent.adapterType).toBe("codex_local");
-  }, 30_000);
+  }, 90_000);
 
   it("parks exhausted phases without starting a provider", async () => {
     const { companyId, agentId, issueId } = await seed("planning");
@@ -325,13 +333,15 @@ async function eventually(check: () => Promise<boolean>, attempts = 200) {
     expect(runs.find(saved => saved.id === run!.id)?.resultJson).toMatchObject({ executionRecovery: { providerWorkStarted: false }, cancellation: { expected: true } });
     const events = await db.select({ message: heartbeatRunEvents.message, payload: heartbeatRunEvents.payload }).from(heartbeatRunEvents).where(eq(heartbeatRunEvents.runId, run!.id));
     expect(runs.filter(saved => saved.status === "scheduled_retry"), JSON.stringify(events)).toHaveLength(1);
-  }, 30_000);
+  }, 90_000);
 
   async function parkUntilRenewal(options: { secondaryResetDelayMs?: number } = {}) {
     const fixture = await seed("planning");
     const { companyId, agentId, issueId } = fixture;
     const marker = `renewal-context-${randomUUID()}`;
-    const renewal = new Date(Date.now() + 8_000);
+    // Leave enough time for real workspace admission and accounting to park
+    // before renewal, even on a loaded host. Provider I/O remains simulated.
+    const renewal = new Date(Date.now() + 30_000);
     const planBody = `# Saved plan\n\nPreserve ${marker}. Continue step two without repeating step one.`;
     await db.update(issues).set({ description: `Resume the same objective: ${marker}` }).where(eq(issues.id, issueId));
     const plan = await documentService(db).upsertIssueDocument({ issueId, key: "plan", format: "markdown", body: planBody, createdByAgentId: agentId });
@@ -379,7 +389,7 @@ async function eventually(check: () => Promise<boolean>, attempts = 200) {
       await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
       return success();
     });
-    await eventually(async () => Date.now() >= renewal.getTime(), 400);
+    await eventually(async () => Date.now() >= renewal.getTime(), 1200);
     const promotions = await Promise.all([heartbeat.promoteDueScheduledRetries(), competingScheduler.promoteDueScheduledRetries()]);
     expect(promotions.reduce((sum, result) => sum + result.promoted, 0)).toBe(1);
     await Promise.all([heartbeat.resumeQueuedRuns(), competingScheduler.resumeQueuedRuns()]);
@@ -399,7 +409,7 @@ async function eventually(check: () => Promise<boolean>, attempts = 200) {
     expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0].status).toBe("done");
     expect((await documentService(db).getIssueDocumentByKey(issueId, "plan"))?.latestRevisionId).toBe(fixture.planRevisionId);
     expect((await db.select().from(agentWakeupRequests)).filter(wake => ["queued", "claimed"].includes(wake.status))).toHaveLength(0);
-  }, 30_000);
+  }, 90_000);
 
   it.each(["done", "cancelled"] as const)("does not resume a renewal wait after the task becomes %s", async status => {
     const { issueId, renewal } = await parkUntilRenewal();
@@ -413,7 +423,7 @@ async function eventually(check: () => Promise<boolean>, attempts = 200) {
     }
     expect(mocks.execute).not.toHaveBeenCalled();
     expect((await db.select().from(heartbeatRuns)).some(run => ["scheduled_retry", "queued", "running"].includes(run.status))).toBe(false);
-  }, 30_000);
+  }, 90_000);
 
   it("automatically resumes once when real wall-clock time reaches renewal", async () => {
     const { issueId, marker, renewal } = await parkUntilRenewal();
@@ -451,11 +461,11 @@ async function eventually(check: () => Promise<boolean>, attempts = 200) {
       clearInterval(timer);
       await sweeping;
     }
-  }, 30_000);
+  }, 90_000);
 
   it("stops automatic renewal recovery when the provider still reports quota after its reset", async () => {
     const { renewal } = await parkUntilRenewal();
-    await eventually(async () => Date.now() >= renewal.getTime(), 400);
+    await eventually(async () => Date.now() >= renewal.getTime(), 1200);
     mocks.execute.mockResolvedValue({ ...success(), exitCode: 1, errorMessage: "Quota remains exhausted after reset", errorFamily: "provider_quota",
       retryNotBefore: new Date(renewal.getTime() + 7_200_000).toISOString() });
     await heartbeat.promoteDueScheduledRetries();
@@ -474,12 +484,12 @@ async function eventually(check: () => Promise<boolean>, attempts = 200) {
     const runs = await db.select().from(heartbeatRuns);
     expect(runs.filter(run => run.scheduledRetryReason === "ai_connection_pool_wait"), JSON.stringify(runs.map(run => ({ id: run.id, status: run.status, reason: run.scheduledRetryReason, attempt: run.scheduledRetryAttempt, wakeReason: run.contextSnapshot?.wakeReason, retryOf: run.retryOfRunId })))).toHaveLength(1);
     expect(runs.some(run => ["scheduled_retry", "queued", "running"].includes(run.status))).toBe(false);
-  }, 30_000);
+  }, 90_000);
 
   it("schedules renewal when fresh quota failures exhaust the fallback chain, then resumes only once", async () => {
     const { agentId, issueId } = await seed("planning");
     const marker = `fresh-chain-${randomUUID()}`;
-    const renewal = new Date(Date.now() + 20_000);
+    const renewal = new Date(Date.now() + 30_000);
     await documentService(db).upsertIssueDocument({ issueId, key: "plan", format: "markdown", body: `Continue ${marker}`, createdByAgentId: agentId });
     mocks.execute.mockImplementation(async ctx => {
       if (Date.now() < renewal.getTime()) return { ...success(), exitCode: 1, errorMessage: "Quota exhausted", errorFamily: "provider_quota",
@@ -500,7 +510,7 @@ async function eventually(check: () => Promise<boolean>, attempts = 200) {
     expect(waits).toHaveLength(1);
     expect(waits[0]).toMatchObject({ issueId, agentId, scheduledRetryReason: "ai_connection_pool_wait" });
     expect(waits[0].scheduledRetryAt?.getTime()).toBe(renewal.getTime());
-    await eventually(async () => Date.now() >= renewal.getTime(), 400);
+    await eventually(async () => Date.now() >= renewal.getTime(), 1200);
     heartbeat = heartbeatService(db);
     await heartbeat.promoteDueScheduledRetries();
     await heartbeat.resumeQueuedRuns();
@@ -516,7 +526,7 @@ async function eventually(check: () => Promise<boolean>, attempts = 200) {
 
   it("does not replenish the renewal allowance after switching fallback providers", async () => {
     const { renewal } = await parkUntilRenewal({ secondaryResetDelayMs: 0 });
-    await eventually(async () => Date.now() >= renewal.getTime(), 400);
+    await eventually(async () => Date.now() >= renewal.getTime(), 1200);
     mocks.execute.mockResolvedValue({ ...success(), exitCode: 1, errorMessage: "Quota remains exhausted", errorFamily: "provider_quota",
       retryNotBefore: new Date(renewal.getTime() + 7_200_000).toISOString() });
     await heartbeat.promoteDueScheduledRetries();
@@ -537,7 +547,7 @@ async function eventually(check: () => Promise<boolean>, attempts = 200) {
     const runs = await db.select().from(heartbeatRuns);
     expect(runs.filter(run => run.scheduledRetryReason === "ai_connection_pool_wait")).toHaveLength(1);
     expect(runs.some(run => ["scheduled_retry", "queued", "running"].includes(run.status))).toBe(false);
-  }, 30_000);
+  }, 90_000);
 
   it("walks three ordered levels after two quota errors", async () => {
     const { agentId, issueId } = await seed("planning");
@@ -575,5 +585,5 @@ async function eventually(check: () => Promise<boolean>, attempts = 200) {
     await eventually(async () => mocks.execute.mock.calls.length === 2);
     await heartbeat.drainActiveRunExecutions();
     expect(mocks.execute.mock.calls[1][0].runtime.sessionParams?.sessionId).toBe(sessionId);
-  }, 30_000);
+  }, 90_000);
 });

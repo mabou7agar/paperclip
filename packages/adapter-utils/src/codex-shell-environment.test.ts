@@ -24,7 +24,7 @@ describe("Codex command environment", () => {
       expect(keys).not.toContain(key);
     expect(JSON.stringify(keys)).not.toContain("broker-secret");
   });
-  it("runs a shell Git operation through the scoped broker without inheriting a host GitHub token", async () => {
+  it("runs a remote Git operation through the scoped broker without inheriting a host GitHub token", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "codex-shell-broker-"));
     const requests: string[] = [];
     const server = createServer((req, res) => {
@@ -51,7 +51,7 @@ describe("Codex command environment", () => {
       };
       const keys = new Set(codexShellEnvironmentKeys(env, {}, false));
       const filtered = Object.fromEntries(Object.entries(env).filter(([key]) => keys.has(key)));
-      const result = await promisify(execFile)("/bin/sh", ["-c", "git status"], { env: filtered });
+      const result = await promisify(execFile)("/bin/sh", ["-c", "git ls-remote"], { env: filtered });
       expect(requests).toEqual(["broker-capability"]);
       expect(result.stderr).not.toContain("capability_missing");
       expect(result.stdout + result.stderr).not.toContain("credential");
