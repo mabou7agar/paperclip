@@ -8,7 +8,9 @@ import {
   agentRuntimeState,
   agentWakeupRequests,
   agents,
+  authUsers,
   companies,
+  companyMemberships,
   companySkills,
   createDb,
   documentRevisions,
@@ -28,6 +30,7 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "./helpers/embedded-postgres.js";
 import { monitoringService } from "../services/monitoring.js";
+import * as monitoringModule from "../services/monitoring.js";
 import { heartbeatService } from "../services/heartbeat.ts";
 import { normalizeIssueExecutionPolicy, parseIssueExecutionState } from "../services/issue-execution-policy.ts";
 import { PaperclipRunnerToolAuthority } from "../services/native-runtime/paperclip-runner-tool-authority.js";
@@ -68,13 +71,16 @@ describeEmbeddedPostgres("issue monitor scheduler", () => {
     db = createDb(external ?? tempDb!.connectionString);
   }, 20_000);
 
-  async function waitForHeartbeatIdle(timeoutMs = 3_000) {
+  async function waitForHeartbeatIdle(timeoutMs = 10_000) {
+    await heartbeatService(db).drainActiveRunExecutions();
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
       const active = await db
         .select({ id: heartbeatRuns.id })
         .from(heartbeatRuns)
-        .where(sql`${heartbeatRuns.status} in ('queued', 'running', 'scheduled_retry')`);
+        // Future repair for these no-op process fixtures is cancelled in
+        // teardown. It is not an execution that can settle by waiting here.
+        .where(sql`${heartbeatRuns.status} in ('queued', 'running')`);
       if (active.length === 0) return;
       await new Promise((resolve) => setTimeout(resolve, 50));
     }
@@ -138,10 +144,12 @@ describeEmbeddedPostgres("issue monitor scheduler", () => {
     await db.delete(agentRuntimeState);
     await db.delete(agents);
     await db.delete(companySkills);
+    await db.delete(companyMemberships);
     await db.delete(companies);
   }
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     // The no-op process fixtures deliberately leave no task disposition. The
     // real lifecycle can now leave a bounded, scheduled repair after the
     // monitor assertions. Cancel that remaining work only during teardown.
@@ -196,6 +204,10 @@ describeEmbeddedPostgres("issue monitor scheduler", () => {
       requireBoardApprovalForNewAgents: false,
       defaultResponsibleUserId: "responsible-user",
     });
+    await db.insert(authUsers).values({ id: "responsible-user", name: "Monitor fixture owner",
+      email: "monitor-owner@example.invalid", createdAt: new Date(), updatedAt: new Date() }).onConflictDoNothing();
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "responsible-user",
+      status: "active", membershipRole: "owner" });
 
     await db.insert(agents).values({
       id: agentId,
@@ -339,8 +351,101 @@ describeEmbeddedPostgres("issue monitor scheduler", () => {
     for (let i = 0; i < 3; i++) expect((await heartbeat.tickTimers(new Date("2026-04-11T12:31:00.000Z"))).enqueued).toBe(0);
     expect(await db.select().from(agentWakeupRequests)).toHaveLength(0);
     expect(await monitoringService(db).alerts(companyId)).toHaveLength(1);
-    expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0].monitorAttemptCount).toBe(0);
+    const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+    expect(issue.monitorAttemptCount).toBe(0);
+    expect(issue.monitorNextCheckAt).toBeNull();
+    expect(issue.monitorWakeRequestedAt).toBeNull();
+    expect(parseIssueExecutionState(issue.executionState)?.monitor).toMatchObject({
+      status: "cleared", clearReason: "dispatch_skipped", attemptCount: 0,
+    });
+    expect((await heartbeat.tickIssueMonitors(new Date("2026-04-11T12:32:00.000Z"))).checked).toBe(0);
+    expect(await heartbeat.nextIssueMonitorAt()).toBeNull();
+    const receipts = (await db.select().from(activityLog)).filter(row => row.action === "issue.monitor_skipped");
+    expect(receipts).toHaveLength(1);
+    expect(receipts[0].details).toMatchObject({ reportOnly: true, attemptedAttemptCount: 1 });
   });
+
+  it.each(["wake_owner", "create_recovery_issue", "escalate_to_board"] as const)(
+    "settles expired alert-only observations once without %s side effects",
+    async (recoveryPolicy) => {
+      const { companyId, issueId } = await seedFixture({ monitorAttemptCount: 2, monitor: {
+        kind: "external_service", serviceName: "Already finished validation",
+        timeoutAt: "2026-04-11T12:30:30.000Z", maxAttempts: 3, recoveryPolicy,
+      } });
+      await monitoringService(db).savePolicy(companyId, { mode: "alert_only" }, "owner");
+      const [before] = await db.select().from(issues).where(eq(issues.id, issueId));
+      const policy = { ...before.executionPolicy, maxReviewRounds: 4 };
+      await db.update(issues).set({ executionPolicy: policy }).where(eq(issues.id, issueId));
+      const heartbeat = heartbeatService(db);
+      expect(await heartbeat.tickIssueMonitors(new Date("2026-04-11T12:31:00.000Z")))
+        .toMatchObject({ checked: 1, triggered: 0, skipped: 1 });
+      for (let i = 0; i < 3; i++) {
+        expect((await heartbeat.tickIssueMonitors(new Date("2026-04-12T12:31:00.000Z"))).checked).toBe(0);
+      }
+      const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+      expect(issue).toMatchObject({ status: before.status, assigneeAgentId: before.assigneeAgentId,
+        monitorAttemptCount: 2, monitorNextCheckAt: null, monitorWakeRequestedAt: null });
+      expect(issue.executionPolicy).toMatchObject({ maxReviewRounds: 4 });
+      expect(issue.executionPolicy?.monitor).toBeUndefined();
+      expect(parseIssueExecutionState(issue.executionState)?.monitor).toMatchObject({
+        status: "cleared", clearReason: "timeout_exceeded", attemptCount: 2,
+      });
+      expect(await db.select().from(agentWakeupRequests)).toHaveLength(0);
+      expect(await db.select().from(heartbeatRuns)).toHaveLength(0);
+      expect(await db.select().from(issues)).toHaveLength(1);
+      expect(await db.select().from(issueComments)).toHaveLength(0);
+      expect(await monitoringService(db).alerts(companyId)).toHaveLength(1);
+      const receipts = (await db.select().from(activityLog)).filter(row => row.action === "issue.monitor_exhausted");
+      expect(receipts).toHaveLength(1);
+      expect(receipts[0].details).toMatchObject({ reportOnly: true, attemptedAttemptCount: 3 });
+      expect(await heartbeat.nextIssueMonitorAt()).toBeNull();
+    }, 30_000,
+  );
+
+  it("releases an observational claim when alert storage fails", async () => {
+    const { companyId, issueId, nextCheckAt } = await seedFixture();
+    await monitoringService(db).savePolicy(companyId, { mode: "alert_only" }, "owner");
+    const service = monitoringService(db);
+    vi.spyOn(monitoringModule, "monitoringService").mockReturnValueOnce({
+      ...service, observe: vi.fn().mockImplementationOnce(async () => {
+        const [claimed] = await db.select().from(issues).where(eq(issues.id, issueId));
+        expect(claimed.monitorWakeRequestedAt).not.toBeNull();
+        throw new Error("Alert store unavailable");
+      }),
+    });
+    await heartbeatService(db).tickIssueMonitors(new Date("2026-04-11T12:31:00.000Z"));
+    const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+    expect(issue.monitorWakeRequestedAt).toBeNull();
+    expect(issue.monitorNextCheckAt).toEqual(nextCheckAt);
+    expect(issue.monitorAttemptCount).toBe(0);
+    expect(await db.select().from(agentWakeupRequests)).toHaveLength(0);
+    const diagnostics = (await db.select().from(activityLog)).filter(row => row.action === "issue.monitor_dispatch_failed");
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].details).toMatchObject({ reason: "monitor_observe_failed" });
+  });
+
+  it.each(["continuation", "quota", "manual"] as const)(
+    "keeps native expired %s recovery under alert-only monitoring", async (kind) => {
+      const { companyId, issueId } = await seedFixture({ monitor: {
+        kind: kind === "continuation" ? "task_continuation" : "external_service",
+        serviceName: kind === "quota" ? PROVIDER_QUOTA_MONITOR_SERVICE_NAME : "Owned result",
+        externalRef: "frozen-job", timeoutAt: "2026-04-11T12:00:00.000Z", maxAttempts: 2,
+        recoveryPolicy: "escalate_to_board",
+      } });
+      await monitoringService(db).savePolicy(companyId, { mode: "alert_only" }, "owner");
+      const heartbeat = heartbeatService(db), now = new Date("2026-04-11T12:31:00.000Z");
+      if (kind === "manual") await heartbeat.triggerIssueMonitor(issueId, { now, actorType: "user", actorId: "local-board" });
+      else await heartbeat.tickIssueMonitors(now);
+      const [issue] = await db.select().from(issues).where(eq(issues.id, issueId));
+      expect(issue.monitorNextCheckAt).toBeNull();
+      expect(parseIssueExecutionState(issue.executionState)?.monitor).toMatchObject({ clearReason: "timeout_exceeded" });
+      const activity = await db.select().from(activityLog);
+      expect(activity.filter(row => row.action === "issue.monitor_escalated_to_board")).toHaveLength(1);
+      expect(activity.find(row => row.action === "issue.monitor_exhausted")?.details?.reportOnly).toBeUndefined();
+      expect(await db.select().from(issueComments)).toHaveLength(1);
+      expect(await db.select().from(agentWakeupRequests)).toHaveLength(0);
+    },
+  );
 
   it("preserves a due monitor through native execution and dispatches once after release", async () => {
     const { companyId, issueId, agentId, nextCheckAt } = await seedFixture();

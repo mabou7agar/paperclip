@@ -8,3 +8,10 @@ get {
   body: none
   auth: inherit
 }
+
+docs {
+  Alert-only observations are consumed once through native monitor claims and
+  expiry handling. Issue state retains the previous attempt count. Audit receipts
+  record the attempted count and include reportOnly: true. Repeated reads do not wake agents or reset monitor bounds.
+  Explicit bounded task continuations and quota renewal keep their normal paths.
+}

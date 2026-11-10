@@ -23,6 +23,21 @@ assignments, Tech Lead review, approvals and bounded provider quota renewal
 retain their existing authorization and scheduling rules. Already queued,
 unstarted monitoring turns are cancelled at the dispatch boundary.
 
+Scheduled observations still pass through the native monitor claim and expiry
+checks. A due alert-only observation is consumed once: its schedule is cleared,
+its existing attempt count is retained, and the normal monitor receipt records
+`timeout_exceeded`, `max_attempts_exhausted` or `dispatch_skipped`. Its audit
+receipt includes `reportOnly: true`. It does not start an expiry-recovery agent,
+create a recovery task or escalate a new question. Repeated sweeps have no due
+observation left to claim. Task status, assignee, review state and saved sessions
+are unchanged; the external job is neither cancelled nor run again.
+
+Explicit `task_continuation` monitors with a job reference and finite timeout
+and attempt bounds retain native once-only dispatch. Quota-renewal monitors
+retain their existing recovery contract. An expired observation must be
+reconciled against the actual external result before authorizing further work;
+changing its kind does not reset its bounds or authorize repeating the job.
+
 Pausing a monitoring agent preserves its history and prevents its own timer
 from running. Disable that agent's periodic heartbeat before intentionally
 resuming it if it should remain available only on demand. The server performs

@@ -480,6 +480,7 @@ export function createHeartbeatScheduling(
     clearReason: IssueExecutionMonitorClearReason;
     recoveryPolicy: IssueExecutionMonitorRecoveryPolicy;
     monitor: IssueExecutionMonitorPolicy | null;
+    reportOnly?: boolean;
     now: Date;
     actorType: "user" | "agent" | "system";
     actorId: string;
@@ -488,7 +489,7 @@ export function createHeartbeatScheduling(
     activitySource: "manual" | "scheduled";
   }) {
     const recover = () => performIssueMonitorRecovery(input);
-    if (input.recoveryPolicy === "wake_owner") {
+    if (!input.reportOnly && input.recoveryPolicy === "wake_owner") {
       try {
         if (!await recover()) {
           await releaseIssueMonitorWithDiagnostic(input.claimed, input, {
@@ -516,7 +517,7 @@ export function createHeartbeatScheduling(
         })),
         updatedAt: input.now,
       }).where(issueMonitorClaimCondition(input.claimed)).returning({ id: issues.id });
-      if (rows.length && input.recoveryPolicy === "escalate_to_board") {
+      if (rows.length && !input.reportOnly && input.recoveryPolicy === "escalate_to_board") {
         await insertIssueComment(tx, {
           companyId: input.claimed.companyId,
           issueId: input.claimed.id,
@@ -552,10 +553,10 @@ export function createHeartbeatScheduling(
       actorId: input.actorId,
       agentId: input.agentId,
       runId: input.runId,
-      action: "issue.monitor_exhausted",
+      action: input.reportOnly && input.clearReason === "dispatch_skipped" ? "issue.monitor_skipped" : "issue.monitor_exhausted",
       entityType: "issue",
       entityId: input.claimed.id,
-      details: monitorRecoveryDetails({
+      details: { ...monitorRecoveryDetails({
         claimed: input.claimed,
         scheduledAtIso: input.scheduledAtIso,
         nextAttemptCount: input.nextAttemptCount,
@@ -563,10 +564,10 @@ export function createHeartbeatScheduling(
         recoveryPolicy: input.recoveryPolicy,
         monitor: input.monitor,
         source: input.activitySource,
-      }),
+      }), ...(input.reportOnly ? { reportOnly: true } : {}) },
     });
 
-    if (input.recoveryPolicy === "create_recovery_issue") await recover();
+    if (!input.reportOnly && input.recoveryPolicy === "create_recovery_issue") await recover();
 
     return { outcome: "skipped" as const, reason: input.clearReason };
   }
@@ -712,15 +713,33 @@ export function createHeartbeatScheduling(
         }
       : {};
 
-    if (clearReason) {
+    // Keep native claim, bounds, consumption and deadlines authoritative. An
+    // observational alert is a one-shot disposition, not a permanently due wait.
+    // Explicit task continuations and quota recovery retain their own contracts.
+    let reportOnly = false;
+    try {
+      reportOnly = input.source === "automation" &&
+        monitor?.serviceName !== PROVIDER_QUOTA_MONITOR_SERVICE_NAME &&
+        !isBoundedTaskContinuationMonitor(parseObject(claimed.executionPolicy).monitor) &&
+        await monitoringService(db).observe({ companyId: claimed.companyId, issueId: claimed.id, kind: "monitor_due",
+          fingerprint: JSON.stringify([claimed.assigneeAgentId, scheduledAtIso, claimed.monitorNotes]) });
+    } catch (error) {
+      await releaseIssueMonitorWithDiagnostic(claimed, input, {
+        action: "issue.monitor_dispatch_failed", reason: "monitor_observe_failed",
+      });
+      throw error;
+    }
+
+    if (clearReason || reportOnly) {
       return clearIssueMonitorAndRecover({
         claimed,
         policy,
         scheduledAtIso,
         nextAttemptCount,
-        clearReason,
+        clearReason: clearReason ?? "dispatch_skipped",
         recoveryPolicy,
         monitor,
+        reportOnly,
         now: input.now,
         actorType: input.actorType,
         actorId: input.actorId,
@@ -1059,14 +1078,6 @@ export function createHeartbeatScheduling(
 
     for (const due of dueMonitors) {
       if (!canContinue()) break;
-      // Explicit work continuations retain all existing claim/attempt guards.
-      if (parseObject(parseObject(due.executionPolicy).monitor).serviceName !== PROVIDER_QUOTA_MONITOR_SERVICE_NAME &&
-        !isBoundedTaskContinuationMonitor(parseObject(due.executionPolicy).monitor) &&
-        await monitoringService(db).observe({ companyId: due.companyId, issueId: due.id, kind: "monitor_due",
-          fingerprint: JSON.stringify([due.assigneeAgentId, due.monitorNextCheckAt?.toISOString(), due.monitorNotes]) })) {
-        skipped += 1;
-        continue;
-      }
       const claimed = await db.transaction(async (tx) => {
         await notifyStatusCardIssueChange(tx, due.companyId);
         await notifyDeliveryWork(tx, DELIVERY_QUEUES.issueMonitors);
