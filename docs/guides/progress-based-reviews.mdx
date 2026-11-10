@@ -1,0 +1,44 @@
+---
+title: Progress-based review limits
+description: Continue useful reviews and stop repeated rounds without verified progress.
+---
+
+Progress mode is an opt-in extension of the existing task execution policy. Existing tasks keep their fixed review limit. A board operator can preserve a task's stages, monitor and other governance settings and add:
+
+```json
+{"reviewGuard":{"mode":"progress","maxStalledRounds":3}}
+```
+
+The number limits consecutive **stalled** changes-requested decisions, not useful revisions. A review may continue beyond three total rounds when its active reviewer verifies a previously recorded finding was resolved or a required validation/review gate passed. A new commit or evidence link alone does not count. There is no automatic test execution, timer, quota probe or retry added by this feature.
+
+## Reviewer decisions
+
+Read the current task, including its execution state. Submit the assessment with the existing `PATCH /api/issues/{issueId}` changes-requested decision and comment:
+
+```json
+{
+  "status":"in_progress",
+  "comment":"Verified F1 against the candidate diff and the attached receipt; F2 remains open.",
+  "reviewAssessment":{
+    "baselineDecisionId":"11111111-1111-4111-8111-111111111111",
+    "candidateRef":"exact reviewed commit or artifact digest",
+    "evidenceRefs":["task-document-or-attachment-with-exact-receipt"],
+    "openFindingIds":["F2"],
+    "requiredGateIds":["security-review"],
+    "resolvedFindingIds":["F1"],
+    "passedGateIds":[]
+  }
+}
+```
+
+The first assessment registers the currently known open findings and required gates with empty resolution arrays and the current `lastDecisionId` (null only if no prior decision exists). Later assessments may register newly discovered findings or gates, but may resolve only items registered before that assessment. Registration alone earns no credit. The complete assessment is limited to 8192 UTF-8 bytes, so use bounded evidence references rather than logs. Their IDs receive credit once, and cannot be reopened under the same ID. Omitting an unresolved item does not resolve it. Validation can advance on the same candidate when a new receipt is supplied. The server validates references and authority; the authorized reviewer remains responsible for actually inspecting evidence. A receipt is an attestation, not an independent proof that a command ran.
+
+Assessment snapshots persist in task execution state; immutable decision bodies retain the assessment, reviewer identity, baseline and stalled count. A row-locked comparison rejects concurrent decisions computed from stale state with `409 review_progress_snapshot_changed`. A stale baseline or invalid assertion returns `422`; it is not a request to retry automatically.
+
+## Holds and compatibility
+
+A progress-enabled task requires a responsible human or human creator for escalation; decisions fail closed if neither exists. At the stalled limit the task parks with its responsible human (falling back to its human creator). That hold stays until an explicit owner decision; changing configuration alone does not release it. Prior attempts survive opting in. Existing total `changesRequestedCount` is retained for history. Approval advances the normal stage and clears the stage's streak; it does not bypass any downstream review or acceptance gate.
+
+An explicit `maxReviewRounds` stays an independent hard bound even when progress is verified. Keep it on one-round exceptions. Add it alongside progress mode when an absolute review ceiling is required; normal task, run, time and spending limits remain separate. Progress mode never changes task/run/token budgets, review independence, approval scope, session bindings, root execution or deployment permissions. Configuration is currently per task through the protected existing API; it does not introduce company/agent defaults or a new settings screen.
+
+Agents cannot remove/change the guard, its stages or hard bound. Only the board can change those settings. History is bounded at 200 IDs per category; exhaustion fails closed for owner re-scoping, without resetting history.

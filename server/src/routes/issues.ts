@@ -1,3 +1,4 @@
+import { assertCanCreateProgressReview } from "../services/issue-review-progress.js";
 import { listStalledDependencies } from "../services/recovery/blocker-stall-wakeups.js";
 import { confirmMcpAttachmentCleanup, recordMcpAttachmentCleanup, type McpAttachmentCleanup } from "../services/public-mcp/upload-cleanup.js";
 import { notifyDeferredExecutionWork } from "../services/deferred-execution-notifications.js";
@@ -13122,6 +13123,7 @@ export function issueRoutes(
         createBody.assigneeAgentId ?? null,
         Boolean(executionPolicy?.monitor),
       );
+      assertCanCreateProgressReview(executionPolicy, actor.agentId);
       const issueId = randomUUID();
       const sourceTrust = await sourceTrustForActorWrite(
         {
@@ -14479,6 +14481,7 @@ export function issueRoutes(
         attachmentIds: commentAttachmentIds,
         reviewInteractionId: requestedReviewInteractionId,
         reviewRequest,
+        reviewAssessment,
         reopen: reopenRequested,
         resume: resumeRequested,
         interrupt: interruptRequested,
@@ -14926,6 +14929,7 @@ export function issueRoutes(
         allowBoardOverride: req.actor.type === "board" && req.actor.source !== "mcp_oauth",
         commentBody,
         reviewRequest: reviewRequest === undefined ? undefined : reviewRequest,
+        reviewAssessment,
         monitorExplicitlyUpdated:
           req.body.executionPolicy !== undefined && monitorChanged,
       });
@@ -15326,6 +15330,11 @@ export function issueRoutes(
         workspaceSelectionActor: req.actor,
         expectedExecutionPolicy,
         expectedStatusVersion,
+        ...(reviewAssessment || nextExecutionPolicy?.reviewGuard || previousExecutionPolicy?.reviewGuard ? { expectedReviewSnapshot: {
+          executionState: existing.executionState, executionPolicy: existing.executionPolicy,
+          status: existing.status, assigneeAgentId: existing.assigneeAgentId, assigneeUserId: existing.assigneeUserId,
+          responsibleUserId: existing.responsibleUserId, createdByUserId: existing.createdByUserId,
+        } } : {}),
         actorAgentId: actor.agentId ?? null,
         actorRunId: actor.agentId ? actor.runId : null,
         actorRunStopId: actor.agentId && interruptedRunId === actor.runId ? issueMutationStopId : null,

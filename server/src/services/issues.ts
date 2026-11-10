@@ -1,3 +1,4 @@
+import { assertCanCreateProgressReview, assertReviewProgressOwner, assertCanChangeProgressReview } from "./issue-review-progress.js";
 import { recordTaskCompletionReceipt, completionReceiptForRun } from "./task-completion-receipts.js";
 import { completionAcknowledgement, acknowledgeCompletionReceipt } from "../repositories/task-completion-receipts.js";
 import { recordMcpAttachmentCleanup, type McpAttachmentCleanup } from "./public-mcp/upload-cleanup.js";
@@ -10216,6 +10217,7 @@ export function issueService(db: Db) {
         expectedParentId,
         ...issueData
       } = data;
+      assertCanCreateProgressReview(issueData.executionPolicy, issueData.createdByAgentId);
       // The parent the caller asked for. It still drives provenance, privacy and
       // workspace inheritance when the depth policy places the task elsewhere.
       const requestedParentId = issueData.parentId ?? null;
@@ -10660,6 +10662,7 @@ export function issueService(db: Db) {
           },
         );
 
+        assertReviewProgressOwner({ policy: issueData.executionPolicy, responsibleUserId, createdByUserId: issueData.createdByUserId, status: issueData.status });
         let visibility = issueData.visibility ?? "open";
         let privacyRootIssueId: string | null = null;
         // Provenance survives standalone chat handoffs. This is an access edge,
@@ -11220,6 +11223,8 @@ export function issueService(db: Db) {
         workspaceSelectionActor?: AuthorizationActor;
         expectedExecutionPolicy?: typeof issues.$inferInsert.executionPolicy;
         expectedStatusVersion?: number;
+        /** Server-owned optimistic fence for reviewer progress computed from a snapshot. */
+        expectedReviewSnapshot?: Pick<typeof issues.$inferSelect, "executionState" | "executionPolicy" | "status" | "assigneeAgentId" | "assigneeUserId"> & Partial<Pick<typeof issues.$inferSelect, "responsibleUserId" | "createdByUserId">>;
         /** Defaults to `flatten` for parent changes. Board-user routes pass `allow_nested`. */
         parentDepthPolicy?: IssueParentDepthPolicy;
         /**
@@ -11312,6 +11317,7 @@ export function issueService(db: Db) {
         workspaceSelectionActor,
         expectedExecutionPolicy,
         expectedStatusVersion,
+        expectedReviewSnapshot,
         parentDepthPolicy: _parentDepthPolicy,
         expectedParentId: _expectedParentId,
         // Creation provenance never changes after create.
@@ -11586,6 +11592,19 @@ export function issueService(db: Db) {
           .for("update")
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!receiptExisting) return null;
+        if (expectedReviewSnapshot && Object.entries(expectedReviewSnapshot).some(([key, value]) =>
+          !isDeepStrictEqual(receiptExisting[key as keyof typeof receiptExisting], value))) {
+          throw conflict("The review changed while this decision was checked. Read the current review before deciding.", { code: "review_progress_snapshot_changed" });
+        }
+        const nextReviewPolicy = issueData.executionPolicy === undefined ? receiptExisting.executionPolicy : issueData.executionPolicy;
+        const nextResponsibleUserId = issueData.responsibleUserId === undefined ? receiptExisting.responsibleUserId : issueData.responsibleUserId;
+        const nextCreatedByUserId = issueData.createdByUserId === undefined ? receiptExisting.createdByUserId : issueData.createdByUserId;
+        assertReviewProgressOwner({ policy: nextReviewPolicy, responsibleUserId: nextResponsibleUserId,
+          createdByUserId: nextCreatedByUserId, status: patch.status ?? receiptExisting.status });
+        if (issueData.executionPolicy !== undefined && (receiptExisting.executionPolicy?.reviewGuard || issueData.executionPolicy?.reviewGuard)) {
+          assertCanChangeProgressReview({ before: normalizeIssueExecutionPolicy(receiptExisting.executionPolicy),
+            after: normalizeIssueExecutionPolicy(issueData.executionPolicy), actorAgentId });
+        }
         if (issueData.executionPolicy !== undefined) assertQualityReviewPolicyMutation({ previousPolicy: receiptExisting.executionPolicy, nextPolicy: issueData.executionPolicy, actorAgentId, actorUserId });
         if ((patch.status ?? receiptExisting.status) === "done" &&
             (receiptExisting.status !== "done" || issueData.executionPolicy !== undefined)) {
