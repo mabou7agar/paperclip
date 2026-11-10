@@ -29,6 +29,7 @@ function decide(state: IssueExecutionState, reviewAssessment?: IssueReviewAssess
 }
 function next(state: IssueExecutionState, a?: IssueReviewAssessment) {
   const result = decide(state, a);
+  expect(result.expectedReviewSnapshot?.executionState).toEqual(state);
   const decidedState = parseIssueExecutionState({ ...(result.patch.executionState as object), lastDecisionId: randomUUID() })!;
   if (result.patch.status !== "in_progress") return { result, state: decidedState };
   const resubmitted = applyIssueExecutionPolicyTransition({
@@ -103,7 +104,7 @@ describe("verified-progress review governance", () => {
     const held = result.result.patch.executionState as IssueExecutionState;
     const raised = { ...policy, reviewGuard: { mode: "progress" as const, maxStalledRounds: 10 } };
     const kept = applyIssueExecutionPolicyTransition({ issue: { status: "in_review", responsibleUserId: "owner", assigneeUserId: "owner", executionState: held, executionPolicy: policy },
-      policy: raised, previousPolicy: policy, requestedAssigneePatch: {}, actor: { userId: "another-owner" } });
+      policy: raised, previousPolicy: policy, requestedAssigneePatch: {}, actor: { userId: "another-owner" }, allowBoardOverride: true });
     expect(kept.patch).toEqual({});
     expect(() => applyIssueExecutionPolicyTransition({ issue: { status: "in_review", responsibleUserId: "owner", assigneeUserId: "owner", executionState: held, executionPolicy: raised },
       policy: raised, previousPolicy: raised, requestedStatus: "in_progress", requestedAssigneePatch: {}, actor: { agentId: worker } })).toThrow(/escalated reviewer/);
@@ -118,7 +119,7 @@ describe("verified-progress review governance", () => {
     const state = { ...initial(), currentParticipant: { type: "user" as const, userId: "old-reviewer" }, changesRequestedCount: 5,
       reviewProgress: { stageId: stage, stalledRounds: 0, openFindingIds: [], requiredGateIds: [], creditedFindingIds: ["F1"], creditedGateIds: [], lastAssessment: null } };
     const result = applyIssueExecutionPolicyTransition({ issue: { status: "in_review", responsibleUserId: "owner", assigneeUserId: "old-reviewer", executionPolicy: oldPolicy, executionState: state },
-      policy: replacement, previousPolicy: oldPolicy, requestedAssigneePatch: {}, actor: { userId: "owner" } });
+      policy: replacement, previousPolicy: oldPolicy, requestedAssigneePatch: {}, actor: { userId: "owner" }, allowBoardOverride: true });
     expect(result.patch.assigneeUserId).toBe("new-reviewer");
     expect(result.patch.executionState).not.toHaveProperty("reviewEscalated");
   });
@@ -143,8 +144,26 @@ describe("verified-progress review governance", () => {
     expect(approved.patch.executionState).not.toHaveProperty("reviewEscalated");
     const replacement = { ...chain, stages: [chain.stages[0], { ...chain.stages[1], participants: [{ id: randomUUID(), type: "user" as const, userId: "replacement" }] }] };
     const replaced = applyIssueExecutionPolicyTransition({ issue: { status: "in_review", responsibleUserId: "owner", assigneeUserId: "second-reviewer", executionPolicy: chain, executionState: approved.patch.executionState as IssueExecutionState },
-      policy: replacement, previousPolicy: chain, requestedAssigneePatch: {}, actor: { userId: "owner" } });
+      policy: replacement, previousPolicy: chain, requestedAssigneePatch: {}, actor: { userId: "owner" }, allowBoardOverride: true });
     expect(replaced.patch.assigneeUserId).toBe("replacement");
+  });
+
+  it("materializes a legacy owner hold on opt-in and refuses to disable the guard before an owner decision", () => {
+    const legacy = { ...policy, reviewGuard: undefined };
+    const state = { ...initial(), currentParticipant: { type: "user" as const, userId: "owner" }, changesRequestedCount: 3 };
+    const result = applyIssueExecutionPolicyTransition({ issue: { status: "in_review", responsibleUserId: "owner", assigneeUserId: "owner", executionPolicy: legacy, executionState: state },
+      policy, previousPolicy: legacy, requestedAssigneePatch: {}, actor: { userId: "owner" }, allowBoardOverride: true });
+    expect(result.patch.executionState).toMatchObject({ reviewEscalated: true, changesRequestedCount: 3 });
+    expect(() => applyIssueExecutionPolicyTransition({ issue: { status: "in_review", responsibleUserId: "owner", assigneeUserId: "owner", executionPolicy: policy, executionState: result.patch.executionState as IssueExecutionState },
+      policy: legacy, previousPolicy: policy, requestedAssigneePatch: {}, actor: { userId: "owner" }, allowBoardOverride: true })).toThrow(/before disabling/);
+  });
+
+  it("refuses unsupported saved progress state by name without clearing it", () => {
+    const saved = { ...initial(), reviewProgress: { version: "future" } };
+    expect(() => applyIssueExecutionPolicyTransition({ issue: { status: "in_review", responsibleUserId: "owner", executionPolicy: policy, executionState: saved },
+      policy, previousPolicy: policy, requestedStatus: "done", requestedAssigneePatch: {}, actor: { agentId: reviewer }, commentBody: "Do not reset history" }))
+      .toThrow(/Saved progress review state is unsupported/);
+    expect(saved.reviewProgress).toEqual({ version: "future" });
   });
 
   it("fails closed without an escalation owner and forbids clearing a held stage through policy edits", () => {
@@ -171,5 +190,6 @@ describe("verified-progress review governance", () => {
     expect(updateIssueSchema.safeParse({ reviewAssessment: { ...assessment(initial()), resolvedFindingIds: ["F1", "F1"] } }).success).toBe(false);
     const oversized = { ...assessment(initial()), evidenceRefs: Array.from({ length: 20 }, (_, i) => `${i}${"汉".repeat(499)}`) };
     expect(updateIssueSchema.safeParse({ reviewAssessment: oversized }).success).toBe(false);
+    expect(updateIssueSchema.parse({ executionState: { changesRequestedCount: 0 }, expectedReviewSnapshot: {}, allowProgressReviewConfiguration: true })).toEqual({});
   });
 });

@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import type { IssueExecutionPolicy, IssueExecutionState, IssueReviewAssessment, IssueReviewProgressState } from "@paperclipai/shared";
-import { unprocessable } from "../errors.js";
+import { conflict, unprocessable } from "../errors.js";
+import { issueExecutionStateSchema } from "@paperclipai/shared";
 
 /** Pure reviewer-attestation accounting; never executes validation or wakes work. */
 export function assessReviewProgress(input: {
@@ -52,8 +53,8 @@ export function assessReviewProgress(input: {
 }
 
 /** Used by every create producer before workspaces or task rows are allocated. */
-export function assertCanCreateProgressReview(policy: IssueExecutionPolicy | Record<string, unknown> | null | undefined, actorAgentId?: string | null) {
-  if (policy?.reviewGuard && actorAgentId) {
+export function assertCanCreateProgressReview(policy: IssueExecutionPolicy | Record<string, unknown> | null | undefined, actorAgentId?: string | null, allowConfiguration = false) {
+  if (policy?.reviewGuard && (!allowConfiguration || actorAgentId)) {
     throw unprocessable("Only the board may configure progress review governance", { code: "review_progress_policy_protected" });
   }
 }
@@ -70,11 +71,45 @@ export function assertReviewProgressOwner(input: {
 }
 
 export function assertCanChangeProgressReview(input: {
-  before: IssueExecutionPolicy | null; after: IssueExecutionPolicy | null; actorAgentId?: string | null;
+  before: IssueExecutionPolicy | null; after: IssueExecutionPolicy | null; actorAgentId?: string | null; allowConfiguration?: boolean;
 }) {
-  if (!input.actorAgentId || !(input.before?.reviewGuard || input.after?.reviewGuard)) return;
+  if (!(input.before?.reviewGuard || input.after?.reviewGuard)) return;
   const governance = (policy: IssueExecutionPolicy | null) => ({ guard: policy?.reviewGuard, max: policy?.maxReviewRounds, stages: policy?.stages });
-  if (!isDeepStrictEqual(governance(input.before), governance(input.after))) {
+  if (!isDeepStrictEqual(governance(input.before), governance(input.after)) && (!input.allowConfiguration || input.actorAgentId)) {
     throw unprocessable("Only the board may change progress review governance", { code: "review_progress_policy_protected" });
+  }
+}
+
+export interface ReviewProgressSnapshot {
+  status: string;
+  assigneeAgentId: string | null;
+  assigneeUserId: string | null;
+  executionPolicy: Record<string, unknown> | null;
+  executionState: Record<string, unknown> | null;
+  responsibleUserId?: string | null;
+  createdByUserId?: string | null;
+}
+
+/** Any review-state producer must fence changes; monitor-only writes can retain current review state. */
+export function assertReviewProgressStateWrite(input: {
+  enabled: boolean; before: unknown; after: unknown; fenced: boolean;
+}) {
+  if (!input.enabled || input.fenced) return;
+  const reviewFields = (state: unknown) => {
+    if (state == null) return null;
+    const parsed = issueExecutionStateSchema.safeParse(state);
+    if (!parsed.success) throw conflict("Read the current review before changing its state", { code: "review_progress_snapshot_required" });
+    const { monitor: _monitor, ...fields } = parsed.data;
+    return fields;
+  };
+  if (!isDeepStrictEqual(reviewFields(input.before), reviewFields(input.after))) {
+    throw conflict("Review state changes require their original snapshot", { code: "review_progress_snapshot_required" });
+  }
+}
+
+/** Preserve unsupported saved review state rather than restarting its counters. */
+export function assertReviewProgressStateShape(enabled: boolean, state: unknown, status?: string) {
+  if (enabled && status !== "cancelled" && state != null && !issueExecutionStateSchema.safeParse(state).success) {
+    throw unprocessable("Saved progress review state is unsupported; preserve it and ask the owner to re-scope", { code: "review_progress_state_invalid" });
   }
 }

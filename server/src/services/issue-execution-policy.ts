@@ -13,7 +13,7 @@ import type {
 } from "@paperclipai/shared";
 import { issueExecutionPolicySchema, issueExecutionStateSchema } from "@paperclipai/shared";
 import { unprocessable } from "../errors.js";
-import { assessReviewProgress, assertReviewProgressOwner, assertCanChangeProgressReview } from "./issue-review-progress.js";
+import { assessReviewProgress, assertReviewProgressOwner, assertCanChangeProgressReview, assertReviewProgressStateShape, type ReviewProgressSnapshot } from "./issue-review-progress.js";
 
 type AssigneeLike = {
   assigneeAgentId?: string | null;
@@ -62,6 +62,7 @@ type TransitionResult = {
   patch: Record<string, unknown>;
   decision?: Pick<IssueExecutionDecision, "stageId" | "stageType" | "outcome" | "body">;
   workflowControlledAssignment?: boolean;
+  expectedReviewSnapshot?: ReviewProgressSnapshot;
 };
 
 /**
@@ -458,6 +459,14 @@ function reviewLimitReached(policy: IssueExecutionPolicy | null, state: IssueExe
       (policy.maxReviewRounds != null && (state?.changesRequestedCount ?? 0) >= resolveMaxReviewRounds(policy));
   }
   return (state?.changesRequestedCount ?? 0) >= resolveMaxReviewRounds(policy);
+}
+
+export function isOwnerReviewHold(policy: IssueExecutionPolicy | null, state: IssueExecutionState | null): boolean {
+  if (state?.status !== "pending") return false;
+  if (state.reviewEscalated) return true;
+  const stage = policy && findStageById(policy, state.currentStageId);
+  return Boolean(stage && state.currentParticipant?.type === "user" &&
+    !stageHasParticipant(stage, state.currentParticipant) && reviewLimitReached(policy, state));
 }
 
 /**
@@ -1265,18 +1274,18 @@ export function buildIssueMonitorClearedPatch(input: {
 
 export function applyIssueExecutionPolicyTransition(input: TransitionInput): TransitionResult {
   const previousPolicy = input.previousPolicy ?? normalizeIssueExecutionPolicy(input.issue.executionPolicy);
+  assertReviewProgressStateShape(Boolean(input.policy?.reviewGuard || previousPolicy?.reviewGuard), input.issue.executionState, input.requestedStatus ?? input.issue.status);
   const previousState = parseIssueExecutionState(input.issue.executionState);
-  const previousStage = previousPolicy && findStageById(previousPolicy, previousState?.currentStageId);
-  const priorOwnerHold = previousState?.status === "pending" && (previousState.reviewEscalated || (
-    previousState.currentParticipant?.type === "user" && previousStage &&
-    !stageHasParticipant(previousStage, previousState.currentParticipant) &&
-    reviewLimitReached(previousPolicy, previousState)));
+  const priorOwnerHold = isOwnerReviewHold(previousPolicy, previousState);
+  if (priorOwnerHold && previousPolicy?.reviewGuard && !input.policy?.reviewGuard && input.requestedStatus !== "cancelled") {
+    throw unprocessable("Resolve the owner review hold before disabling its progress guard", { code: "review_progress_owner_hold" });
+  }
   if (priorOwnerHold && (previousPolicy?.reviewGuard || input.policy?.reviewGuard) &&
       (!input.policy || !findStageById(input.policy, previousState?.currentStageId)) &&
       input.requestedStatus !== "cancelled") {
     throw unprocessable("Resolve the owner review hold before removing or replacing its stage", { code: "review_progress_owner_hold" });
   }
-  assertCanChangeProgressReview({ before: previousPolicy, after: input.policy, actorAgentId: input.actor.agentId });
+  assertCanChangeProgressReview({ before: previousPolicy, after: input.policy, actorAgentId: input.actor.agentId, allowConfiguration: input.allowBoardOverride === true });
   assertReviewProgressOwner({ policy: input.policy, responsibleUserId: input.issue.responsibleUserId,
     createdByUserId: input.issue.createdByUserId, status: input.requestedStatus ?? input.issue.status });
   if (input.reviewAssessment) {
@@ -1290,6 +1299,20 @@ export function applyIssueExecutionPolicyTransition(input: TransitionInput): Tra
   const stageResult = applyIssueExecutionStageTransition(input);
   const monitorPatch = applyMonitorTransition(input, stageResult.patch);
   Object.assign(stageResult.patch, monitorPatch);
+  // Opting into progress mode must not silently release an existing legacy owner hold.
+  if (priorOwnerHold && (input.policy?.reviewGuard || previousPolicy?.reviewGuard) &&
+      !stageResult.decision && input.requestedStatus !== "cancelled" && !previousState?.reviewEscalated) {
+    const pending = (stageResult.patch.executionState ?? previousState) as IssueExecutionState | null;
+    if (pending?.status === "pending") stageResult.patch.executionState = { ...pending, reviewEscalated: true };
+  }
+  if ((input.policy?.reviewGuard || previousPolicy?.reviewGuard) && stageResult.patch.executionState !== undefined) {
+    stageResult.expectedReviewSnapshot = {
+      status: input.issue.status, assigneeAgentId: input.issue.assigneeAgentId ?? null, assigneeUserId: input.issue.assigneeUserId ?? null,
+      executionPolicy: input.issue.executionPolicy ? { ...input.issue.executionPolicy } : null,
+      executionState: input.issue.executionState ? { ...input.issue.executionState } : null,
+      responsibleUserId: input.issue.responsibleUserId ?? null, createdByUserId: input.issue.createdByUserId ?? null,
+    };
+  }
   return stageResult;
 }
 

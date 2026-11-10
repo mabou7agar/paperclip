@@ -10623,6 +10623,7 @@ export function issueRoutes(
             });
           }
 
+          let sourceReviewSnapshot: ReturnType<typeof applyIssueExecutionPolicyTransition>["expectedReviewSnapshot"];
           const updateFields: Record<string, unknown> = {
             status: sourceIssueStatus,
             ...(repairedWorkspaceSettings ? { executionWorkspaceSettings: repairedWorkspaceSettings } : {}),
@@ -10653,6 +10654,7 @@ export function issueRoutes(
               commentBody: resolutionNote ?? null,
             });
             Object.assign(updateFields, transition.patch);
+            sourceReviewSnapshot = transition.expectedReviewSnapshot;
             if (transition.decision) {
               const decisionId = randomUUID();
               const nextExecutionState = updateFields.executionState;
@@ -10685,6 +10687,7 @@ export function issueRoutes(
 
           const issueUpdate = {
             ...updateFields,
+            expectedReviewSnapshot: sourceReviewSnapshot,
             actorAgentId: actor.agentId ?? null,
             actorUserId: actor.actorType === "user" ? actor.actorId : null,
           };
@@ -13123,7 +13126,7 @@ export function issueRoutes(
         createBody.assigneeAgentId ?? null,
         Boolean(executionPolicy?.monitor),
       );
-      assertCanCreateProgressReview(executionPolicy, actor.agentId);
+      assertCanCreateProgressReview(executionPolicy, actor.agentId, req.actor.type === "board" && req.actor.source !== "mcp_oauth");
       const issueId = randomUUID();
       const sourceTrust = await sourceTrustForActorWrite(
         {
@@ -13139,6 +13142,7 @@ export function issueRoutes(
       const createInput = {
         ...createBody,
         workspaceSelectionActor: req.actor,
+        allowProgressReviewConfiguration: req.actor.type === "board" && req.actor.source !== "mcp_oauth",
         projectId: createAssignmentScope.projectId,
         ...(taskBridgeOriginForActor(req) ?? {}),
         id: issueId,
@@ -15328,6 +15332,7 @@ export function issueRoutes(
         ...(updateFields.parentId !== undefined ? { parentDepthPolicy } : {}),
         ...(expectedParentId !== undefined ? { expectedParentId } : {}),
         workspaceSelectionActor: req.actor,
+        allowProgressReviewConfiguration: req.actor.type === "board" && req.actor.source !== "mcp_oauth",
         expectedExecutionPolicy,
         expectedStatusVersion,
         ...(reviewAssessment || nextExecutionPolicy?.reviewGuard || previousExecutionPolicy?.reviewGuard ? { expectedReviewSnapshot: {
@@ -19686,6 +19691,7 @@ export function issueRoutes(
         issueBeforeCommentDecision = currentIssue;
         const updatePatch = {
           ...transition.patch,
+          expectedReviewSnapshot: transition.expectedReviewSnapshot,
           status:
             typeof transition.patch.status === "string"
               ? transition.patch.status

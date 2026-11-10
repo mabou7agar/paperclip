@@ -70,6 +70,11 @@ const support = await getEmbeddedPostgresTestSupport();
     // A fresh service instance reads the durable streak/credits; no in-memory counter reset.
     expect((await issueService(db).getById(issueId))?.executionState).toMatchObject({ changesRequestedCount: 7,
       reviewProgress: { stalledRounds: 1, creditedFindingIds: ["F1"], openFindingIds: ["F2"] } });
+    await expect(service.update(issueId, { executionState: { ...decision, lastDecisionId: randomUUID() } }))
+      .rejects.toMatchObject({ details: { code: "review_progress_snapshot_required" } });
+    const current = await service.getById(issueId);
+    await service.update(issueId, { executionState: { ...current!.executionState, monitor: null } });
+    expect((await service.getById(issueId))?.executionState).toMatchObject({ reviewProgress: { creditedFindingIds: ["F1"], stalledRounds: 1 } });
   });
 
   it("validates the post-update escalation owner and permits cancellation if an older row has no owner", async () => {
@@ -78,7 +83,7 @@ const support = await getEmbeddedPostgresTestSupport();
     const policy = normalizeIssueExecutionPolicy({ reviewGuard: { mode: "progress", maxStalledRounds: 3 } })!;
     await db.insert(issues).values({ id: issueId, companyId, title: "No owner initially" });
     const service = issueService(db);
-    await service.update(issueId, { executionPolicy: policy as unknown as Record<string, unknown>, responsibleUserId: "owner" });
+    await service.update(issueId, { executionPolicy: policy as unknown as Record<string, unknown>, responsibleUserId: "owner", allowProgressReviewConfiguration: true });
     await expect(service.update(issueId, { responsibleUserId: null })).rejects.toMatchObject({ details: { code: "review_progress_owner_required" } });
     expect((await service.getById(issueId))?.responsibleUserId).toBe("owner");
     // A real legacy/corrupt row without an owner can still be cancelled safely.
@@ -93,13 +98,15 @@ const support = await getEmbeddedPostgresTestSupport();
     const policy = normalizeIssueExecutionPolicy({ reviewGuard: { mode: "progress", maxStalledRounds: 50 } })!;
     await expect(service.create(companyId, { title: "Agent guard bypass", createdByAgentId: randomUUID(), executionPolicy: policy as unknown as Record<string, unknown> }))
       .rejects.toMatchObject({ details: { code: "review_progress_policy_protected" } });
-    await expect(service.create(companyId, { title: "No escalation owner", executionPolicy: policy as unknown as Record<string, unknown> }))
+    await expect(service.create(companyId, { title: "No escalation owner", allowProgressReviewConfiguration: true, executionPolicy: policy as unknown as Record<string, unknown> }))
       .rejects.toMatchObject({ details: { code: "review_progress_owner_required" } });
-    const created = await service.create(companyId, { title: "Board configured task", createdByUserId: "owner", executionPolicy: policy as unknown as Record<string, unknown> });
+    const created = await service.create(companyId, { title: "Board configured task", allowProgressReviewConfiguration: true, createdByUserId: "owner", executionPolicy: policy as unknown as Record<string, unknown> });
     expect(created.executionPolicy).toMatchObject({ reviewGuard: { mode: "progress", maxStalledRounds: 50 } });
     await expect(service.update(created.id, { actorAgentId: randomUUID(), executionPolicy: null }))
       .rejects.toMatchObject({ details: { code: "review_progress_policy_protected" } });
     expect((await service.getById(created.id))?.executionPolicy).toEqual(created.executionPolicy);
+    await expect(service.update(created.id, { executionPolicy: null, actorUserId: "owner" }))
+      .rejects.toMatchObject({ details: { code: "review_progress_policy_protected" } });
   });
 
 });

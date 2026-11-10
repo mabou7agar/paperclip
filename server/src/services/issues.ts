@@ -1,4 +1,4 @@
-import { assertCanCreateProgressReview, assertReviewProgressOwner, assertCanChangeProgressReview } from "./issue-review-progress.js";
+import { assertCanCreateProgressReview, assertReviewProgressOwner, assertCanChangeProgressReview, assertReviewProgressStateWrite, assertReviewProgressStateShape } from "./issue-review-progress.js";
 import { recordTaskCompletionReceipt, completionReceiptForRun } from "./task-completion-receipts.js";
 import { completionAcknowledgement, acknowledgeCompletionReceipt } from "../repositories/task-completion-receipts.js";
 import { recordMcpAttachmentCleanup, type McpAttachmentCleanup } from "./public-mcp/upload-cleanup.js";
@@ -215,6 +215,8 @@ import {
   applyIssueExecutionPolicyTransition,
   buildInitialIssueMonitorFields,
   normalizeIssueExecutionPolicy,
+  parseIssueExecutionState,
+  isOwnerReviewHold,
 } from "./issue-execution-policy.js";
 import { assertQualityReviewPolicyMutation, assertQualityReviewPolicyReuse, assertRequiredQualityReviewComplete, requiredQualityReview } from "./required-quality-review.js";
 import { instanceSettingsService } from "./instance-settings.js";
@@ -2032,6 +2034,9 @@ async function assertExecutionTaskParent(db: Db, companyId: string, parentId?: s
 type DbTransaction = Parameters<Parameters<Db["transaction"]>[0]>[0];
 // `originIssueId` is server-derived provenance; callers cannot supply it.
 type IssueCreateInput = Omit<typeof issues.$inferInsert, "companyId" | "title" | "titleNeedsGeneration" | "workspaceSelection" | "originIssueId"> & {
+  /** Server-derived only; never accepted from a request body. */
+  allowProgressReviewConfiguration?: boolean;
+
   /** Defaults to `flatten` (agent/automation limit). Board-user routes pass `allow_nested`. */
   parentDepthPolicy?: IssueParentDepthPolicy;
   /**
@@ -10209,6 +10214,7 @@ export function issueService(db: Db) {
         actorRunId,
         actorResponsibleUserId,
         trustExplicitResponsibleUserId,
+        allowProgressReviewConfiguration,
         idempotencyKey: rawIdempotencyKey,
         allowDuplicate,
         assertCanReuseIssue,
@@ -10217,7 +10223,8 @@ export function issueService(db: Db) {
         expectedParentId,
         ...issueData
       } = data;
-      assertCanCreateProgressReview(issueData.executionPolicy, issueData.createdByAgentId);
+      assertCanCreateProgressReview(issueData.executionPolicy, issueData.createdByAgentId, allowProgressReviewConfiguration === true);
+      assertReviewProgressStateShape(Boolean(issueData.executionPolicy?.reviewGuard), issueData.executionState);
       // The parent the caller asked for. It still drives provenance, privacy and
       // workspace inheritance when the depth policy places the task elsewhere.
       const requestedParentId = issueData.parentId ?? null;
@@ -11223,6 +11230,8 @@ export function issueService(db: Db) {
         workspaceSelectionActor?: AuthorizationActor;
         expectedExecutionPolicy?: typeof issues.$inferInsert.executionPolicy;
         expectedStatusVersion?: number;
+        /** Server-derived trusted board authority, not a public API field. */
+        allowProgressReviewConfiguration?: boolean;
         /** Server-owned optimistic fence for reviewer progress computed from a snapshot. */
         expectedReviewSnapshot?: Pick<typeof issues.$inferSelect, "executionState" | "executionPolicy" | "status" | "assigneeAgentId" | "assigneeUserId"> & Partial<Pick<typeof issues.$inferSelect, "responsibleUserId" | "createdByUserId">>;
         /** Defaults to `flatten` for parent changes. Board-user routes pass `allow_nested`. */
@@ -11318,6 +11327,7 @@ export function issueService(db: Db) {
         expectedExecutionPolicy,
         expectedStatusVersion,
         expectedReviewSnapshot,
+        allowProgressReviewConfiguration,
         parentDepthPolicy: _parentDepthPolicy,
         expectedParentId: _expectedParentId,
         // Creation provenance never changes after create.
@@ -11599,11 +11609,29 @@ export function issueService(db: Db) {
         const nextReviewPolicy = issueData.executionPolicy === undefined ? receiptExisting.executionPolicy : issueData.executionPolicy;
         const nextResponsibleUserId = issueData.responsibleUserId === undefined ? receiptExisting.responsibleUserId : issueData.responsibleUserId;
         const nextCreatedByUserId = issueData.createdByUserId === undefined ? receiptExisting.createdByUserId : issueData.createdByUserId;
+        const progressReviewEnabled = Boolean(receiptExisting.executionPolicy?.reviewGuard || nextReviewPolicy?.reviewGuard);
+        assertReviewProgressStateShape(progressReviewEnabled, receiptExisting.executionState, patch.status ?? receiptExisting.status);
+        if (issueData.executionState !== undefined) assertReviewProgressStateShape(progressReviewEnabled, issueData.executionState, patch.status ?? receiptExisting.status);
+        if (receiptExisting.executionPolicy?.reviewGuard || nextReviewPolicy?.reviewGuard) {
+          const previousReviewState = parseIssueExecutionState(receiptExisting.executionState);
+          if (isOwnerReviewHold(normalizeIssueExecutionPolicy(receiptExisting.executionPolicy), previousReviewState)) {
+            if (receiptExisting.executionPolicy?.reviewGuard && !nextReviewPolicy?.reviewGuard && (patch.status ?? receiptExisting.status) !== "cancelled") {
+              throw unprocessable("Resolve the owner review hold before disabling its progress guard", { code: "review_progress_owner_hold" });
+            }
+            if (nextReviewPolicy?.reviewGuard && issueData.executionState === undefined && !previousReviewState?.reviewEscalated) {
+              patch.executionState = { ...receiptExisting.executionState, reviewEscalated: true };
+            }
+          }
+        }
+        if (issueData.executionState !== undefined) assertReviewProgressStateWrite({
+          enabled: Boolean(receiptExisting.executionPolicy?.reviewGuard || nextReviewPolicy?.reviewGuard),
+          before: receiptExisting.executionState, after: issueData.executionState, fenced: Boolean(expectedReviewSnapshot),
+        });
         assertReviewProgressOwner({ policy: nextReviewPolicy, responsibleUserId: nextResponsibleUserId,
           createdByUserId: nextCreatedByUserId, status: patch.status ?? receiptExisting.status });
         if (issueData.executionPolicy !== undefined && (receiptExisting.executionPolicy?.reviewGuard || issueData.executionPolicy?.reviewGuard)) {
           assertCanChangeProgressReview({ before: normalizeIssueExecutionPolicy(receiptExisting.executionPolicy),
-            after: normalizeIssueExecutionPolicy(issueData.executionPolicy), actorAgentId });
+            after: normalizeIssueExecutionPolicy(issueData.executionPolicy), actorAgentId, allowConfiguration: allowProgressReviewConfiguration === true });
         }
         if (issueData.executionPolicy !== undefined) assertQualityReviewPolicyMutation({ previousPolicy: receiptExisting.executionPolicy, nextPolicy: issueData.executionPolicy, actorAgentId, actorUserId });
         if ((patch.status ?? receiptExisting.status) === "done" &&
