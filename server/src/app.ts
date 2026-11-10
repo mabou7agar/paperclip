@@ -915,9 +915,10 @@ export async function createApp(
   api.use(fastResponseRoutes(db));
   api.use(promptInjectionPreventionRoutes(db));
   api.use(aiConnectionRoutes(db, { deploymentMode: opts.deploymentMode, deploymentExposure: opts.deploymentExposure, trustedLocalStdioRuntimeHost, pluginWorkerManager: workerManager }));
-  api.use(phaseRoutingRoutes(db, async companyId => {
-    await notifyDeliveryWork(db, DELIVERY_QUEUES.providerApiQuotaHealth, companyId);
-    return connectionCapacityRecoveryService(db, connectionIntentHeartbeat.retryScheduledRetryNow).reconcile(companyId);
+  api.use(phaseRoutingRoutes(db, async (companyId, scope) => {
+    if (!scope) await notifyDeliveryWork(db, DELIVERY_QUEUES.providerApiQuotaHealth, companyId);
+    return connectionCapacityRecoveryService(db, connectionIntentHeartbeat.retryScheduledRetryNow)
+      .reconcile(companyId, new Date(), () => true, scope?.issueIds);
   }));
   api.use(monitoringRoutes(db));
   api.use(

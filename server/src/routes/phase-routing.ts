@@ -12,7 +12,7 @@ import { connectionUsageCapsService } from "../services/connection-usage-caps.js
 
 export function phaseRoutingRoutes(
   db: Db,
-  onPolicySaved?: (companyId: string) => Promise<unknown>,
+  onPolicySaved?: (companyId: string, scope?: { issueIds: string[] }) => Promise<unknown>,
 ) {
   const router = Router();
   const service = phaseRoutingService(db);
@@ -56,7 +56,7 @@ export function phaseRoutingRoutes(
       if (!(await companies.getById(companyId)))
         throw notFound("Company not found");
       const actor = getActorInfo(req);
-      const policy = await service.saveCompanyDefaults({
+      const { policy, scope } = await service.saveCompanyDefaultsWithScope({
         companyId,
         userId: actor.actorId,
         policy: req.body,
@@ -81,7 +81,7 @@ export function phaseRoutingRoutes(
         },
       });
       res.json({ policy });
-      if (onPolicySaved) void onPolicySaved(companyId).catch(() => undefined);
+      if (onPolicySaved) void onPolicySaved(companyId, scope).catch(() => undefined);
     },
   );
   return router;

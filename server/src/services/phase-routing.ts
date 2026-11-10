@@ -13,6 +13,8 @@ import { forbidden, HttpError, unprocessable } from "../errors.js";
 import { phaseRoutingSettingsRepository } from "../repositories/phase-routing-settings.js";
 import { connectionUsageRepository } from "../repositories/connection-usage.js";
 import { connectionUsageCapsService } from "./connection-usage-caps.js";
+import { phaseAvailabilityDrillService, phaseRoutingDrillChangeScope } from "./phase-availability-drills.js";
+import { canonicalJson } from "@paperclipai/shared/portability-hash";
 
 export const PHASE_QUOTA_FALLBACK_RETRY_REASON = "phase_quota_fallback";
 export const PHASE_QUOTA_RESET_WAKE_REASON = "phase_quota_reset";
@@ -83,9 +85,7 @@ export function phaseRoutingService(db: Db) {
   const accounts = aiConnectionService(db);
   const quota = providerQuotaRepository(db);
   const settings = phaseRoutingSettingsRepository(db);
-  return {
-    getCompanyDefaults: settings.get,
-    async saveCompanyDefaults(input: { companyId: string; userId: string; policy: unknown }) {
+  async function saveCompanyDefaultsWithScope(input: { companyId: string; userId: string; policy: unknown }) {
       const policy = phaseRoutingSchema.parse(input.policy);
       if (!await connectionUsageRepository(db).owns(input.companyId,Object.keys(policy.connectionUsageCaps??{}))) throw unprocessable("Usage caps must reference AI connections in this company");
       if (policy.enabled) for (const profile of configuredProfiles(policy)) {
@@ -94,7 +94,20 @@ export function phaseRoutingService(db: Db) {
         await accounts.select({ companyId: input.companyId, agentId: "company-defaults",
           userId: input.userId, adapterType: profile.adapterType, binding: profile.binding, model: profile.model });
       }
-      return settings.save(input.companyId, policy);
+      return db.transaction(async tx => {
+        const scoped = phaseRoutingSettingsRepository(tx);
+        const previous = await scoped.getForUpdate(input.companyId);
+        await phaseAvailabilityDrillService(tx).validateNew(input.companyId, policy, previous);
+        await scoped.save(input.companyId, policy);
+        const issueIds = phaseRoutingDrillChangeScope(previous, policy);
+        return { policy, scope: issueIds ? { issueIds } : undefined };
+      });
+  }
+  return {
+    getCompanyDefaults: settings.get,
+    saveCompanyDefaultsWithScope,
+    async saveCompanyDefaults(input: { companyId: string; userId: string; policy: unknown }) {
+      return (await saveCompanyDefaultsWithScope(input)).policy;
     },
     async validateConfiguration(input: {
       companyId: string; agentId: string; userId: string | null; isBoard: boolean;
@@ -103,6 +116,9 @@ export function phaseRoutingService(db: Db) {
       if (!input.isBoard) throw forbidden("Only the board may configure phase routing");
       if (input.policy === undefined) return;
       const policy = phaseRoutingSchema.parse(input.policy);
+      if (Object.values(policy.taskOverrides ?? {}).some(task => task.availabilityDrill)) {
+        throw unprocessable("Controlled availability drills must use the company task exception API");
+      }
       if (!policy.enabled) return;
       if (!(PHASE_ROUTING_ADAPTERS as readonly string[]).includes(input.adapterType)) {
         throw unprocessable("Phase routing supports Claude, Codex and OpenCode agents");
@@ -130,6 +146,18 @@ export function phaseRoutingService(db: Db) {
       const now = input.now ?? new Date();
       const taskProfiles = input.issueId ? policy.data.taskOverrides?.[input.issueId]?.[phase] : undefined;
       const profiles = taskProfiles ?? policy.data[phase] ?? [];
+      // Only the board-owned company exception can inject a fault. Agent chain
+      // overrides never authorize a fault, and children do not inherit it.
+      const configuredDrill = input.issueId && companyPolicy.success
+        ? companyPolicy.data.taskOverrides?.[input.issueId]?.availabilityDrill : undefined;
+      const drill = configuredDrill?.phase === phase ? configuredDrill : undefined;
+      const boardProfiles = input.issueId && companyPolicy.success
+        ? companyPolicy.data.taskOverrides?.[input.issueId]?.[phase] ?? companyPolicy.data[phase] ?? [] : [];
+      if (drill && (profiles.length < 2 || profiles[0]?.id !== drill.profileId || canonicalJson(profiles) !== canonicalJson(boardProfiles))) {
+        return { phase, workMode, profile: null, connectionId: null, grantId: null,
+          maxFallbackAttempts: 0, retryAt: null,
+          notes: ["The controlled availability drill chain changed. Remove the task exception before continuing."] };
+      }
       if (!profiles.length) return { phase, workMode, profile: null, connectionId: null, grantId: null,
         maxFallbackAttempts: 0, retryAt: null, notes: ["Configure a review model chain before running a reviewer."] };
       const afterProfileId = !input.afterPhase || input.afterPhase === phase ? input.afterProfileId : undefined;
@@ -158,6 +186,16 @@ export function phaseRoutingService(db: Db) {
           return { phase, workMode, profile: null, connectionId: null, grantId: null,
             maxFallbackAttempts: profiles.length - 1, retryAt: null,
             notes: [`${profile.id}: ${error.message}`] };
+        }
+        if (drill && input.issueId && profile.id === drill.profileId) {
+          const state = await phaseAvailabilityDrillService(db).apply(input.companyId, input.issueId, drill);
+          if (state !== "applied") return { phase, workMode, profile: null, connectionId: null, grantId: null,
+            maxFallbackAttempts: 0, retryAt: null, notes: [state === "expired"
+              ? "The controlled availability drill activation deadline expired. Remove the task exception before continuing."
+              : state === "conflict" ? "The controlled availability drill id belongs to another operation. Remove the task exception before continuing."
+              : "The controlled availability drill is no longer eligible."] };
+          notes.push(`${profile.id}: controlled task-only availability fault ${drill.id}; no provider quota failure or shared cooldown`);
+          continue;
         }
         const evidence = await quota.latestEvidence(input.companyId, account.connection.id, now, account.grant.id);
         if (evidence && evidence.status !== "succeeded" && policy.data.unknownResetCooldownSeconds === 0 && !reportedProviderQuotaReset(evidence)) {

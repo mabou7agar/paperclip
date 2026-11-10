@@ -13,10 +13,10 @@ export function connectionCapacityRecoveryService(
 ) {
   const repository = providerQuotaProbeRepository(db);
   return {
-    async reconcile(companyId?: string, now = new Date(), canContinue: () => boolean = () => true) {
+    async reconcile(companyId?: string, now = new Date(), canContinue: () => boolean = () => true, issueIds?: string[]) {
       let promoted = 0;
       if (!canContinue()) return { promoted };
-      for (const wait of await repository.capacityWaits(companyId)) {
+      for (const wait of await repository.capacityWaits(companyId, issueIds)) {
         if (!canContinue()) break;
         const issueId =
           wait.issueId ??

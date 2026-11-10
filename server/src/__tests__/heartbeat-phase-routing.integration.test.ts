@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { agents, authUsers, companyMemberships, agentConfigRevisions, agentTaskSessions, agentWakeupRequests, companies, createDb, heartbeatRuns, heartbeatRunEvents, issueComments, issueRelations, issues } from "@paperclipai/db";
+import { activityLog, agents, authUsers, companyMemberships, agentConfigRevisions, agentTaskSessions, agentWakeupRequests, companies, createDb, heartbeatRuns, heartbeatRunEvents, issueComments, issueRelations, issues } from "@paperclipai/db";
 import type { AdapterExecutionContext, AdapterExecutionResult } from "@paperclipai/adapter-utils";
 import { phaseRoutingSchema } from "@paperclipai/shared";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
@@ -96,6 +96,75 @@ async function eventually(check: () => Promise<boolean>, attempts = 1200) {
     return heartbeat.wakeup(agentId, { source: "assignment", reason: "issue_assigned", payload: { issueId }, contextSnapshot: { issueId, wakeReason: "issue_assigned" } });
   }
   const success = (sessionId = randomUUID()): AdapterExecutionResult => ({ exitCode: 0, signal: null, timedOut: false, errorMessage: null, summary: "Finished fake run", provider: "test", model: "test", sessionId, sessionParams: { sessionId } });
+
+  it.each([false, true])("uses controlled task availability and preserves fallback session (retained activation: %s)", async retained => {
+    const { companyId, agentId, issueId } = await seed("planning");
+    const drill = { id: randomUUID(), phase: "planning" as const, profileId: "claude", expiresAt: new Date(Date.now() + (retained ? -1_000 : 600_000)).toISOString() };
+    await phaseRoutingSettingsRepository(db).save(companyId, phaseRoutingSchema.parse({ ...policy,
+      taskOverrides: { [issueId]: { availabilityDrill: drill } } }));
+    if (retained) await db.insert(activityLog).values({ id: drill.id, companyId, actorType: "system", actorId: "phase-routing",
+      action: "phase_routing.controlled_availability_fault", entityType: "issue", entityId: issueId,
+      details: { ...drill, synthetic: true, providerWorkStarted: false, sharedQuotaChanged: false },
+      createdAt: new Date(Date.parse(drill.expiresAt) - 1_000) });
+    const sessionId = randomUUID(), blockerId = randomUUID();
+    let turns = 0;
+    mocks.execute.mockImplementation(async ctx => {
+      expect(ctx.config.model).toBe("codex-test");
+      if (++turns === 1) {
+        // A completed planning turn must publish its real wait disposition;
+        // leaving an actionable task untouched correctly invokes repair.
+        await db.insert(issues).values({ id: blockerId, companyId, title: "Delegated implementation", status: "todo", responsibleUserId: "user" });
+        await db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: issueId, type: "blocks" });
+        await db.update(issues).set({ status: "blocked" }).where(eq(issues.id, issueId));
+      } else {
+        expect(ctx.runtime.sessionParams).toMatchObject({ sessionId });
+        await db.update(issues).set({ status: "done" }).where(eq(issues.id, issueId));
+      }
+      return success(sessionId);
+    });
+    for (let turn = 0; turn < 2; turn++) {
+      if (turn) await db.update(issues).set({ status: "done" }).where(eq(issues.id, blockerId));
+      // A dependency completion is a continuation, not a new assignment
+      // (issue_assigned deliberately starts fresh in the production guard).
+      const run = turn ? await heartbeat.wakeup(agentId, { source: "automation", reason: "issue_blockers_resolved",
+        payload: { issueId }, contextSnapshot: { issueId, wakeReason: "issue_blockers_resolved" } }) : await wake(agentId, issueId);
+      await eventually(async () => mocks.execute.mock.calls.length === turn + 1);
+      await heartbeat.drainActiveRunExecutions();
+      // Dispatch notification can precede durable completion settlement.
+      await eventually(async () => !["queued", "running"].includes((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run!.id)))[0]?.status));
+      const [settled] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run!.id));
+      expect(settled.status, JSON.stringify({ code: settled.errorCode, error: settled.error, before: settled.sessionIdBefore, after: settled.sessionIdAfter })).toBe("succeeded");
+    }
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId));
+    expect(mocks.execute).toHaveBeenCalledTimes(2);
+    expect(runs.filter(run => run.status === "succeeded")).toHaveLength(2);
+    expect(runs.every(run => (run.status === "succeeded" || (run.status === "cancelled" && run.errorCode === "issue_terminal_status"))
+      && !run.retryOfRunId && !run.scheduledRetryAt)).toBe(true);
+    expect(runs.some(run => run.contextSnapshot?.wakeReason === "issue_disposition_repair")).toBe(false);
+    expect(runs.find(run => run.sessionIdBefore === sessionId)?.sessionIdAfter).toBe(sessionId);
+    const claims = await db.select().from(activityLog).where(eq(activityLog.id, drill.id));
+    expect(claims).toHaveLength(1);
+    expect(await providerQuotaRepository(db).latestEvidence(companyId, claudeId, new Date(), grantId)).toBeNull();
+    expect(await providerQuotaRepository(db).latestEvidence(companyId, codexId, new Date(), grantId)).toBeNull();
+    expect((await phaseRoutingSettingsRepository(db).get(companyId))?.planning[0].id).toBe("claude");
+  }, 60_000);
+
+  it("fails closed for expired controlled task availability without invoking Claude or retrying", async () => {
+    const { companyId, agentId, issueId } = await seed("planning");
+    const drill = { id: randomUUID(), phase: "planning" as const, profileId: "claude", expiresAt: new Date(Date.now() - 1_000).toISOString() };
+    await phaseRoutingSettingsRepository(db).save(companyId, phaseRoutingSchema.parse({ ...policy,
+      taskOverrides: { [issueId]: { availabilityDrill: drill } } }));
+    await wake(agentId, issueId);
+    await eventually(async () => (await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId)))
+      .some(run => !["queued", "running"].includes(run.status)));
+    await heartbeat.drainActiveRunExecutions();
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, companyId));
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ status: "failed", errorCode: "configuration_incomplete", scheduledRetryAt: null, retryOfRunId: null });
+    expect(runs[0].error).toContain("activation deadline expired");
+    expect(mocks.execute).not.toHaveBeenCalled();
+    expect(await db.select().from(activityLog).where(eq(activityLog.id, drill.id))).toHaveLength(0);
+  }, 60_000);
 
   it("routes a standard CTO to worker to Tech Lead review and back without repeating work", async () => {
     const { companyId, agentId: ctoId, issueId: parentId } = await seed();

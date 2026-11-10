@@ -1,0 +1,37 @@
+meta {
+  name: Controlled Task Availability Drill
+  type: http
+  seq: 6
+}
+put {
+  url: {{baseUrl}}/api/v1/companies/{{companyId}}/phase-routing
+  body: json
+  auth: bearer
+}
+auth:bearer {
+  token: {{boardToken}}
+}
+body:json {
+  {{completeCompanyPolicyWithDrill}}
+}
+
+docs {
+  DO NOT SEND a partial example policy. This request intentionally requires a complete JSON variable;
+  an unset variable is invalid JSON and cannot overwrite the policy.
+  First run Get Company Defaults. Set completeCompanyPolicyWithDrill to the entire response.policy,
+  preserving every field and existing task exception. Merge ONLY this field at taskOverrides[taskId]:
+  {"availabilityDrill":{"id":"<fresh UUID>","phase":"planning","profileId":"<existing primary id>","expiresAt":"<UTC deadline>"}}
+  Do not replace the company policy with this fragment. Keep planning, implementation, review, role
+  responsibility maps, usage caps, quota settings and other exceptions from the GET response.
+  Use a fresh drill UUID and an expiry within 30 minutes. taskId must identify an unassigned,
+  unstarted backlog task in the company. After saving, assign/start that task normally.
+  The primary profile is unavailable only for this exact task and phase. The ordinary fallback
+  selector and all execution gates still apply. One activity receipt is recorded durably.
+  No provider quota receipt, account cooldown, session reset or automatic retry is created.
+  The deadline bounds first activation. An unactivated expired drill fails closed, with no
+  renewal. A previously activated drill keeps its fallback affinity until the task is terminal,
+  so the CTO can resume its saved session after a long implementation. The effective chain
+  must match the full board-owned profile identities; agent overrides cannot replace it.
+  After completion remove this task exception, preserving all other policy fields. Remove it
+  before rolling back to a release whose strict policy schema predates availabilityDrill.
+}

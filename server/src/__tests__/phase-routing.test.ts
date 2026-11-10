@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { phaseRoutingSchema, type PhaseRouteProfile } from "@paperclipai/shared";
 import { forbidden } from "../errors.js";
 
-const { select, latestEvidence, getDefaults } = vi.hoisted(() => ({ select: vi.fn(), latestEvidence: vi.fn(), getDefaults: vi.fn() }));
+const { select, latestEvidence, getDefaults, applyDrill } = vi.hoisted(() => ({ select: vi.fn(), latestEvidence: vi.fn(), getDefaults: vi.fn(), applyDrill: vi.fn() }));
+vi.mock("../services/phase-availability-drills.js", () => ({ phaseAvailabilityDrillService: () => ({ apply: applyDrill }) }));
 vi.mock("../services/ai-connections.js", () => ({ aiConnectionService: () => ({ select }) }));
 vi.mock("../repositories/provider-quota.js", () => ({ providerQuotaRepository: () => ({ latestEvidence }) }));
 vi.mock("../repositories/phase-routing-settings.js", () => ({ phaseRoutingSettingsRepository: () => ({ get: getDefaults }) }));
@@ -23,9 +24,42 @@ beforeEach(() => {
   }));
   latestEvidence.mockReset().mockResolvedValue(null);
   getDefaults.mockReset().mockResolvedValue(null);
+  applyDrill.mockReset().mockResolvedValue("applied");
 });
 
 describe("phase routing", () => {
+  const taskId = "30000000-0000-4000-8000-000000000001";
+  const drill = { id: "40000000-0000-4000-8000-000000000001", phase: "planning" as const,
+    profileId: "claude", expiresAt: "2026-11-07T10:15:00Z" };
+  it("uses the real fallback selector for only the board-configured task, without quota evidence", async () => {
+    getDefaults.mockResolvedValue({ ...policy, taskOverrides: { [taskId]: { availabilityDrill: drill } } });
+    const scoped = { ...input, runtimeConfig: {}, issueId: taskId, now };
+    for (let turn = 0; turn < 2; turn++) {
+      expect(await service().resolve(scoped)).toMatchObject({ profile: { id: "codex" }, retryAt: null });
+    }
+    expect(await service().resolve({ ...scoped, issueId: "30000000-0000-4000-8000-000000000002" })).toMatchObject({ profile: { id: "claude" } });
+    expect(await service().resolve({ ...scoped, workMode: "standard" })).toMatchObject({ phase: "implementation", profile: { id: "codex" } });
+    expect(applyDrill).toHaveBeenCalledTimes(2);
+    expect(latestEvidence.mock.calls.filter(args => args[1].endsWith("1"))).toHaveLength(1);
+  });
+  it("preserves the activated fallback after the arming deadline and rejects an unapproved merged chain", async () => {
+    getDefaults.mockResolvedValue({ ...policy, taskOverrides: { [taskId]: { availabilityDrill: drill } } });
+    expect(await service().resolve({ ...input, runtimeConfig: {}, issueId: taskId, now: new Date("2026-11-07T11:00:00Z") })).toMatchObject({ profile: { id: "codex" } });
+    expect(await service().resolve({ ...input, issueId: taskId, now, runtimeConfig: { phaseRouting: { ...policy,
+      planning: [{ ...claude, model: "unapproved-model" }, codex] } } })).toMatchObject({ profile: null, retryAt: null, maxFallbackAttempts: 0 });
+  });
+  it("does not accept a fault from an agent override and never falls back on expired/inactive drills", async () => {
+    const forged = { ...policy, taskOverrides: { [taskId]: { availabilityDrill: drill } } };
+    expect(await service().resolve({ ...input, runtimeConfig: { phaseRouting: forged }, issueId: taskId })).toMatchObject({ profile: { id: "claude" } });
+    expect(applyDrill).not.toHaveBeenCalled();
+    getDefaults.mockResolvedValue(forged);
+    applyDrill.mockResolvedValue("expired");
+    expect(await service().resolve({ ...input, runtimeConfig: {}, issueId: taskId, now: new Date(drill.expiresAt) })).toMatchObject({ profile: null, retryAt: null, maxFallbackAttempts: 0 });
+    applyDrill.mockResolvedValue("inactive");
+    expect(await service().resolve({ ...input, runtimeConfig: {}, issueId: taskId, now })).toMatchObject({ profile: null, retryAt: null, maxFallbackAttempts: 0 });
+    applyDrill.mockResolvedValue("conflict");
+    expect(await service().resolve({ ...input, runtimeConfig: {}, issueId: taskId, now })).toMatchObject({ profile: null, retryAt: null, maxFallbackAttempts: 0 });
+  });
   it.each([
     { runtimeConfig: {} }, { runtimeConfig: { phaseRouting: { ...policy, enabled: false } } },
     { isConversation: true }, { workMode: "ask" }, { workMode: undefined }, { adapterType: "paperclip_runner" },

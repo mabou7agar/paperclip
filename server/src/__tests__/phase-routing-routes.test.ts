@@ -6,8 +6,16 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ZodError } from "zod";
 import { phaseRoutingSchema } from "@paperclipai/shared";
 
-const mocks = vi.hoisted(() => ({ get: vi.fn(), save: vi.fn(), company: vi.fn(), manage: vi.fn(), activity: vi.fn() }));
-vi.mock("../services/phase-routing.js", () => ({ phaseRoutingService: () => ({ getCompanyDefaults: mocks.get, saveCompanyDefaults: mocks.save }) }));
+const mocks = vi.hoisted(() => ({ get: vi.fn(), save: vi.fn(), company: vi.fn(), manage: vi.fn(), activity: vi.fn(), saved: vi.fn() }));
+vi.mock("../services/phase-routing.js", async () => {
+  const { phaseRoutingDrillChangeScope } = await import("../services/phase-availability-drills.js");
+  return { phaseRoutingService: () => ({ getCompanyDefaults: mocks.get,
+    saveCompanyDefaultsWithScope: async (input: { policy: typeof policy }) => {
+      const saved = await mocks.save(input);
+      const issueIds = phaseRoutingDrillChangeScope(await mocks.get(), saved);
+      return { policy: saved, scope: issueIds ? { issueIds } : undefined };
+    } }) };
+});
 vi.mock("../services/companies.js", () => ({ companyService: () => ({ getById: mocks.company }) }));
 vi.mock("../routes/ai-connections.js", () => ({ canManageAiConnections: mocks.manage }));
 vi.mock("../services/activity-log.js", () => ({ logActivity: mocks.activity }));
@@ -18,7 +26,7 @@ function app(actor = { type: "board", source: "session", userId: "user", company
   const application = express();
   application.use(express.json());
   application.use((req, _res, next) => { req.actor = actor as never; next(); });
-  application.use("/api", phaseRoutingRoutes({} as never));
+  application.use("/api", phaseRoutingRoutes({} as never, mocks.saved));
   application.use((error: Error & { status?: number }, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
     res.status(error instanceof ZodError ? 400 : error.status ?? 500).json({ error: error.message });
   });
@@ -30,6 +38,7 @@ beforeEach(() => {
   mocks.save.mockImplementation(async input => input.policy);
   mocks.company.mockResolvedValue({ id: "company" });
   mocks.manage.mockResolvedValue(true);
+  mocks.saved.mockResolvedValue(undefined);
 });
 
 describe("versioned phase routing API", () => {
@@ -50,6 +59,17 @@ describe("versioned phase routing API", () => {
     expect(response.body).toEqual({ policy: scoped });
     expect((await request(app({ type: "agent" } as never)).put(path).send(scoped)).status).toBe(403);
   });
+  it("keeps controlled fault configuration board-only and validates its shape", async () => {
+    const scoped = { ...policy, taskOverrides: { "30000000-0000-4000-8000-000000000001": {
+      availabilityDrill: { id: "40000000-0000-4000-8000-000000000001", phase: "planning", profileId: "claude", expiresAt: new Date(Date.now() + 600_000).toISOString() },
+    } } };
+    expect((await request(app()).put(path).send(scoped)).body).toEqual({ policy: scoped });
+    expect(mocks.saved).toHaveBeenCalledWith("company", { issueIds: ["30000000-0000-4000-8000-000000000001"] });
+    expect((await request(app({ type: "agent" } as never)).put(path).send(scoped)).status).toBe(403);
+    const invalid = { ...scoped, taskOverrides: { "30000000-0000-4000-8000-000000000001": { availabilityDrill: { ...scoped.taskOverrides["30000000-0000-4000-8000-000000000001"].availabilityDrill, id: "invalid" } } } };
+    expect((await request(app()).put(path).send(invalid)).status).toBe(400);
+    expect((await request(app()).put(path).send({ ...scoped, taskOverrides: { invalid: scoped.taskOverrides["30000000-0000-4000-8000-000000000001"] } })).status).toBe(400);
+  });
   it("rejects foreign-company, agent, and insufficient-permission mutations", async () => {
     expect((await request(app()).get("/api/v1/companies/foreign/phase-routing")).status).toBe(403);
     expect((await request(app({ type: "agent" } as never)).get(path)).status).toBe(403);
@@ -66,8 +86,9 @@ describe("versioned phase routing API", () => {
     try {
       const get = await curl("curl", ["--fail-with-body", "--silent", "--show-error", url]);
       expect(JSON.parse(get.stdout)).toEqual({ policy });
-      const put = await curl("curl", ["--fail-with-body", "--silent", "--show-error", "--request", "PUT", "--header", "Content-Type: application/json", "--data-binary", JSON.stringify({ ...policy, review: policy.planning, defaultResponsibility: "implementation", roleResponsibilities: { cto: "planning" }, taskOverrides: { "30000000-0000-4000-8000-000000000001": { review: policy.planning } } }), url]);
-      expect(JSON.parse(put.stdout)).toEqual({ policy: { ...policy, review: policy.planning, defaultResponsibility: "implementation", roleResponsibilities: { cto: "planning" }, taskOverrides: { "30000000-0000-4000-8000-000000000001": { review: policy.planning } } } });
+      const payload = { ...policy, review: policy.planning, defaultResponsibility: "implementation", roleResponsibilities: { cto: "planning" }, taskOverrides: { "30000000-0000-4000-8000-000000000001": { review: policy.planning, availabilityDrill: { id: "40000000-0000-4000-8000-000000000001", phase: "planning", profileId: "claude", expiresAt: new Date(Date.now() + 600_000).toISOString() } } } };
+      const put = await curl("curl", ["--fail-with-body", "--silent", "--show-error", "--request", "PUT", "--header", "Content-Type: application/json", "--data-binary", JSON.stringify(payload), url]);
+      expect(JSON.parse(put.stdout)).toEqual({ policy: payload });
     } finally { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); }
   });
 });

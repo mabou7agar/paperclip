@@ -2294,24 +2294,33 @@ describe("shared ACPX engine runtime behavior", () => {
     expect(changed.sessionInputs[0]?.resumeSessionId).toBeFalsy();
   });
 
-  it.each(["same_identity", "other_task", "other_account"])("repairs a retained Codex session without outer session params only for %s", async mode => {
+  it.each(["same_identity", "other_task", "other_account"].flatMap(mode =>
+    [false, true].flatMap(outer => ["none", "off", "on"].map(observability => ({ mode, outer, observability }))),
+  ))("repairs retained Codex storage across disposable export homes: %j", async ({ mode, outer, observability }) => {
     const root = await makeTempRoot(), stateDir = path.join(root, "state");
     const configFor = (home: string, identity = "account-one") => ({
       agent: "codex", agentCommand: "node ./fake-acp.js", cwd: root, stateDir,
       managedAiConnection: { sessionIdentity: identity, identity: `${identity}:generation` },
       env: managedAiHomeEnvironment(home),
     });
+    const launch = observability === "none" ? {} : { observability: {
+      kind: "codex" as const, compatibilityKey: "same-export-settings",
+      otelConfig: { exporter: observability === "on" ? { "otlp-http": {
+        endpoint: "https://collector.example.invalid/v1/logs", protocol: "binary", headers: {},
+      } } : "none" }, environment: {},
+    } };
     const firstHome = path.join(root, "first");
-    const first = await runExecutor(configFor(firstHome), { context: { taskId: "original-task" } });
+    const first = await runExecutor(configFor(firstHome), { ...launch, context: { taskId: "original-task" } });
     const env = (first.sessionInputs[0]!.sessionOptions as { env: Record<string, string> }).env;
     const threadId = "11111111-1111-4111-8111-111111111111";
     const rollout = path.join(env.CODEX_HOME, "sessions", `rollout-exact-${threadId}.jsonl`);
-    const content = JSON.stringify({ type: "session_meta", payload: { id: threadId, history_mode: "legacy" } }) + "\n";
+    const historyMode = outer ? "paginated" : "legacy";
+    const content = JSON.stringify({ type: "session_meta", payload: { id: threadId, history_mode: historyMode } }) + "\n";
     await fs.writeFile(rollout, content);
     const sqlite = path.join(env.CODEX_SQLITE_HOME, "state_5.sqlite");
     const database = new DatabaseSync(sqlite);
     database.exec("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT, history_mode TEXT, title TEXT)");
-    database.prepare("INSERT INTO threads VALUES (?, ?, 'legacy', 'Keep context')").run(threadId, rollout);
+    database.prepare("INSERT INTO threads VALUES (?, ?, ?, 'Keep context')").run(threadId, rollout, historyMode);
     database.close();
     const key = first.sessionInputs[0]!.sessionKey as string;
     await (first.runtimeOptions[0]!.sessionStore as AcpSessionStore).save({
@@ -2323,8 +2332,9 @@ describe("shared ACPX engine runtime behavior", () => {
     });
     await fs.rm(firstHome, { recursive: true, force: true });
     const second = await runExecutor(configFor(path.join(root, "second"), mode === "other_account" ? "account-two" : "account-one"), {
-      context: { taskId: mode === "other_task" ? "other-task" : "original-task" },
-      // Deliberately no Paperclip runtime.sessionParams: ACP's durable record remains.
+      ...launch, context: { taskId: mode === "other_task" ? "other-task" : "original-task" },
+      ...(outer ? { runtime: { sessionParams: { ...first.result.sessionParams, acpSessionId: threadId } } } : {}),
+      // Both retained outer state and the durable ACP-only record keep affinity.
     });
     expect(second.sessionInputs).toHaveLength(1);
     expect(second.turnInputs).toHaveLength(1);
