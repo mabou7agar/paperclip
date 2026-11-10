@@ -103,3 +103,5 @@ Managed native runs are serialized for the entire CLI lifetime by the shared pro
 For a bound home, control-plane-approved compatibility migrations retain the proven native thread and refresh its binding metadata. Account/epoch and private-root/index/header proof remain mandatory; standalone callers without control-plane authorization retain strict binding checks.
 
 A different `thread.started` identity during a managed resume terminates the owned CLI immediately on the streamed event; its replacement turn is never accepted. Already emitted provider work cannot be undone, so the retained original session and failure receipt stay visible. Unsupported native versions, including mixed indexes, are reported by name in bound and legacy discovery paths.
+
+Native home coordinates round-trip through the Codex session codec. The server retains its control-plane metadata separately and supplies an account-epoch attestation only after its real credential compatibility check retains a resume. The adapter never relies on stripped metadata reaching the provider runtime, and standalone callers still require their saved provenance.

@@ -2,7 +2,9 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
-import { execute } from "@paperclipai/adapter-codex-local/server";
+import { execute, sessionCodec } from "@paperclipai/adapter-codex-local/server";
+import { resolveHeartbeatAdapterSession } from "../services/heartbeat/session-preparation.js";
+import { resolveNextSessionState } from "../services/heartbeat/run-state.js";
 import { DatabaseSync } from "node:sqlite";
 import * as directoryLocks from "@paperclipai/adapter-utils/workspace-restore-merge";
 import { buildEffectiveRunSessionConfigMetadata } from "../services/heartbeat.js";
@@ -86,12 +88,49 @@ if (resume && mode === 'changed') {
       expect(resolveTaskSessionConfigFreshness(input).reset).toBe(true);
       expect(resolveTaskSessionConfigFreshness({ ...input, compatibleConfigMetadata: [previousMetadata!] }).reset).toBe(false);
     }
-    const result = await execute({ runId: generation, agent: { id: "agent-one", companyId: "company-one", name: "Sol", adapterType: "codex_local", adapterConfig: {} }, runtime,
-      config, signal: invocationSignal, onMeta: async () => { launchCancellation?.abort(); }, sessionConfigFingerprint: metadata.fingerprint, context: { issueId: task }, onLog: async () => {},
+    const stored = runtime.sessionParams;
+    const taskSession = stored ? { sessionParamsJson: stored, sessionDisplayId: runtime.sessionId } : null;
+    const decoded = sessionCodec.deserialize(stored);
+    const freshness = resolveTaskSessionConfigFreshness({ hasTaskSession: Boolean(stored), configuredModel: "gpt-6.1-sol",
+      taskSessionParams: stored, configMetadata: metadata,
+      ...(mode === "compatible-config" && generation === "vend-two-refreshed-token" ? { compatibleConfigMetadata: [previousMetadata!] } : {}),
     });
-    // Same persistence decorator used by runtime-execution and run-completion.
-    // session-preparation supplies the resolved managed account epoch.
-    result.sessionParams = attachPaperclipSessionMetadataToSessionParams(result.sessionParams, "gpt-6.1-sol", { ...metadata, aiCredentialIdentity: identity });
+    // Actual preparation strips Paperclip metadata and verifies the raw saved
+    // account before retaining a native resume. Database-only row fields below
+    // are irrelevant to this pure preparation step.
+    const prepared = await resolveHeartbeatAdapterSession({
+      agent: { id: "agent-one", companyId: "company-one", adapterType: "codex_local" },
+      task: { context: { issueId: task }, taskKey: runtime.taskKey, issueId: task, continuationSummary: null, executionContinuation: null },
+      session: { runtime: { sessionId: runtime.sessionId }, taskSession, sessionCodec, explicitResumeSessionDisplayId: null,
+        runtimeSessionParams: decoded, managedAiRuntime: { sessionIdentity: identity, identity: "account-token-identity" },
+        prepared: { sessionConfigMetadata: metadata, sessionConfigFreshness: freshness, resetTaskSession: freshness.reset,
+          taskSessionForRun: freshness.reset ? null : taskSession, previousSessionParams: decoded },
+      },
+      workspace: { latestWorkspaceConfigMetadata: { version: 1, categories: [] }, workspaceConfigFreshness: {},
+        reusedExecutionWorkspace: false, resolvedWorkspaceReusePolicy: { shouldRefreshWorkspaceConfigSnapshot: false },
+        persistedExecutionWorkspace: null, runtimeWorkspaceWarnings: [], requestedShouldReuseExisting: false,
+        workspaceReuseRequest: { requestedExecutionWorkspaceId: null },
+      }, evaluateSessionCompaction: async () => ({ rotate: false }),
+    } as unknown as Parameters<typeof resolveHeartbeatAdapterSession>[0]);
+    expect(prepared.runtimeForAdapter.sessionParams?.paperclipAiCredentialIdentity).toBeUndefined();
+    expect(prepared.runtimeForAdapter.sessionParams?.__paperclipConfigFingerprint).toBeUndefined();
+    if (prepared.runtimeForAdapter.sessionId) expect(prepared.taskSessionCredentialCompatible).toBe(true);
+    const result = await execute({ runId: generation, agent: { id: "agent-one", companyId: "company-one", name: "Sol", adapterType: "codex_local", adapterConfig: {} }, runtime: prepared.runtimeForAdapter,
+      config, retainedSessionCredentialIdentity: prepared.runtimeForAdapter.sessionId ? metadata.aiCredentialIdentity : undefined, signal: invocationSignal, onMeta: async () => { launchCancellation?.abort(); }, sessionConfigFingerprint: metadata.fingerprint, context: { issueId: task }, onLog: async () => {},
+    });
+    const returnedHome = result.sessionParams?.codexHome, returnedHomeIdentity = result.sessionParams?.codexHomeIdentity;
+    const persisted = resolveNextSessionState({ adapterType: "codex_local", codec: sessionCodec, adapterResult: result,
+      outcome: result.exitCode === 0 && !result.errorMessage ? "succeeded" : "failed", previousParams: decoded,
+      previousDisplayId: runtime.sessionDisplayId, previousLegacySessionId: runtime.sessionId,
+    });
+    result.sessionParams = attachPaperclipSessionMetadataToSessionParams(persisted.params, "gpt-6.1-sol", metadata);
+    if (result.exitCode === 0) {
+      expect(typeof returnedHome).toBe("string"); expect(typeof returnedHomeIdentity).toBe("string");
+      expect(result.sessionParams?.codexHome).toBe(returnedHome);
+      expect(result.sessionParams?.codexHomeIdentity).toBe(returnedHomeIdentity);
+      expect(sessionCodec.deserialize(result.sessionParams)?.codexHome).toBe(returnedHome);
+      expect(sessionCodec.deserialize(result.sessionParams)?.codexHomeIdentity).toBe(returnedHomeIdentity);
+    }
     previousMetadata = metadata;
     await fs.rm(home, { recursive: true, force: true }); return result;
   };

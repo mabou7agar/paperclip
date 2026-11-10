@@ -243,6 +243,8 @@ export interface AdapterExecutionContext {
   sessionFingerprintEnv?: Record<string, string>;
   /** Current normalized control-plane configuration identity, not a provider payload. */
   sessionConfigFingerprint?: string;
+  /** Server-attested account epoch for a retained resume after credential checks. */
+  retainedSessionCredentialIdentity?: string;
   /** Synchronous, content-free diagnostic scope; never stop or collection authority. */
   onExecutionPhase?: AdapterExecutionPhaseSink;
   /** Run-scoped operator cancellation; adapters must settle before returning. */

@@ -708,8 +708,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       try {
         configuredCodexHome = await selectCodexSessionHome({
           defaultHome: configuredCodexHome, identity: runtimeSkillDigest,
-          credentialIdentity: managedSessionIdentity, saved,
-          allowCompatibleRebind: Boolean(ctx.sessionConfigFingerprint),
+          credentialIdentity: managedSessionIdentity,
+          // The server strips control-plane metadata before adapter dispatch.
+          // Its attestation exists only when that server retained a compatible
+          // account-bound session; standalone callers still need saved proof.
+          saved: ctx.retainedSessionCredentialIdentity ? { ...saved,
+            paperclipAiCredentialIdentity: ctx.retainedSessionCredentialIdentity,
+            __paperclipConfigFingerprint: ctx.sessionConfigFingerprint,
+          } : saved,
+          allowCompatibleRebind: Boolean(ctx.sessionConfigFingerprint && ctx.retainedSessionCredentialIdentity),
           tokenCredentialIdentity: asString(parseObject(config.managedAiConnection).identity, managedSessionIdentity),
           ...(compatible ? { sessionId: savedId } : {}),
           roots: ["skill-runtimes", "connector-runtimes"].map(group =>
