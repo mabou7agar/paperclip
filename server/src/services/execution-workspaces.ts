@@ -5381,6 +5381,8 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
               assigneeUserId: issues.assigneeUserId,
               executionPolicy: issues.executionPolicy,
               executionState: issues.executionState,
+              responsibleUserId: issues.responsibleUserId,
+              createdByUserId: issues.createdByUserId,
               monitorNextCheckAt: issues.monitorNextCheckAt,
               monitorWakeRequestedAt: issues.monitorWakeRequestedAt,
               monitorLastTriggeredAt: issues.monitorLastTriggeredAt,
@@ -5413,6 +5415,7 @@ export function executionWorkspaceService(db: Db, opts: ExecutionWorkspaceServic
             {
               ...(requestedStatus ? { status: requestedStatus } : {}),
               ...transition.patch,
+              expectedReviewSnapshot: transition.expectedReviewSnapshot,
               actorAgentId: input.actor.agentId ?? null,
               actorUserId: input.actor.actorType === "user" ? input.actor.actorId : null,
             },

@@ -1,3 +1,4 @@
+import type { ReviewProgressGuard, IssueReviewProgressState } from "../review-progress.js";
 import type { ChatProvider } from "./chat-channels.js";
 import type { TaskWorkspaceIntent, TaskWorkspacePendingSelection } from "./task-workspace.js";
 import type { ExecutionProjection, ExecutionBlocker, TaskInterruptionPresentation } from "./execution-projection.js";
@@ -801,6 +802,8 @@ export interface IssueExecutionPolicy {
    * default. Human decisions reset the round counter.
    */
   maxReviewRounds?: number | null;
+  /** Opt-in verified-progress guard. Omission preserves legacy review behavior. */
+  reviewGuard?: ReviewProgressGuard;
 }
 
 export interface IssueExecutionMonitorState {
@@ -838,6 +841,9 @@ export interface IssueExecutionState {
   monitor?: IssueExecutionMonitorState | null;
   /** Consecutive agent-initiated changes-requested rounds on the current stage. */
   changesRequestedCount?: number;
+  reviewProgress?: IssueReviewProgressState | null;
+  /** Sticky owner hold; only an explicit owner decision releases it. */
+  reviewEscalated?: boolean;
 }
 
 export interface IssueExecutionDecision {

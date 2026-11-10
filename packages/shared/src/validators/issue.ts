@@ -1,3 +1,4 @@
+import { reviewProgressGuardSchema, issueReviewAssessmentSchema, issueReviewProgressStateSchema } from "../review-progress.js";
 import { CHAT_PROVIDERS } from "../types/chat-channels.js";
 import { taskWorkspaceSelectionSchema } from "./task-workspace.js";
 import { z } from "zod";
@@ -459,6 +460,7 @@ export const requiredQualityReviewSchema = z.object({
 });
 
 export const issueExecutionPolicySchema = z.object({
+  reviewGuard: reviewProgressGuardSchema.optional(),
   requiredQualityReview: requiredQualityReviewSchema.optional(),
   mode: z.enum(ISSUE_EXECUTION_POLICY_MODES).optional().default("normal"),
   commentRequired: z.boolean().optional().default(true),
@@ -541,6 +543,8 @@ export const issueExecutionStateSchema = z.object({
   lastDecisionOutcome: z.enum(ISSUE_EXECUTION_DECISION_OUTCOMES).nullable(),
   monitor: issueExecutionMonitorStateSchema.optional().nullable(),
   changesRequestedCount: z.number().int().nonnegative().optional().default(0),
+  reviewProgress: issueReviewProgressStateSchema.nullable().optional(),
+  reviewEscalated: z.boolean().optional(),
 });
 
 export const issueRecoveryActionReadModelSchema = z.object({
@@ -984,6 +988,7 @@ export const updateIssueSchema = objectWithoutDefaults(
     onBehalfOfUserId: z.string().trim().min(1).optional().nullable(),
     reviewInteractionId: z.string().guid().optional(),
     reviewRequest: issueReviewRequestSchema.optional().nullable(),
+    reviewAssessment: issueReviewAssessmentSchema.optional(),
     reopen: z.boolean().optional(),
     resume: z.boolean().optional(),
     interrupt: z.boolean().optional(),

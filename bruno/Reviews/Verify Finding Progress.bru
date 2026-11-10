@@ -1,0 +1,34 @@
+meta {
+  name: Verify Finding Progress
+  type: http
+  seq: 1
+}
+patch {
+  url: {{baseUrl}}/api/issues/{{issueId}}
+  body: json
+  auth: bearer
+}
+auth:bearer {
+  token: {{reviewerToken}}
+}
+body:json {
+  {
+    "status":"in_progress",
+    "comment":"Verified the recorded finding against the exact candidate and evidence.",
+    "reviewAssessment":{
+      "baselineDecisionId":{{baselineDecisionIdJson}},
+      "candidateRef":"{{candidateRef}}",
+      "evidenceRefs":["{{evidenceRef}}"],
+      "openFindingIds":[],
+      "requiredGateIds":[],
+      "resolvedFindingIds":["{{findingId}}"],
+      "passedGateIds":[]
+    }
+  }
+}
+docs {
+  Existing compatible task API. Enable reviewGuard.mode=progress as board while preserving the complete policy.
+  GET the task first. Use the current stage reviewer's credential and lastDecisionId; register a finding in an earlier assessment before resolving it.
+  Set baselineDecisionIdJson to a JSON-quoted UUID for later decisions. For the initial assessment use actual JSON null for baselineDecisionIdJson only when task.lastDecisionId is null, empty resolvedFindingIds/passedGateIds, and register openFindingIds/requiredGateIds.
+  These evidence references attest reviewer verification, not execution authority. Do not rerun unchanged tests or retry 409/422 automatically.
+}
