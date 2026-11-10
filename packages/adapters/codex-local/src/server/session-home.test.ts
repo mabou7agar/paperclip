@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import { DatabaseSync } from "node:sqlite";
+import { withDirectoryMergeLock, withDirectoryPublicationLock, WORKSPACE_RESTORE_LOCK_TIMEOUT_CODE } from "@paperclipai/adapter-utils/workspace-restore-merge";
 import { afterEach, expect, it } from "vitest";
 import { selectCodexSessionHome, type CodexSessionHomeInput } from "./session-home.js";
 
@@ -99,4 +100,40 @@ it("propagates root filesystem failures instead of declaring native evidence inv
   const f = await setup();
   // A non-directory root deterministically fails on every supported uid/OS.
   await expect(selectCodexSessionHome({ ...f.input, roots: [f.rollout] })).rejects.toMatchObject({ code: "ENOTDIR" });
+});
+
+
+it("retains a proven bound home when the control plane explicitly permits compatible config migration", async () => {
+  const f = await setup(); const saved = { ...f.input.saved, codexHome: f.home,
+    codexHomeIdentity: "a".repeat(64), __paperclipConfigFingerprint: "v1:sha256:" + "b".repeat(64) };
+  await expect(selectCodexSessionHome({ ...f.input, saved })).rejects.toThrow("codex_session_home_identity_unproven");
+  expect(await selectCodexSessionHome({ ...f.input, saved, allowCompatibleRebind: true })).toBe(f.home);
+  await expect(selectCodexSessionHome({ ...f.input, saved, credentialIdentity: "other-account", allowCompatibleRebind: true })).rejects.toThrow("codex_session_home_identity_unproven");
+});
+
+
+it("a contender timeout never expires the selected home's existing lifetime lease", async () => {
+  const f = await setup(), env = { PAPERCLIP_HOME: f.root, PAPERCLIP_INSTANCE_ID: "native-lease-test" };
+  let release!: () => void, started!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const held = new Promise<void>(resolve => { started = resolve; });
+  const owner = withDirectoryPublicationLock(f.home, async () => { started(); await gate; }, env);
+  await held; let entered = false;
+  try {
+    await expect(withDirectoryMergeLock(f.home, async () => { entered = true; }, env, undefined, 20)).rejects.toMatchObject({ code: WORKSPACE_RESTORE_LOCK_TIMEOUT_CODE });
+    expect(entered).toBe(false);
+  } finally { release(); await owner; }
+  await withDirectoryPublicationLock(f.home, async () => { entered = true; }, env);
+  expect(entered).toBe(true);
+});
+
+
+it.each(["legacy", "mixed"])("names an unsupported native index for %s records without deleting evidence", async mode => {
+  const f = await setup();
+  await fs.copyFile(f.index, path.join(f.home, "state_6.sqlite"));
+  if (mode === "legacy") await fs.rm(f.index);
+  const input = mode === "legacy" ? f.input : { ...f.input, saved: { ...f.input.saved, codexHome: f.home, codexHomeIdentity: f.input.identity } };
+  await expect(selectCodexSessionHome(input)).rejects.toThrow("codex_session_index_schema_unsupported");
+  expect((await fs.stat(path.join(f.home, "state_6.sqlite"))).isFile()).toBe(true);
+  expect((await fs.stat(f.rollout)).isFile()).toBe(true);
 });

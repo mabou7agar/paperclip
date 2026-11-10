@@ -98,4 +98,8 @@ completion. Session-reused flags alone are insufficient.
 
 Managed runtime views synchronize copied configuration on every launch, including removals. Caller-owned homes retain their existing seeding policy. Unrelated filesystem errors retain the normal recovery classification.
 
-Managed native runs are serialized for the entire CLI lifetime by the shared process-safe directory lease, including taskless callers. Config writes use private atomic replacements. Missing legacy history is retained as a visible refusal; an operator must locate and verify the original history or explicitly authorize a new conversation. A failed automatic resume never authorizes that reset.
+Managed native runs are serialized for the entire CLI lifetime by the shared process-safe directory lease on the actual selected home, including legacy homes shared across older task records. The lease never expires a live holder; an acquisition timeout fails before provider launch under the existing bounded recovery policy. Config writes use private atomic replacements. Missing legacy history is retained as a visible refusal; an operator must locate and verify the original history or explicitly authorize a new conversation. A failed automatic resume never authorizes that reset.
+
+For a bound home, control-plane-approved compatibility migrations retain the proven native thread and refresh its binding metadata. Account/epoch and private-root/index/header proof remain mandatory; standalone callers without control-plane authorization retain strict binding checks.
+
+A different `thread.started` identity during a managed resume terminates the owned CLI immediately on the streamed event; its replacement turn is never accepted. Already emitted provider work cannot be undone, so the retained original session and failure receipt stay visible. Unsupported native versions, including mixed indexes, are reported by name in bound and legacy discovery paths.

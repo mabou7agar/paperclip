@@ -22,6 +22,8 @@ export interface CodexSessionHomeInput {
   saved: Record<string, unknown>;
   credentialIdentity: string;
   tokenCredentialIdentity?: string;
+  /** The control plane retained this session after its compatibility checks. */
+  allowCompatibleRebind?: boolean;
 }
 
 async function directory(candidate: string, root: string): Promise<string | null> {
@@ -43,14 +45,14 @@ async function directory(candidate: string, root: string): Promise<string | null
  * Never rewrite an index, copy credentials, or read provider conversation items. */
 async function ownsThread(home: string, threadId: string, strict = false): Promise<boolean> {
   const sqlite = path.join(home, CODEX_NATIVE_INDEX_FILE);
+  if ((await fs.readdir(home)).some(name => /^state_\d+\.sqlite$/.test(name) && name !== CODEX_NATIVE_INDEX_FILE)) {
+    throw new CodexSessionHomeError("codex_session_index_schema_unsupported");
+  }
   try {
     const stat = await fs.lstat(sqlite);
     if (!stat.isFile() || stat.isSymbolicLink()) return false;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-      if (strict && (await fs.readdir(home)).some(name => /^state_\d+\.sqlite$/.test(name))) {
-        throw new CodexSessionHomeError("codex_session_index_schema_unsupported");
-      }
       return false;
     }
     throw error;
@@ -110,7 +112,10 @@ export async function selectCodexSessionHome(input: CodexSessionHomeInput): Prom
     throw new CodexSessionHomeError("codex_session_home_identity_unproven");
   }
   if (input.saved.codexHome !== undefined) {
-    if (input.saved.codexHomeIdentity !== input.identity || typeof input.saved.codexHome !== "string") {
+    const compatibleBinding = input.allowCompatibleRebind
+      && typeof input.saved.codexHomeIdentity === "string" && /^[a-f0-9]{64}$/.test(input.saved.codexHomeIdentity)
+      && typeof input.saved.__paperclipConfigFingerprint === "string" && /^v[1-9][0-9]*:sha256:[a-f0-9]{64}$/.test(input.saved.__paperclipConfigFingerprint);
+    if ((input.saved.codexHomeIdentity !== input.identity && !compatibleBinding) || typeof input.saved.codexHome !== "string") {
       throw new CodexSessionHomeError("codex_session_home_identity_unproven");
     }
     for (const root of input.roots) {
@@ -129,6 +134,7 @@ export async function selectCodexSessionHome(input: CodexSessionHomeInput): Prom
   // exact existing home; do not transplant a rollout into a different account.
   const candidates: string[] = [];
   let inspected = 0;
+  let unsupportedIndex = false;
   for (const root of input.roots) {
     let entries;
     try { entries = await fs.readdir(root, { withFileTypes: true }); }
@@ -138,9 +144,14 @@ export async function selectCodexSessionHome(input: CodexSessionHomeInput): Prom
     inspected += legacy.length;
     for (const entry of legacy) {
       const home = await directory(path.join(root, entry.name), root);
-      if (home && await ownsThread(home, input.sessionId)) candidates.push(home);
+      try { if (home && await ownsThread(home, input.sessionId)) candidates.push(home); }
+      catch (error) {
+        if (!(error instanceof CodexSessionHomeError) || error.code !== "codex_session_index_schema_unsupported") throw error;
+        unsupportedIndex = true;
+      }
     }
   }
+  if (candidates.length === 0 && unsupportedIndex) throw new CodexSessionHomeError("codex_session_index_schema_unsupported");
   if (candidates.length !== 1) throw new CodexSessionHomeError(candidates.length ? "codex_session_home_ambiguous" : "codex_session_home_unavailable");
   return candidates[0]!;
 }

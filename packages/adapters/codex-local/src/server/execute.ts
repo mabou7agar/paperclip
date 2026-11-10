@@ -578,25 +578,6 @@ export async function ensureCodexSkillsInjected(
 }
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
-  const config = parseObject(ctx.config), env = parseObject(config.env);
-  const target = readAdapterExecutionTarget({ executionTarget: ctx.executionTarget,
-    legacyRemoteExecution: ctx.executionTransport?.remoteExecution });
-  const managed = Boolean(asString(parseObject(config.managedAiConnection).sessionIdentity, ""))
-    && !adapterExecutionTargetIsRemote(target) && typeof env.HOME === "string"
-    && env.CODEX_HOME === path.join(env.HOME, "provider");
-  if (!managed) return executeWithSessionLease(ctx);
-  // Retained homes contain a live native DB plus launch config and skills.
-  // Serialize the entire provider lifetime, including copy-back and cleanup,
-  // even for direct adapter callers and taskless runs. Reuse the shared
-  // process-safe, crash-releasing lock; never race a second CLI on one thread.
-  const scope = path.join(resolveManagedCodexHomeDir(process.env, ctx.agent.companyId), "native-session-leases", ctx.agent.id);
-  await fs.mkdir(scope, { recursive: true, mode: 0o700 });
-  const key = createHash("sha256").update(JSON.stringify(ctx.runtime.taskKey
-    ?? ctx.context.taskKey ?? ctx.context.issueId ?? ctx.context.taskId ?? null)).digest("hex");
-  return withDirectoryPublicationLock(path.join(scope, key), () => executeWithSessionLease(ctx));
-}
-
-async function executeWithSessionLease(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
   const providerStop = createProviderStoppedBoundary(ctx.onProviderStopped);
   const engineSelection = await resolveCodexExecutionEngineForRun(ctx);
   if (engineSelection.unavailableReason) {
@@ -728,6 +709,7 @@ async function executeWithSessionLease(ctx: AdapterExecutionContext): Promise<Ad
         configuredCodexHome = await selectCodexSessionHome({
           defaultHome: configuredCodexHome, identity: runtimeSkillDigest,
           credentialIdentity: managedSessionIdentity, saved,
+          allowCompatibleRebind: Boolean(ctx.sessionConfigFingerprint),
           tokenCredentialIdentity: asString(parseObject(config.managedAiConnection).identity, managedSessionIdentity),
           ...(compatible ? { sessionId: savedId } : {}),
           roots: ["skill-runtimes", "connector-runtimes"].map(group =>
@@ -743,6 +725,7 @@ async function executeWithSessionLease(ctx: AdapterExecutionContext): Promise<Ad
       }
     }
   }
+  const executeInSelectedHome = async (): Promise<AdapterExecutionResult> => {
   if (!executionTargetIsRemote) {
     await ensureAbsoluteDirectory(cwd, { createIfMissing: true });
   }
@@ -1387,6 +1370,32 @@ async function executeWithSessionLease(ctx: AdapterExecutionContext): Promise<Ad
         });
       }
 
+      let resumeThreadMismatch: string | null = null;
+      let threadStartRemainder = "", skipThreadStartLine = false;
+      const observeResumeThread = (chunk: string) => {
+        if (!managedLocalSessionHome || !resumeSessionId || resumeThreadMismatch) return;
+        // Inspect only bounded JSONL protocol records, before any awaited log
+        // or accounting work. A changed native ID must stop this owned child
+        // immediately, rather than letting its fresh-context turn complete.
+        for (const character of chunk) {
+          if (character !== "\n") {
+            if (!skipThreadStartLine) {
+              threadStartRemainder += character;
+              if (threadStartRemainder.length > 16_384) { threadStartRemainder = ""; skipThreadStartLine = true; }
+            }
+            continue;
+          }
+          const line = threadStartRemainder; threadStartRemainder = "";
+          if (skipThreadStartLine) { skipThreadStartLine = false; continue; }
+          let event;
+          try { event = JSON.parse(line); } catch { continue; }
+          if (event?.type === "thread.started" && typeof event.thread_id === "string" && event.thread_id !== resumeSessionId) {
+            resumeThreadMismatch = event.thread_id;
+            if (killTarget) signalCodexChild(killTarget, "SIGKILL");
+            return;
+          }
+        }
+      };
       let monitorFired = false;
       let monitorTerminationSignal: NodeJS.Signals | null = null;
       let monitorElapsedMs = 0;
@@ -1474,6 +1483,7 @@ async function executeWithSessionLease(ctx: AdapterExecutionContext): Promise<Ad
           onLog: async (stream, chunk) => {
             monitor?.noteOutputChunk(stream, chunk);
             if (stream === "stdout") {
+              observeResumeThread(chunk);
               await accountingLog(stream, chunk);
               return;
             }
@@ -1494,6 +1504,7 @@ async function executeWithSessionLease(ctx: AdapterExecutionContext): Promise<Ad
           },
           rawStderr: proc.stderr,
           parsed: parseCodexJsonl(proc.stdout),
+          resumeThreadMismatch,
           pricingContext,
           monitor: monitorFired
             ? {
@@ -1741,7 +1752,8 @@ async function executeWithSessionLease(ctx: AdapterExecutionContext): Promise<Ad
             sessionResume: { status: "unavailable", requestedSessionId: sessionId, retryable: false } } };
       }
 
-      if (managedLocalSessionHome && sessionId && initial.parsed.sessionId && initial.parsed.sessionId !== sessionId) {
+      const returnedResumeId = initial.resumeThreadMismatch ?? initial.parsed.sessionId;
+      if (managedLocalSessionHome && sessionId && returnedResumeId && returnedResumeId !== sessionId) {
         const refusal = new Error("Codex returned a different thread during resume; retained session was not replaced.");
         executionError = refusal;
         return { ...toResult(initial), exitCode: 1,
@@ -1749,7 +1761,7 @@ async function executeWithSessionLease(ctx: AdapterExecutionContext): Promise<Ad
           retryNotBefore: null, sessionId, sessionParams: runtime.sessionParams, sessionDisplayId: sessionId,
           clearSession: false, resultJson: { stdout: initial.proc.stdout, stderr: initial.proc.stderr,
             errorFamily: "configuration", sessionResume: { status: "identity_changed",
-            requestedSessionId: sessionId, returnedSessionId: initial.parsed.sessionId, retryable: false } } };
+            requestedSessionId: sessionId, returnedSessionId: returnedResumeId, retryable: false } } };
       }
 
       const result = toResult(initial);
@@ -1816,4 +1828,13 @@ async function executeWithSessionLease(ctx: AdapterExecutionContext): Promise<Ad
     await observabilityProfile?.cleanup();
     await preparedRuntimeConfig.cleanup();
   }
+  };
+  if (managedLocalSessionHome && configuredCodexHome) {
+    await fs.mkdir(path.dirname(configuredCodexHome), { recursive: true, mode: 0o700 });
+    // Lock the actual selected home, including legacy homes shared by old
+    // task records. SQLite ownership is OS-released on crash, never aged out.
+    // The bounded acquisition wait does not expire a holder's lifetime lease.
+    return withDirectoryPublicationLock(configuredCodexHome, executeInSelectedHome);
+  }
+  return executeInSelectedHome();
 }

@@ -4,13 +4,14 @@ import path from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
 import { execute } from "@paperclipai/adapter-codex-local/server";
 import { DatabaseSync } from "node:sqlite";
+import * as directoryLocks from "@paperclipai/adapter-utils/workspace-restore-merge";
 import { buildEffectiveRunSessionConfigMetadata } from "../services/heartbeat.js";
-import { attachPaperclipSessionMetadataToSessionParams } from "../services/heartbeat/workspaces.js";
+import { attachPaperclipSessionMetadataToSessionParams, resolveTaskSessionConfigFreshness } from "../services/heartbeat/workspaces.js";
 
 const roots: string[] = [];
 afterEach(async () => { vi.unstubAllEnvs(); await Promise.all(roots.splice(0).map(root => fs.rm(root, { recursive: true, force: true }))); });
 
-it.each(["current", "config-removed", "config-filesystem-error", "home-filesystem-error", "legacy", "token", "missing", "changed", "newer-refresh", "source-missing", "source-missing-link", "source-invalid", "source-filesystem-error", "source-missing-target", "accountless-residue", "damaged-residue", "wrong-account-residue"] as const)("preserves managed native state across disposable vends: %s", async mode => {
+it.each(["current", "lock-busy", "compatible-config", "config-removed", "config-filesystem-error", "home-filesystem-error", "legacy", "token", "missing", "changed", "newer-refresh", "source-missing", "source-missing-link", "source-invalid", "source-filesystem-error", "source-missing-target", "accountless-residue", "damaged-residue", "wrong-account-residue"] as const)("preserves managed native state across disposable vends: %s", async mode => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "codex-cli-continuity-")); roots.push(root);
   const cwd = path.join(root, "workspace"); await fs.mkdir(cwd);
   vi.stubEnv("PAPERCLIP_HOME", path.join(root, "paperclip")); vi.stubEnv("PAPERCLIP_INSTANCE_ID", "continuity");
@@ -48,9 +49,13 @@ db.close(); fs.unlinkSync(leaseProof);
 const returnedId = resume && mode === 'changed' ? crypto.randomUUID() : id;
 fs.appendFileSync(${JSON.stringify(capture)},JSON.stringify({home:fs.realpathSync(home),id,returnedId,resume,retained,authToken,configText})+'\\n');
 console.log(JSON.stringify({type:'thread.started',thread_id:returnedId}));
-console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_tokens:1}}));
+if (resume && mode === 'changed') {
+ setTimeout(() => fs.writeFileSync(path.join(home,'fixture-fresh-context-effect'),'must never execute'),500);
+ setTimeout(() => process.exit(0),600);
+} else console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_tokens:1}}));
 `); await fs.chmod(command, 0o755);
   const fingerprints: Array<{ identity: string; task: string; fingerprint: string }> = [];
+  let previousMetadata: Awaited<ReturnType<typeof buildEffectiveRunSessionConfigMetadata>> | undefined;
   const invoke = async (generation: string, runtime: Parameters<typeof execute>[0]["runtime"], identity = "account:epoch:0", task = "task-one") => {
     const home = path.join(root, generation), provider = path.join(home, "provider"); await fs.mkdir(provider, { recursive: true });
     await fs.writeFile(path.join(provider, "auth.json"), JSON.stringify({
@@ -66,19 +71,26 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_t
       if (mode === "source-invalid") await fs.writeFile(path.join(provider, "auth.json"), "not JSON");
       if (mode === "source-filesystem-error") { await fs.rm(path.join(provider, "auth.json")); await fs.mkdir(path.join(provider, "auth.json")); }
     }
-    const config = { engine: "cli", command, cwd, env: { HOME: home, CODEX_HOME: provider }, managedAiConnection: { sessionIdentity: identity, identity: "account-token-identity" }, paperclipRuntimeSkills: [] };
+    const config = { engine: "cli", command, cwd, env: { HOME: home, CODEX_HOME: provider, ...(mode === "compatible-config" && generation === "vend-two-refreshed-token" ? { PAPERCLIP_TEST_COMPATIBLE_ENV: "updated" } : {}) }, managedAiConnection: { sessionIdentity: identity, identity: "account-token-identity" }, paperclipRuntimeSkills: [] };
     // Exercise the real server normalizer, not a constant or adapter-only hash.
     const metadata = await buildEffectiveRunSessionConfigMetadata({ adapterType: "codex_local", effectiveAdapterConfig: config, managedAiHome: home,
       agentRuntimeConfig: {}, agentConfigRevision: null, issueOverrides: null, workspaceConfig: { cwd }, environment: {},
       environmentEnv: null, projectEnv: null, routineEnv: null, runtimeSkills: [],
     });
     fingerprints.push({ identity, task, fingerprint: metadata.fingerprint });
+    if (mode === "compatible-config" && generation === "vend-two-refreshed-token") {
+      expect(metadata.fingerprint).not.toBe(previousMetadata!.fingerprint);
+      const input = { hasTaskSession: true, configuredModel: "gpt-6.1-sol", taskSessionParams: runtime.sessionParams, configMetadata: metadata };
+      expect(resolveTaskSessionConfigFreshness(input).reset).toBe(true);
+      expect(resolveTaskSessionConfigFreshness({ ...input, compatibleConfigMetadata: [previousMetadata!] }).reset).toBe(false);
+    }
     const result = await execute({ runId: generation, agent: { id: "agent-one", companyId: "company-one", name: "Sol", adapterType: "codex_local", adapterConfig: {} }, runtime,
       config, sessionConfigFingerprint: metadata.fingerprint, context: { issueId: task }, onLog: async () => {},
     });
     // Same persistence decorator used by runtime-execution and run-completion.
     // session-preparation supplies the resolved managed account epoch.
     result.sessionParams = attachPaperclipSessionMetadataToSessionParams(result.sessionParams, "gpt-6.1-sol", { ...metadata, aiCredentialIdentity: identity });
+    previousMetadata = metadata;
     await fs.rm(home, { recursive: true, force: true }); return result;
   };
   const fresh = { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: "task-one" };
@@ -109,6 +121,28 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_t
     await fs.writeFile(path.join(old, "skills", "revoked-private-skill"), "old capability must not remain launchable");
   }
   await fs.writeFile(control, mode === "missing" || mode === "changed" ? mode : "");
+  if (mode === "lock-busy") {
+    const home = String(saved.codexHome), env = { PAPERCLIP_HOME: path.join(root, "paperclip"), PAPERCLIP_INSTANCE_ID: "continuity" };
+    await fs.mkdir(path.join(home, "skills"), { recursive: true });
+    await fs.writeFile(path.join(home, "skills", "held-inventory"), "must remain");
+    const before = await Promise.all(["auth.json", "config.toml", "skills/held-inventory"].map(name => fs.readFile(path.join(home, name))));
+    let release!: () => void, started!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; }), held = new Promise<void>(resolve => { started = resolve; });
+    const owner = directoryLocks.withDirectoryPublicationLock(home, async () => { started(); await gate; }, env);
+    await held;
+    // Only shorten the existing helper's acquisition wait in this test; retain
+    // real SQLite ownership and the adapter's complete preparation/launch path.
+    const shortWait = vi.spyOn(directoryLocks, "withDirectoryPublicationLock").mockImplementation(async function<T>(target: string, fn: (canonical: string) => Promise<T>, lockEnv?: NodeJS.ProcessEnv): Promise<T> {
+      return directoryLocks.withDirectoryMergeLock(target, fn, lockEnv, undefined, 20);
+    });
+    try {
+      await expect(invoke("vend-two-refreshed-token", { ...fresh, sessionId: first.sessionId, sessionParams: saved })).rejects.toMatchObject({ code: directoryLocks.WORKSPACE_RESTORE_LOCK_TIMEOUT_CODE });
+      expect(await Promise.all(["auth.json", "config.toml", "skills/held-inventory"].map(name => fs.readFile(path.join(home, name))))).toEqual(before);
+      expect((await fs.readFile(capture, "utf8")).trim().split("\n")).toHaveLength(1);
+      await expect(fs.stat(path.join(home, "fixture-active-cli"))).rejects.toMatchObject({ code: "ENOENT" });
+    } finally { shortWait.mockRestore(); release(); await owner; }
+    return;
+  }
   if (mode === "home-filesystem-error") {
     const scope = path.dirname(String(saved.codexHome));
     await fs.rename(scope, scope + "-retained"); await fs.writeFile(scope, "unavailable directory");
@@ -129,7 +163,8 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_t
     return;
   }
   const second = await invoke("vend-two-refreshed-token", { ...fresh, sessionId: first.sessionId, sessionParams: saved });
-  expect(fingerprints[1]!.fingerprint).toBe(fingerprints[0]!.fingerprint);
+  if (mode === "compatible-config") expect(fingerprints[1]!.fingerprint).not.toBe(fingerprints[0]!.fingerprint);
+  else expect(fingerprints[1]!.fingerprint).toBe(fingerprints[0]!.fingerprint);
   const calls = (await fs.readFile(capture, "utf8")).trim().split("\n").map(line => JSON.parse(line));
   if (["source-missing", "source-missing-link", "source-invalid", "source-filesystem-error", "source-missing-target"].includes(mode)) {
     expect(calls).toHaveLength(1); expect(second.exitCode).toBe(1);
@@ -148,6 +183,7 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_t
     expect(second.exitCode).toBe(1); expect(second.sessionId).toBe(first.sessionId); expect(second.sessionParams).toEqual(saved);
     expect(second.clearSession).toBe(false); expect(second.errorFamily).toBe("configuration");
     expect(second.resultJson).toHaveProperty("stdout"); expect(second.resultJson).toHaveProperty("stderr");
+    if (mode === "changed") await expect(fs.stat(path.join(calls[1].home, "fixture-fresh-context-effect"))).rejects.toMatchObject({ code: "ENOENT" });
     return;
   }
   expect(second.errorCode).toBeFalsy(); expect(second.exitCode).toBe(0); expect(second.sessionId).toBe(first.sessionId);
@@ -160,8 +196,9 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_t
   await expect(fs.access(path.join(calls[1].home, "skills", "revoked-private-skill"))).rejects.toThrow();
   if (mode === "current" || mode === "newer-refresh") expect(calls[1].home).toBe(calls[0].home);
   if (mode === "newer-refresh") expect(JSON.parse(await fs.readFile(path.join(calls[1].home, "auth.json"), "utf8")).tokens.access_token).toBe("native-newer-refresh");
-  if (mode === "current") {
-    const concurrent = await Promise.all([invoke("concurrent-a", { ...fresh, sessionId: first.sessionId, sessionParams: second.sessionParams }), invoke("concurrent-b", { ...fresh, sessionId: first.sessionId, sessionParams: second.sessionParams })]);
+  if (mode === "current" || mode === "legacy") {
+    const concurrent = await Promise.all([invoke("concurrent-a", { ...fresh, sessionId: first.sessionId, sessionParams: second.sessionParams ?? null }), invoke("concurrent-b", { ...fresh, taskKey: mode === "legacy" ? "task-legacy-other" : fresh.taskKey,
+      sessionId: first.sessionId, sessionParams: mode === "legacy" ? saved : second.sessionParams ?? null }, "account:epoch:0", mode === "legacy" ? "task-legacy-other" : "task-one")]);
     expect(concurrent.map(result => result.sessionId)).toEqual([first.sessionId, first.sessionId]);
     expect(concurrent.map(result => result.exitCode)).toEqual([0, 0]);
   }
