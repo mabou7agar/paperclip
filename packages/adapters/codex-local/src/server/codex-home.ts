@@ -745,10 +745,13 @@ export async function seedManagedCodexHome(
           if (!usableSource) throw new Error("codex_session_credential_source_unavailable");
           const sourceLastRefresh = readAuthLastRefreshMs(sourceBytes);
           const targetLastRefresh = readAuthLastRefreshMs(targetBytes);
+          let usableTarget = false;
+          try { usableTarget = targetBytes !== null && hasUsableAuthPayload(JSON.parse(targetBytes.toString("utf8"))); }
+          catch { /* A damaged retained file cannot override the selected vend. */ }
           // A runtime view cannot select another account or keep an unproven
           // stale copy over the authorized vend. Retain a provably newer local
           // refresh, including when an older source lacks freshness metadata.
-          keepPromotedAuth = sourceIdentity === targetIdentity && targetLastRefresh !== null &&
+          keepPromotedAuth = sourceIdentity !== null && sourceIdentity === targetIdentity && usableTarget && targetLastRefresh !== null &&
             (sourceLastRefresh === null || targetLastRefresh > sourceLastRefresh);
         } else if (sourceIdentity !== targetIdentity) {
           keepPromotedAuth = true;

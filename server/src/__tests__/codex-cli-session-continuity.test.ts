@@ -9,7 +9,7 @@ import { buildEffectiveRunSessionConfigMetadata } from "../services/heartbeat.js
 const roots: string[] = [];
 afterEach(async () => { vi.unstubAllEnvs(); await Promise.all(roots.splice(0).map(root => fs.rm(root, { recursive: true, force: true }))); });
 
-it.each(["current", "legacy", "token", "missing", "changed", "newer-refresh", "source-missing"] as const)("preserves managed native state across disposable vends: %s", async mode => {
+it.each(["current", "legacy", "token", "missing", "changed", "newer-refresh", "source-missing", "accountless-residue", "damaged-residue", "wrong-account-residue"] as const)("preserves managed native state across disposable vends: %s", async mode => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "codex-cli-continuity-")); roots.push(root);
   const cwd = path.join(root, "workspace"); await fs.mkdir(cwd);
   vi.stubEnv("PAPERCLIP_HOME", path.join(root, "paperclip")); vi.stubEnv("PAPERCLIP_INSTANCE_ID", "continuity");
@@ -20,7 +20,8 @@ const fs = require('node:fs'), path = require('node:path'), crypto = require('no
 const {DatabaseSync} = require('node:sqlite');
 const home = process.env.CODEX_HOME, args = process.argv.slice(2), resume = args.includes('resume');
 const mode = fs.readFileSync(${JSON.stringify(control)},'utf8');
-const authToken = JSON.parse(fs.readFileSync(path.join(home,'auth.json'),'utf8')).tokens.access_token;
+const auth = JSON.parse(fs.readFileSync(path.join(home,'auth.json'),'utf8'));
+const authToken = auth.tokens?.access_token ?? auth.OPENAI_API_KEY;
 fs.readFileSync(0, 'utf8');
 const db = new DatabaseSync(path.join(home, 'state_5.sqlite'));
 db.exec('CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY, rollout_path TEXT, history_mode TEXT)');
@@ -48,7 +49,10 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_t
   const fingerprints: Array<{ identity: string; task: string; fingerprint: string }> = [];
   const invoke = async (generation: string, runtime: Parameters<typeof execute>[0]["runtime"], identity = "account:epoch:0", task = "task-one") => {
     const home = path.join(root, generation), provider = path.join(home, "provider"); await fs.mkdir(provider, { recursive: true });
-    await fs.writeFile(path.join(provider, "auth.json"), JSON.stringify({ tokens: { account_id: "account", access_token: generation }, last_refresh: "2026-11-10T16:00:00Z" }));
+    await fs.writeFile(path.join(provider, "auth.json"), JSON.stringify({
+      ...(mode === "accountless-residue" ? { OPENAI_API_KEY: generation } : { tokens: { account_id: "account", access_token: generation } }),
+      last_refresh: "2026-11-10T16:00:00Z",
+    }));
     await fs.writeFile(path.join(provider, "config.toml"), "# Disposable vend metadata: " + generation + "\n");
     if (mode === "source-missing" && generation === "vend-two-refreshed-token") await fs.rm(path.join(provider, "auth.json"));
     const config = { engine: "cli", command, cwd, env: { HOME: home, CODEX_HOME: provider }, managedAiConnection: { sessionIdentity: identity, identity: "account-token-identity" }, paperclipRuntimeSkills: [] };
@@ -73,8 +77,11 @@ console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_t
   // not this expired copy, must supply the next invocation's credential.
   await fs.rm(path.join(String(saved.codexHome), "auth.json"), { force: true });
   await fs.writeFile(path.join(String(saved.codexHome), "auth.json"), JSON.stringify({
-    tokens: { account_id: "account", access_token: mode === "newer-refresh" ? "native-newer-refresh" : "expired-native-residue" },
-    ...(mode === "newer-refresh" ? { last_refresh: "2026-11-10T16:10:00Z" } : {}),
+    ...(mode === "accountless-residue" ? { OPENAI_API_KEY: "other-key-residue" } : {
+      tokens: { account_id: mode === "wrong-account-residue" ? "other-account" : "account",
+        ...(mode === "damaged-residue" ? {} : { access_token: mode === "newer-refresh" ? "native-newer-refresh" : "expired-native-residue" }) },
+    }),
+    ...(["newer-refresh", "accountless-residue", "damaged-residue", "wrong-account-residue"].includes(mode) ? { last_refresh: "2026-11-10T16:10:00Z" } : {}),
   }));
   if (mode === "legacy" || mode === "token") {
     const source = String(saved.codexHome), old = path.join(path.dirname(source), "a".repeat(64)); await fs.rename(source, old);
