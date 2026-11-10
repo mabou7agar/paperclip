@@ -3141,7 +3141,7 @@ export function createHeartbeatLifecycle(db: Db, dependencies: HeartbeatLifecycl
       .update(agentRuntimeState)
       .set({
         adapterType: agent.adapterType,
-        sessionId: session.legacySessionId,
+        ...(result.preserveSession ? {} : { sessionId: session.legacySessionId }),
         lastRunId: run.id,
         lastRunStatus: run.status,
         lastError: run.error ?? null,

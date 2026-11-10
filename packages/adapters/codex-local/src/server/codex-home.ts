@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
@@ -293,6 +294,23 @@ async function ensureCopiedFile(target: string, source: string): Promise<void> {
   if (existing) return;
   await ensureParentDir(target);
   await fs.copyFile(source, target);
+}
+
+// These files are launch configuration, not durable native history. A retained
+// managed view must reflect edits and revocations in the selected vend.
+async function synchronizeManagedConfigFile(target: string, source: string): Promise<void> {
+  let contents: Buffer | null;
+  try { contents = await fs.readFile(source); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    contents = null;
+  }
+  if (contents === null) { await fs.rm(target, { force: true }); return; }
+  const temporary = target + "." + randomUUID() + ".tmp";
+  try {
+    await fs.writeFile(temporary, contents, { flag: "wx", mode: 0o600 });
+    await fs.rename(temporary, target);
+  } finally { await fs.rm(temporary, { force: true }); }
 }
 
 function tomlString(value: string): string {
@@ -659,12 +677,24 @@ export async function seedManagedCodexHome(
   targetHome: string,
   env: NodeJS.ProcessEnv,
   onLog: AdapterExecutionContext["onLog"],
-  options: { apiKey?: string | null } = {},
+  options: { apiKey?: string | null; managedRuntimeView?: boolean } = {},
 ): Promise<void> {
   const apiKey = nonEmpty(options.apiKey ?? undefined);
 
   const sourceHome = resolveSharedCodexHomeDir(env);
   const seedFromShared = path.resolve(sourceHome) !== path.resolve(targetHome);
+  let runtimeSourceBytes: Buffer | null = null;
+  if (options.managedRuntimeView && !apiKey) {
+    // Validate the selected source before examining the retained entry. This
+    // also covers absent entries and dangling links from a deleted vend.
+    try {
+      runtimeSourceBytes = await fs.readFile(path.join(sourceHome, "auth.json"));
+      if (!hasUsableAuthPayload(JSON.parse(runtimeSourceBytes.toString("utf8")))) throw new SyntaxError("Unusable selected credential");
+    } catch (error) {
+      if (!(error instanceof SyntaxError) && !["ENOENT", "ENOTDIR"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+      throw new Error("codex_session_credential_source_unavailable");
+    }
+  }
 
   // A per-identity credential-store entry is not a seedable home: its
   // auth.json is the durable, identity-anchored result of a device login,
@@ -729,7 +759,7 @@ export async function seedManagedCodexHome(
         // credential is irreversible. The #5028 heal therefore applies
         // exactly when the source is readable and the identities match.
         let sourceReadErrorCode: string | null = null;
-        const sourceBytes = await fs
+        const sourceBytes = options.managedRuntimeView ? runtimeSourceBytes : await fs
           .readFile(path.join(sourceHome, "auth.json"))
           .catch((error: NodeJS.ErrnoException) => {
             if (error.code !== "ENOENT" && error.code !== "ENOTDIR") {
@@ -738,7 +768,22 @@ export async function seedManagedCodexHome(
             return null;
           });
         const sourceIdentity = sourceBytes ? readSubscriptionAccountId(sourceBytes) : null;
-        if (sourceIdentity !== targetIdentity) {
+        if (options.managedRuntimeView) {
+          let usableSource = false;
+          try { usableSource = sourceBytes !== null && hasUsableAuthPayload(JSON.parse(sourceBytes.toString("utf8"))); }
+          catch { /* An unproven source cannot replace a retained credential. */ }
+          if (!usableSource) throw new Error("codex_session_credential_source_unavailable");
+          const sourceLastRefresh = readAuthLastRefreshMs(sourceBytes);
+          const targetLastRefresh = readAuthLastRefreshMs(targetBytes);
+          let usableTarget = false;
+          try { usableTarget = targetBytes !== null && hasUsableAuthPayload(JSON.parse(targetBytes.toString("utf8"))); }
+          catch { /* A damaged retained file cannot override the selected vend. */ }
+          // A runtime view cannot select another account or keep an unproven
+          // stale copy over the authorized vend. Retain a provably newer local
+          // refresh, including when an older source lacks freshness metadata.
+          keepPromotedAuth = sourceIdentity !== null && sourceIdentity === targetIdentity && usableTarget && targetLastRefresh !== null &&
+            (sourceLastRefresh === null || targetLastRefresh > sourceLastRefresh);
+        } else if (sourceIdentity !== targetIdentity) {
           keepPromotedAuth = true;
         } else {
           // Same identity: swap to the symlink only when the shared source is
@@ -786,8 +831,12 @@ export async function seedManagedCodexHome(
 
     for (const name of COPIED_SHARED_FILES) {
       const source = path.join(sourceHome, name);
-      if (!(await pathExists(source))) continue;
-      await ensureCopiedFile(path.join(targetHome, name), source);
+      if (options.managedRuntimeView) {
+        await synchronizeManagedConfigFile(path.join(targetHome, name), source);
+      } else {
+        if (!(await pathExists(source))) continue;
+        await ensureCopiedFile(path.join(targetHome, name), source);
+      }
     }
 
     await onLog(

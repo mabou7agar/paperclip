@@ -83,12 +83,16 @@ export const sessionCodec: AdapterSessionCodec = {
     const workspaceId = readNonEmptyString(record.workspaceId) ?? readNonEmptyString(record.workspace_id);
     const repoUrl = readNonEmptyString(record.repoUrl) ?? readNonEmptyString(record.repo_url);
     const repoRef = readNonEmptyString(record.repoRef) ?? readNonEmptyString(record.repo_ref);
+    const codexHome = readNonEmptyString(record.codexHome);
+    const codexHomeIdentity = readNonEmptyString(record.codexHomeIdentity);
     return {
       sessionId,
       ...(cwd ? { cwd } : {}),
       ...(workspaceId ? { workspaceId } : {}),
       ...(repoUrl ? { repoUrl } : {}),
       ...(repoRef ? { repoRef } : {}),
+      ...(codexHome ? { codexHome } : {}),
+      ...(codexHomeIdentity ? { codexHomeIdentity } : {}),
     };
   },
   serialize(params: Record<string, unknown> | null) {
@@ -102,12 +106,16 @@ export const sessionCodec: AdapterSessionCodec = {
     const workspaceId = readNonEmptyString(params.workspaceId) ?? readNonEmptyString(params.workspace_id);
     const repoUrl = readNonEmptyString(params.repoUrl) ?? readNonEmptyString(params.repo_url);
     const repoRef = readNonEmptyString(params.repoRef) ?? readNonEmptyString(params.repo_ref);
+    const codexHome = readNonEmptyString(params.codexHome);
+    const codexHomeIdentity = readNonEmptyString(params.codexHomeIdentity);
     return {
       sessionId,
       ...(cwd ? { cwd } : {}),
       ...(workspaceId ? { workspaceId } : {}),
       ...(repoUrl ? { repoUrl } : {}),
       ...(repoRef ? { repoRef } : {}),
+      ...(codexHome ? { codexHome } : {}),
+      ...(codexHomeIdentity ? { codexHomeIdentity } : {}),
     };
   },
   getDisplayId(params: Record<string, unknown> | null) {

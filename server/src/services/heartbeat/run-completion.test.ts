@@ -16,7 +16,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { appendHeartbeatRunEvent } from "../heartbeat-run-events.js";
 import { createNativeRunLogCoverageVerifier, formatNativeRunLogEvent } from "../native-runtime/native-run-log-export.js";
 import type { Db } from "@paperclipai/db";
-import { activityLog, agents, agentWakeupRequests, approvals, issueApprovals, budgetReservations, caseHandoffs, cases, companies, completionContracts, costEvents, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, heartbeatRuns, heartbeatRunEvents, issueComments, issueQuestionResponseDeliveries, issueRecoveryActions, issues, nativeRunFinalizations } from "@paperclipai/db";
+import { activityLog, agents, agentRuntimeState, agentTaskSessions, agentWakeupRequests, approvals, issueApprovals, budgetReservations, caseHandoffs, cases, companies, completionContracts, costEvents, createDb, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, heartbeatRuns, heartbeatRunEvents, issueComments, issueQuestionResponseDeliveries, issueRecoveryActions, issues, nativeRunFinalizations } from "@paperclipai/db";
 import { and, eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
@@ -102,7 +102,7 @@ function callbacks(db: Db) {
     emitTerminalAgentTaskRun: vi.fn(), budgetHooks: {},
   } satisfies HeartbeatLifecycleDependencies;
   const lifecycle = createHeartbeatLifecycle(db, lifecycleDeps);
-  return {
+  const result = {
     ...state, ...lifecycle,
     setRunStatusIfRunning: vi.fn(lifecycle.setRunStatusIfRunning),
     setWakeupStatus: vi.fn(lifecycle.setWakeupStatus),
@@ -133,6 +133,7 @@ function callbacks(db: Db) {
     processRunCancellationSettlements: new Map<string, { settled: Promise<void>; failed: boolean }>(),
     failedProcessRunCancellations: new Map<string, { settled: Promise<void>; failed: boolean }>(),
   } satisfies Dependencies;
+  return { ...result, realUpdateRuntimeState: lifecycle.updateRuntimeState };
 }
 
 it("constructs completion handlers without querying or starting work", () => {
@@ -186,6 +187,26 @@ describe.skipIf(!support.supported && !process.env.PAPERCLIP_TEST_DATABASE_URL)(
     return { run, agent, wake, deps, controller, input, completion, failure, setup };
   }
   const read = (id: string) => db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, id)).then(rows => rows[0]!);
+
+  it.each([false, true])("preserves unproven resume publication without blessing coordinates (existing=%s)", async existing => {
+    const f = await fixture();
+    const original = { sessionId: "owned-thread", codexHome: "/owned/home", paperclipAiCredentialIdentity: "old-account" };
+    await db.insert(agentRuntimeState).values({ agentId: f.agent.id, companyId: f.agent.companyId, adapterType: f.agent.adapterType, sessionId: "owned-agent-thread" });
+    if (existing) await db.insert(agentTaskSessions).values({ companyId: f.agent.companyId, agentId: f.agent.id,
+      adapterType: f.agent.adapterType, taskKey: "completion-task", sessionParamsJson: original, sessionDisplayId: "owned-thread" });
+    f.deps.updateRuntimeState.mockImplementation(f.deps.realUpdateRuntimeState);
+    f.input.adapterResult = { ...f.input.adapterResult, exitCode: 1, errorFamily: "configuration", errorCode: "resume_unproven",
+      errorMessage: "Resume proof missing", preserveSession: true, sessionId: "foreign-thread",
+      sessionParams: { sessionId: "foreign-thread", codexHome: "/foreign/home" }, resultJson: { errorFamily: "configuration", sessionResume: { retryable: false } } };
+    await f.completion.completeRun(f.input);
+    expect((await read(f.run.id)).status).toBe("failed");
+    expect(f.deps.upsertTaskSession).not.toHaveBeenCalled(); expect(f.deps.clearTaskSessions).not.toHaveBeenCalled();
+    const rows = await db.select().from(agentTaskSessions).where(eq(agentTaskSessions.agentId, f.agent.id));
+    expect(rows).toHaveLength(existing ? 1 : 0);
+    if (existing) expect(rows[0]!.sessionParamsJson).toEqual(original);
+    const [runtime] = await db.select().from(agentRuntimeState).where(eq(agentRuntimeState.agentId, f.agent.id));
+    expect(runtime!.sessionId).toBe("owned-agent-thread"); expect(runtime!.lastRunId).toBe(f.run.id);
+  });
 
   it("replays saved user intent through normal Retry after a first-attempt retained runner failure", async () => {
     for (const mode of ["unattached", "archive_failed", "provider_started", "system_wake", "stopped", "stopped_failed", "promoted"] as const) {

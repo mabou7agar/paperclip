@@ -381,12 +381,14 @@ export function describeWorkspaceRestoreFailure(code: WorkspaceRestoreFailureCod
   }
 }
 
-async function acquireDirectoryMergeLock(lockDir: string, operation?: DirectoryMergeLockOperation, waitMs: number = LOCK_WAIT_MS): Promise<() => Promise<void>> {
+async function acquireDirectoryMergeLock(lockDir: string, operation?: DirectoryMergeLockOperation, waitMs: number = LOCK_WAIT_MS, signal?: AbortSignal): Promise<() => Promise<void>> {
+  signal?.throwIfAborted();
   const startedAt = performance.now();
   const deadline = Date.now() + waitMs;
   const databasePath = `${lockDir}.sqlite`;
   const ownerPath = `${lockDir}.owner.json`;
   async function waitForLock(diagnosticOwnerPath: string) {
+    signal?.throwIfAborted();
     if (Date.now() >= deadline) {
       const timeoutError: NodeJS.ErrnoException & { workspaceRestoreLock?: Record<string, string | number | boolean> } = new Error(
         `Timed out waiting for workspace restore lock at ${lockDir}`,
@@ -421,6 +423,7 @@ async function acquireDirectoryMergeLock(lockDir: string, operation?: DirectoryM
     // Never block the event loop while another async operation holds the lock.
     database.exec("PRAGMA busy_timeout=0;");
     while (true) {
+      signal?.throwIfAborted();
       try {
         database.exec("BEGIN IMMEDIATE;");
         break;
@@ -551,7 +554,11 @@ export async function withDirectoryPublicationLock<T>(
   targetDir: string,
   fn: (canonicalTargetDir: string) => Promise<T>,
   env: NodeJS.ProcessEnv = process.env,
+  options: { waitMs?: number; signal?: AbortSignal } = {},
 ): Promise<T> {
+  // Existing publishers retain the 30s default. A cancellable lifetime owner
+  // may wait for OS lock release without failing/retrying provider work.
+  options.signal?.throwIfAborted();
   const absoluteTarget = path.resolve(targetDir);
   const parent = await fs.realpath(path.dirname(absoluteTarget));
   const canonicalTargetDir = path.join(parent, path.basename(absoluteTarget));
@@ -567,8 +574,9 @@ export async function withDirectoryPublicationLock<T>(
   await assertSafeLeaf();
   return withCanonicalDirectoryMergeLock(canonicalTargetDir, async () => {
     await assertSafeLeaf();
+    options.signal?.throwIfAborted();
     return fn(canonicalTargetDir);
-  }, env);
+  }, env, undefined, options.waitMs ?? LOCK_WAIT_MS, options.signal);
 }
 
 export async function tryWithDirectoryMergeLock<T>(targetDir: string, fn: () => Promise<T>): Promise<T | undefined> {
@@ -587,10 +595,12 @@ async function withCanonicalDirectoryMergeLock<T>(
   env: NodeJS.ProcessEnv,
   diagnosticOperation?: DirectoryMergeLockOperation,
   waitMs: number = LOCK_WAIT_MS,
+  signal?: AbortSignal,
 ): Promise<T> {
+  signal?.throwIfAborted();
   const lockRoot = await resolveDirectoryMergeLockRoot(env);
   const lockKey = createHash("sha256").update(canonicalTargetDir).digest("hex");
-  const releaseLock = await acquireDirectoryMergeLock(path.join(lockRoot, `${lockKey}.lock`), diagnosticOperation, waitMs);
+  const releaseLock = await acquireDirectoryMergeLock(path.join(lockRoot, `${lockKey}.lock`), diagnosticOperation, waitMs, signal);
   try {
     return await fn(canonicalTargetDir);
   } finally {

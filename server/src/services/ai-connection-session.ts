@@ -1,5 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import type { AiConnectionBinding } from "@paperclipai/shared";
+import { managedAiSessionIdentityCompatible } from "@paperclipai/adapter-utils/managed-ai-session-fingerprint";
+export { managedAiSessionIdentityCompatible } from "@paperclipai/adapter-utils/managed-ai-session-fingerprint";
 
 type ConfigRevision = {
   id: string;
@@ -12,16 +14,6 @@ type ConfigRevision = {
 function record(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown> : {};
-}
-
-export function managedAiSessionIdentityCompatible(
-  stored: unknown,
-  sessionIdentity: string,
-  credentialIdentity: string,
-): boolean {
-  // Legacy token identities can migrate only before any manual replacement.
-  // Replacing even the same credential bytes increments the epoch.
-  return stored === sessionIdentity || (sessionIdentity.endsWith(":0") && stored === credentialIdentity);
 }
 
 export function aiConnectionOnlyConfigRevision(revision: ConfigRevision): boolean {
