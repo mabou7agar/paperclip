@@ -137,3 +137,14 @@ it.each(["legacy", "mixed"])("names an unsupported native index for %s records w
   expect((await fs.stat(path.join(f.home, "state_6.sqlite"))).isFile()).toBe(true);
   expect((await fs.stat(f.rollout)).isFile()).toBe(true);
 });
+
+
+it.each([false, true])("reads a cleanly closed WAL index with no sidecars (bound=%s)", async bound => {
+  const f = await setup(); const db = new DatabaseSync(f.index);
+  db.exec("PRAGMA journal_mode=WAL"); db.prepare("UPDATE threads SET history_mode = 'wal' WHERE id = ?").run(thread); db.close();
+  for (const suffix of ["-wal", "-shm"]) await expect(fs.stat(f.index + suffix)).rejects.toMatchObject({ code: "ENOENT" });
+  const before = await fs.readFile(f.index);
+  const input = bound ? { ...f.input, saved: { ...f.input.saved, codexHome: f.home, codexHomeIdentity: f.input.identity } } : f.input;
+  expect(await selectCodexSessionHome(input)).toBe(f.home);
+  expect(await fs.readFile(f.index)).toEqual(before);
+});

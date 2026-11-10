@@ -726,6 +726,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     }
   }
   const executeInSelectedHome = async (): Promise<AdapterExecutionResult> => {
+  if (managedLocalSessionHome) ctx.signal?.throwIfAborted();
   if (!executionTargetIsRemote) {
     await ensureAbsoluteDirectory(cwd, { createIfMissing: true });
   }
@@ -1241,6 +1242,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           })
         : "";
     const runAttempt = async (resumeSessionId: string | null) => {
+      if (managedLocalSessionHome) ctx.signal?.throwIfAborted();
       await hydrateFreshSessionHandoff(ctx, { resumedSession: Boolean(resumeSessionId) });
       const renderedBootstrapPrompt =
         !resumeSessionId && bootstrapPromptTemplate.trim().length > 0
@@ -1371,9 +1373,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       }
 
       let resumeThreadMismatch: string | null = null;
-      let threadStartRemainder = "", skipThreadStartLine = false;
+      let threadStartRemainder = "", skipThreadStartLine = false, threadStartObserved = false;
       const observeResumeThread = (chunk: string) => {
-        if (!managedLocalSessionHome || !resumeSessionId || resumeThreadMismatch) return;
+        if (!managedLocalSessionHome || !resumeSessionId || threadStartObserved) return;
         // Inspect only bounded JSONL protocol records, before any awaited log
         // or accounting work. A changed native ID must stop this owned child
         // immediately, rather than letting its fresh-context turn complete.
@@ -1389,9 +1391,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           if (skipThreadStartLine) { skipThreadStartLine = false; continue; }
           let event;
           try { event = JSON.parse(line); } catch { continue; }
-          if (event?.type === "thread.started" && typeof event.thread_id === "string" && event.thread_id !== resumeSessionId) {
-            resumeThreadMismatch = event.thread_id;
-            if (killTarget) signalCodexChild(killTarget, "SIGKILL");
+          if (event?.type === "thread.started" && typeof event.thread_id === "string") {
+            threadStartObserved = true;
+            if (event.thread_id !== resumeSessionId) {
+              resumeThreadMismatch = event.thread_id;
+              if (killTarget) signalCodexChild(killTarget, "SIGKILL");
+            }
             return;
           }
         }
@@ -1463,6 +1468,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         if (onSpawn) {
           await onSpawn(meta);
         }
+        if (managedLocalSessionHome && ctx.signal?.aborted) {
+          signalCodexChild(killTarget, "SIGKILL");
+          ctx.signal.throwIfAborted();
+        }
       };
 
       const consumeAccounting = createCodexJsonlParser();
@@ -1471,6 +1480,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         return { usage: parsed.usageReported ? parsed.usage : undefined, costStatus: parsed.usageComplete ? undefined : "unpriced", usageBasis: "per_run", provider: "openai", biller, billingType, model, pricingContext, costUsd: null, complete: parsed.usageComplete };
       });
       try {
+        if (managedLocalSessionHome) ctx.signal?.throwIfAborted();
         const proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, command, args, {
           onProcessStopped: providerStop.beginInvocation(),
           cwd,
@@ -1833,8 +1843,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     await fs.mkdir(path.dirname(configuredCodexHome), { recursive: true, mode: 0o700 });
     // Lock the actual selected home, including legacy homes shared by old
     // task records. SQLite ownership is OS-released on crash, never aged out.
-    // The bounded acquisition wait does not expire a holder's lifetime lease.
-    return withDirectoryPublicationLock(configuredCodexHome, executeInSelectedHome);
+    // Waiting consumes no provider attempt or recovery budget. A live owner
+    // can run for hours; operator cancellation still stops a waiter promptly.
+    await ctx.onCancellationReady?.();
+    return withDirectoryPublicationLock(configuredCodexHome, executeInSelectedHome, process.env,
+      { waitMs: Number.POSITIVE_INFINITY, signal: ctx.signal });
   }
   return executeInSelectedHome();
 }

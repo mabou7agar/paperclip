@@ -11,7 +11,7 @@ import { attachPaperclipSessionMetadataToSessionParams, resolveTaskSessionConfig
 const roots: string[] = [];
 afterEach(async () => { vi.unstubAllEnvs(); await Promise.all(roots.splice(0).map(root => fs.rm(root, { recursive: true, force: true }))); });
 
-it.each(["current", "lock-busy", "compatible-config", "config-removed", "config-filesystem-error", "home-filesystem-error", "legacy", "token", "missing", "changed", "newer-refresh", "source-missing", "source-missing-link", "source-invalid", "source-filesystem-error", "source-missing-target", "accountless-residue", "damaged-residue", "wrong-account-residue"] as const)("preserves managed native state across disposable vends: %s", async mode => {
+it.each(["current", "lease-wait", "lease-abort", "cancel-before-launch", "compatible-config", "config-removed", "config-filesystem-error", "home-filesystem-error", "legacy", "token", "missing", "changed", "newer-refresh", "source-missing", "source-missing-link", "source-invalid", "source-filesystem-error", "source-missing-target", "accountless-residue", "damaged-residue", "wrong-account-residue"] as const)("preserves managed native state across disposable vends: %s", async mode => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "codex-cli-continuity-")); roots.push(root);
   const cwd = path.join(root, "workspace"); await fs.mkdir(cwd);
   vi.stubEnv("PAPERCLIP_HOME", path.join(root, "paperclip")); vi.stubEnv("PAPERCLIP_INSTANCE_ID", "continuity");
@@ -55,6 +55,8 @@ if (resume && mode === 'changed') {
 } else console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:1,output_tokens:1}}));
 `); await fs.chmod(command, 0o755);
   const fingerprints: Array<{ identity: string; task: string; fingerprint: string }> = [];
+  let invocationSignal: AbortSignal | undefined;
+  let launchCancellation: AbortController | undefined;
   let previousMetadata: Awaited<ReturnType<typeof buildEffectiveRunSessionConfigMetadata>> | undefined;
   const invoke = async (generation: string, runtime: Parameters<typeof execute>[0]["runtime"], identity = "account:epoch:0", task = "task-one") => {
     const home = path.join(root, generation), provider = path.join(home, "provider"); await fs.mkdir(provider, { recursive: true });
@@ -85,7 +87,7 @@ if (resume && mode === 'changed') {
       expect(resolveTaskSessionConfigFreshness({ ...input, compatibleConfigMetadata: [previousMetadata!] }).reset).toBe(false);
     }
     const result = await execute({ runId: generation, agent: { id: "agent-one", companyId: "company-one", name: "Sol", adapterType: "codex_local", adapterConfig: {} }, runtime,
-      config, sessionConfigFingerprint: metadata.fingerprint, context: { issueId: task }, onLog: async () => {},
+      config, signal: invocationSignal, onMeta: async () => { launchCancellation?.abort(); }, sessionConfigFingerprint: metadata.fingerprint, context: { issueId: task }, onLog: async () => {},
     });
     // Same persistence decorator used by runtime-execution and run-completion.
     // session-preparation supplies the resolved managed account epoch.
@@ -121,7 +123,15 @@ if (resume && mode === 'changed') {
     await fs.writeFile(path.join(old, "skills", "revoked-private-skill"), "old capability must not remain launchable");
   }
   await fs.writeFile(control, mode === "missing" || mode === "changed" ? mode : "");
-  if (mode === "lock-busy") {
+  if (mode === "cancel-before-launch") {
+    launchCancellation = new AbortController(); invocationSignal = launchCancellation.signal;
+    try {
+      await expect(invoke("vend-two-refreshed-token", { ...fresh, sessionId: first.sessionId, sessionParams: saved })).rejects.toMatchObject({ name: "AbortError" });
+      expect((await fs.readFile(capture, "utf8")).trim().split("\n")).toHaveLength(1);
+    } finally { launchCancellation = undefined; invocationSignal = undefined; }
+    return;
+  }
+  if (mode === "lease-wait" || mode === "lease-abort") {
     const home = String(saved.codexHome), env = { PAPERCLIP_HOME: path.join(root, "paperclip"), PAPERCLIP_INSTANCE_ID: "continuity" };
     await fs.mkdir(path.join(home, "skills"), { recursive: true });
     await fs.writeFile(path.join(home, "skills", "held-inventory"), "must remain");
@@ -130,17 +140,40 @@ if (resume && mode === 'changed') {
     const gate = new Promise<void>(resolve => { release = resolve; }), held = new Promise<void>(resolve => { started = resolve; });
     const owner = directoryLocks.withDirectoryPublicationLock(home, async () => { started(); await gate; }, env);
     await held;
-    // Only shorten the existing helper's acquisition wait in this test; retain
-    // real SQLite ownership and the adapter's complete preparation/launch path.
-    const shortWait = vi.spyOn(directoryLocks, "withDirectoryPublicationLock").mockImplementation(async function<T>(target: string, fn: (canonical: string) => Promise<T>, lockEnv?: NodeJS.ProcessEnv): Promise<T> {
-      return directoryLocks.withDirectoryMergeLock(target, fn, lockEnv, undefined, 20);
-    });
+    const controller = new AbortController(); invocationSignal = controller.signal;
+    let settled = false;
+    const waitPolicy = vi.spyOn(directoryLocks, "withDirectoryPublicationLock");
+    const pending = invoke("vend-two-refreshed-token", { ...fresh, sessionId: first.sessionId, sessionParams: saved });
+    const outcome = pending.then(result => { settled = true; return { result }; }, error => { settled = true; return { error }; });
     try {
-      await expect(invoke("vend-two-refreshed-token", { ...fresh, sessionId: first.sessionId, sessionParams: saved })).rejects.toMatchObject({ code: directoryLocks.WORKSPACE_RESTORE_LOCK_TIMEOUT_CODE });
+      // Longer than the utility's isolated20ms timeout test, with the actual
+      // production lifetime policy explicitly verified as an unbounded wait.
+      await vi.waitFor(() => expect(waitPolicy.mock.calls.length).toBe(1), { timeout: 2_000, interval: 10 });
+      await new Promise(resolve => setTimeout(resolve, 100));
+      expect(waitPolicy.mock.calls.length).toBe(1);
+      const [lockedPath, , , options] = waitPolicy.mock.calls[0]!;
+      expect(await fs.realpath(lockedPath)).toBe(await fs.realpath(home));
+      expect(options?.waitMs).toBe(Infinity); expect(options?.signal === controller.signal).toBe(true);
+      expect(settled).toBe(false);
       expect(await Promise.all(["auth.json", "config.toml", "skills/held-inventory"].map(name => fs.readFile(path.join(home, name))))).toEqual(before);
       expect((await fs.readFile(capture, "utf8")).trim().split("\n")).toHaveLength(1);
       await expect(fs.stat(path.join(home, "fixture-active-cli"))).rejects.toMatchObject({ code: "ENOENT" });
-    } finally { shortWait.mockRestore(); release(); await owner; }
+      if (mode === "lease-abort") {
+        controller.abort(); const value = await outcome;
+        expect(value).toHaveProperty("error");
+        expect((value as { error: Error }).error.name).toBe("AbortError");
+        expect((await fs.readFile(capture, "utf8")).trim().split("\n")).toHaveLength(1);
+      } else {
+        release(); await owner; const value = await outcome;
+        expect(value).toHaveProperty("result");
+        expect((value as { result: Awaited<ReturnType<typeof execute>> }).result).toMatchObject({ exitCode: 0, sessionId: first.sessionId });
+        expect((await fs.readFile(capture, "utf8")).trim().split("\n")).toHaveLength(2);
+      }
+    } finally {
+      if (!settled) controller.abort();
+      release(); await owner; await outcome;
+      waitPolicy.mockRestore(); invocationSignal = undefined;
+    }
     return;
   }
   if (mode === "home-filesystem-error") {
