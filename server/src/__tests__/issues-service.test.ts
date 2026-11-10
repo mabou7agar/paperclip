@@ -6762,6 +6762,42 @@ describeEmbeddedPostgres("issueService.assertCheckoutOwner stale checkout adopti
       .toHaveLength(0);
   });
 
+  it("fences late legacy writes under the database lock after an agent handoff", async () => {
+    const seeded = await seedOwnershipIssue({ checkoutStatus: "failed", assigneeMatchesActor: false });
+    const original = await svc.getById(seeded.issueId);
+    await db.update(heartbeatRuns).set({ contextSnapshot: { issueId: seeded.issueId } })
+      .where(eq(heartbeatRuns.id, seeded.actorRunId));
+    // The actor first owns the issue; a native handoff records its run receipt
+    // atomically before clearing execution/checkout ownership.
+    await db.update(issues).set({ assigneeAgentId: seeded.actorAgentId }).where(eq(issues.id, seeded.issueId));
+    await svc.update(seeded.issueId, { status: "in_review", assigneeAgentId: seeded.assigneeAgentId,
+      executionState: { status: "pending", currentStageId: randomUUID(), currentStageIndex: 0, currentStageType: "review",
+        currentParticipant: { type: "agent", agentId: seeded.assigneeAgentId, userId: null }, completedStageIds: [],
+        returnAssignee: { type: "agent", agentId: seeded.actorAgentId, userId: null }, lastDecisionId: null, lastDecisionOutcome: null },
+      actorAgentId: seeded.actorAgentId, actorRunId: seeded.actorRunId });
+    const [receipt] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.actorRunId));
+    expect(receipt.resultJson?.legacyWorkflowHandoffIssueId).toBe(seeded.issueId);
+    // Simulate a request admitted against the outgoing owner's earlier snapshot.
+    // The service must use its current locked row, not the route's earlier read.
+    await expect(svc.update(seeded.issueId, { title: "Stale outgoing edit",
+      actorAgentId: seeded.actorAgentId, actorRunId: seeded.actorRunId }))
+      .rejects.toMatchObject({ status: 403, details: { code: "issue_handed_off" } });
+    await expect(svc.update(seeded.issueId, { status: "done",
+      actorAgentId: seeded.actorAgentId, actorRunId: seeded.actorRunId }))
+      .rejects.toMatchObject({ status: 403, details: { code: "issue_handed_off" } });
+    expect(await svc.getById(seeded.issueId)).toMatchObject({ title: original!.title, status: "in_review",
+      assigneeAgentId: seeded.assigneeAgentId });
+  });
+
+  it("allows a same-task manager run without an outgoing ownership receipt", async () => {
+    const seeded = await seedOwnershipIssue({ checkoutStatus: "failed", assigneeMatchesActor: false });
+    await db.update(heartbeatRuns).set({ contextSnapshot: { issueId: seeded.issueId } })
+      .where(eq(heartbeatRuns.id, seeded.actorRunId));
+    const updated = await svc.update(seeded.issueId, { title: "Manager clarification",
+      actorAgentId: seeded.actorAgentId, actorRunId: seeded.actorRunId });
+    expect(updated?.title).toBe("Manager clarification");
+  });
+
   it("lets the current assignee adopt a stale terminal checkout owner", async () => {
     const seeded = await seedOwnershipIssue({ checkoutStatus: "failed" });
 

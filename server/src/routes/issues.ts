@@ -18,7 +18,7 @@ import { issueSummariesQuerySchema, type IssueSummary } from "@paperclipai/share
 import { listIssueSummaries } from "../services/issue-summaries.js";
 import { listIssueStatusBlockerAttention } from "../services/issue-status-presentation.js";
 import { assertNoCaseHandoffMutation } from "../services/heartbeat/case-handoff-lifecycle.js";
-import { assertLegacyRunTaskOwnership } from "../legacy-run-task-ownership.js";
+import { assertLegacyRunTaskOwnership, isLegacyRunSelfHandoff } from "../legacy-run-task-ownership.js";
 import { runRetainsIssueIdentity } from "../services/task-repository-acquisition.js";
 import { withConversationReadState } from "../services/agent-chat-read-state.js";
 import { markIssueReadSchema } from "@paperclipai/shared";
@@ -5784,6 +5784,7 @@ export function issueRoutes(
       assigneeAgentId: string | null;
       assigneeUserId: string | null;
       reviewPolicy?: IssueReviewPolicy | null;
+      executionState?: unknown;
       /** Used only to name the task in denial copy (plan §6). */
       identifier?: string | null;
     },
@@ -5797,9 +5798,9 @@ export function issueRoutes(
       return false;
     }
     if (req.actor.source === "agent_jwt" && req.actor.runId &&
-        issue.assigneeAgentId === null && issue.assigneeUserId) {
-      const run = await heartbeat.getRun(req.actor.runId);
-      if (run?.agentId === actorAgentId) assertLegacyRunTaskOwnership(run, issue);
+        issue.assigneeAgentId !== actorAgentId) {
+      const run = await heartbeat.getRun(req.actor.runId, { includeExecutionEvidence: true });
+      if (run?.agentId === actorAgentId) assertLegacyRunTaskOwnership(run, issue, actorAgentId);
     }
     // Task-watchdog runs receive a scoped *grant* to mutate issues inside the
     // watched subtree. This must be evaluated before the base assignee-ownership
@@ -15181,18 +15182,18 @@ export function issueRoutes(
           agentId: existing.assigneeAgentId,
         });
         const runToStopForReassignment = await resolveActiveIssueRun(existing);
-        const isHumanSelfHandoff =
-          req.actor.type === "agent" &&
-          req.actor.source === "agent_jwt" &&
-          nextAssigneeAgentId === null &&
-          typeof nextAssigneeUserId === "string" &&
-          req.actor.agentId === existing.assigneeAgentId &&
-          runToStopForReassignment?.runtimeMode === "legacy" &&
-          runToStopForReassignment.id === req.actor.runId &&
-          runToStopForReassignment.agentId === req.actor.agentId &&
-          runToStopForReassignment.companyId === existing.companyId &&
-          runToStopForReassignment.contextSnapshot?.issueId === existing.id;
-        if (runToStopForReassignment && !isHumanSelfHandoff) {
+        const isSelfHandoff = isLegacyRunSelfHandoff({
+          actor: req.actor,
+          issue: existing,
+          run: runToStopForReassignment,
+          targetAgentId: nextAssigneeAgentId,
+          targetUserId: nextAssigneeUserId,
+          workflowControlledAssignment: transition.workflowControlledAssignment,
+          explicitAssignee: Object.hasOwn(req.body, "assigneeAgentId") || Object.hasOwn(req.body, "assigneeUserId"),
+          status: updateFields.status,
+          executionState: updateFields.executionState,
+        });
+        if (runToStopForReassignment && !isSelfHandoff) {
           let cancelled: Awaited<ReturnType<typeof heartbeat.cancelRun>> = null;
           try {
             cancelled = await heartbeat.cancelRun(

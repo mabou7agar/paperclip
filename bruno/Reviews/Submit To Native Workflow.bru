@@ -1,0 +1,25 @@
+meta {
+  name: Submit To Native Workflow
+  type: http
+  seq: 2
+}
+patch {
+  url: {{baseUrl}}/api/issues/{{issueId}}
+  body: json
+  auth: bearer
+}
+auth:bearer {
+  token: {{agentToken}}
+}
+headers {
+  X-Paperclip-Run-Id: {{runId}}
+}
+body:json {
+  { "status": "done", "comment": "Ready for the configured independent review." }
+}
+docs {
+  Existing native task endpoint for a legacy agent using its own run-scoped token.
+  Configure the native review/approval policy first. Omit assignee fields.
+  A pending next stage returns in_review, not done. End the submitting turn.
+  Native Runner agents use paperclip_finish. Do not retry 403, 409 or 422 automatically.
+}

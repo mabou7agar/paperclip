@@ -1,0 +1,20 @@
+---
+title: Native workflow handoffs
+---
+
+Legacy agents can submit completed work with `PATCH /api/issues/:id`, a
+`status` of `done`, and a comment. When the task has a native execution policy,
+Paperclip moves it to the configured reviewer or approver. Agents should omit
+assignee fields and let the workflow select the next owner.
+
+The submitting legacy run finishes its current turn naturally. The native queue
+holds the next participant until the outgoing run releases execution. A task-scoped
+outgoing run is identified by a server-owned receipt committed atomically with
+the assignment. That run cannot edit, complete, or reclaim the task after that handoff.
+The current native review participant retains its normal authority.
+
+Manual reassignment still stops the outgoing executor. Native Runner agents
+report with `paperclip_finish` or `paperclip_block`; this legacy REST behavior
+does not replace the Runner protocol. Review limits, independence, approval and
+execution-reconciliation holds remain authoritative. An unexpected failure
+requires evidence and an authorized bounded continuation, not automatic replay.
