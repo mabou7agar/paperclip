@@ -61,6 +61,14 @@ it("reports an explicitly bound corrupt native index as unproven, not missing", 
     codexHome: f.home, codexHomeIdentity: f.input.identity } })).rejects.toThrow("codex_session_home_unproven");
 });
 
+it("retains unknown native index versions and refuses them by name before any provider launch", async () => {
+  const f = await setup(); await fs.rename(f.index, path.join(f.home, "state_6.sqlite"));
+  await expect(selectCodexSessionHome({ ...f.input, saved: { ...f.input.saved,
+    codexHome: f.home, codexHomeIdentity: f.input.identity } })).rejects.toThrow("codex_session_index_schema_unsupported");
+  expect((await fs.stat(path.join(f.home, "state_6.sqlite"))).isFile()).toBe(true);
+  expect((await fs.stat(f.rollout)).isFile()).toBe(true);
+});
+
 it.each(["account", "config", "foreign-home", "missing", "header", "symlink-file", "symlink-root", "view", "duplicate", "bound-limit"])("refuses %s evidence without modifying or deleting retained state", async mode => {
   const f = await setup(); let input = f.input;
   if (mode === "account") input = { ...input, credentialIdentity: "another-account" };
@@ -76,4 +84,19 @@ it.each(["account", "config", "foreign-home", "missing", "header", "symlink-file
   await expect(selectCodexSessionHome(input)).rejects.toThrow("codex_session_home_");
   // Refusal is observational; original records remain available for recovery.
   if (mode !== "symlink-root") expect((await fs.stat(f.index)).isFile()).toBe(true);
+});
+
+
+it.each([false, true])("propagates a transient locked native index (bound=%s)", async bound => {
+  const f = await setup();
+  const db = new DatabaseSync(f.index); db.exec("BEGIN EXCLUSIVE");
+  const input = bound ? { ...f.input, saved: { ...f.input.saved, codexHome: f.home, codexHomeIdentity: f.input.identity } } : f.input;
+  try { await expect(selectCodexSessionHome(input)).rejects.toMatchObject({ errcode: 5 }); }
+  finally { db.exec("ROLLBACK"); db.close(); }
+});
+
+it("propagates root filesystem failures instead of declaring native evidence invalid", async () => {
+  const f = await setup();
+  // A non-directory root deterministically fails on every supported uid/OS.
+  await expect(selectCodexSessionHome({ ...f.input, roots: [f.rollout] })).rejects.toMatchObject({ code: "ENOTDIR" });
 });

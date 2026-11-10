@@ -52,6 +52,11 @@ retention policy and archive only completed state under that policy. If more tha
 128 legacy homes remain, keep them intact and escalate once for a scoped migration;
 do not repeatedly wake tasks, raise the lookup cap, or clear their saved IDs.
 
+Native index qualification currently covers `state_5.sqlite` from Codex CLI
+0.167.0. That native index owns the immutable rollout path. A different retained
+index version is refused by name and kept intact until that version is qualified.
+Do not substitute a directory scan or fresh provider session for unproven state.
+
 ## Failure behavior
 
 For managed local sessions, a missing native session no longer causes a hidden
@@ -75,6 +80,7 @@ Permanent diagnostic codes include:
 - `codex_session_resume_unavailable`: the CLI rejected the retained thread.
 - `codex_session_identity_changed`: the CLI returned a replacement thread.
 - `codex_session_credential_source_unavailable`: credential reconciliation failed.
+- `codex_session_index_schema_unsupported`: the retained native index needs qualification.
 
 Keep these refusals visible to the responsible lead. Retain original state for
 investigation; do not clear sessions, repeatedly wake the worker, or convert a
@@ -89,3 +95,7 @@ missing native evidence, and exactly one invocation on resume failure.
 Live handoff acceptance additionally compares actual before/after worker and CTO
 IDs, original plan revisions, native wake receipts, and a quiet window after
 completion. Session-reused flags alone are insufficient.
+
+Managed runtime views synchronize copied configuration on every launch, including removals. Caller-owned homes retain their existing seeding policy. Unrelated filesystem errors retain the normal recovery classification.
+
+Managed native runs are serialized for the entire CLI lifetime by the shared process-safe directory lease, including taskless callers. Config writes use private atomic replacements. Missing legacy history is retained as a visible refusal; an operator must locate and verify the original history or explicitly authorize a new conversation. A failed automatic resume never authorizes that reset.

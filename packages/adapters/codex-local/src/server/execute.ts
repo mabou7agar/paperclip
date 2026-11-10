@@ -4,6 +4,7 @@ import { prepareCodexObservabilityProfile, selectedCodexProfile, replaceCodexPro
 import { createProviderStoppedBoundary } from "@paperclipai/adapter-utils/provider-stopped-boundary";
 import { createUsageCheckpointLog } from "@paperclipai/adapter-utils/usage-checkpoint";
 import { createHash } from "node:crypto";
+import { withDirectoryPublicationLock } from "@paperclipai/adapter-utils/workspace-restore-merge";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -577,6 +578,25 @@ export async function ensureCodexSkillsInjected(
 }
 
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
+  const config = parseObject(ctx.config), env = parseObject(config.env);
+  const target = readAdapterExecutionTarget({ executionTarget: ctx.executionTarget,
+    legacyRemoteExecution: ctx.executionTransport?.remoteExecution });
+  const managed = Boolean(asString(parseObject(config.managedAiConnection).sessionIdentity, ""))
+    && !adapterExecutionTargetIsRemote(target) && typeof env.HOME === "string"
+    && env.CODEX_HOME === path.join(env.HOME, "provider");
+  if (!managed) return executeWithSessionLease(ctx);
+  // Retained homes contain a live native DB plus launch config and skills.
+  // Serialize the entire provider lifetime, including copy-back and cleanup,
+  // even for direct adapter callers and taskless runs. Reuse the shared
+  // process-safe, crash-releasing lock; never race a second CLI on one thread.
+  const scope = path.join(resolveManagedCodexHomeDir(process.env, ctx.agent.companyId), "native-session-leases", ctx.agent.id);
+  await fs.mkdir(scope, { recursive: true, mode: 0o700 });
+  const key = createHash("sha256").update(JSON.stringify(ctx.runtime.taskKey
+    ?? ctx.context.taskKey ?? ctx.context.issueId ?? ctx.context.taskId ?? null)).digest("hex");
+  return withDirectoryPublicationLock(path.join(scope, key), () => executeWithSessionLease(ctx));
+}
+
+async function executeWithSessionLease(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
   const providerStop = createProviderStoppedBoundary(ctx.onProviderStopped);
   const engineSelection = await resolveCodexExecutionEngineForRun(ctx);
   if (engineSelection.unavailableReason) {
@@ -714,7 +734,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
             path.join(resolveManagedCodexHomeDir(process.env, agent.companyId), group, agent.id)),
         });
       } catch (error) {
-        const code = error instanceof CodexSessionHomeError ? error.code : "codex_session_home_unproven";
+        if (!(error instanceof CodexSessionHomeError)) throw error;
+        const code = error.code;
         return { exitCode: 1, signal: null, timedOut: false, errorCode: code, errorFamily: "configuration",
           errorMessage: "Saved Codex home could not be proven; retained session was not replaced.",
           sessionId: savedId || null, sessionParams: runtime.sessionParams, sessionDisplayId: savedId || null,
@@ -773,7 +794,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         apiKey: configuredOpenAiApiKey, managedRuntimeView: managedLocalSessionHome,
       });
     } catch (error) {
-      if (!managedLocalSessionHome) throw error;
+      if (!managedLocalSessionHome || !(error instanceof Error)
+        || error.message !== "codex_session_credential_source_unavailable") throw error;
       return { exitCode: 1, signal: null, timedOut: false, errorFamily: "configuration",
         errorCode: "codex_session_credential_source_unavailable",
         errorMessage: "Managed Codex credential view could not be reconciled; retained state was not replaced.",

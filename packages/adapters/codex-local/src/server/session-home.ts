@@ -5,6 +5,9 @@ import { DatabaseSync } from "node:sqlite";
 import { managedAiSessionIdentityCompatible } from "@paperclipai/adapter-utils/managed-ai-session-fingerprint";
 
 const MAX_LEGACY_HOMES = 128;
+// Qualified with Codex CLI 0.167.0, whose index owns the immutable rollout path.
+// Unknown native formats require qualification; do not guess or fresh-retry.
+const CODEX_NATIVE_INDEX_FILE = "state_5.sqlite";
 const UUID = /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i;
 
 export class CodexSessionHomeError extends Error {
@@ -39,12 +42,17 @@ async function directory(candidate: string, root: string): Promise<string | null
 /** Inspect only the selected native index row and its bounded identity header.
  * Never rewrite an index, copy credentials, or read provider conversation items. */
 async function ownsThread(home: string, threadId: string, strict = false): Promise<boolean> {
-  const sqlite = path.join(home, "state_5.sqlite");
+  const sqlite = path.join(home, CODEX_NATIVE_INDEX_FILE);
   try {
     const stat = await fs.lstat(sqlite);
     if (!stat.isFile() || stat.isSymbolicLink()) return false;
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      if (strict && (await fs.readdir(home)).some(name => /^state_\d+\.sqlite$/.test(name))) {
+        throw new CodexSessionHomeError("codex_session_index_schema_unsupported");
+      }
+      return false;
+    }
     throw error;
   }
   let db: DatabaseSync | undefined;
@@ -56,7 +64,11 @@ async function ownsThread(home: string, threadId: string, strict = false): Promi
     if (schema?.type !== "table" || typeof schema.sql !== "string" || /CREATE\s+VIRTUAL/i.test(schema.sql)) return false;
     if (!db.prepare("PRAGMA table_info(threads)").all().some(column => column.name === "id" && column.pk === 1)) return false;
     row = db.prepare("SELECT id, rollout_path FROM threads WHERE id = ?").get(threadId);
-  } catch {
+  } catch (error) {
+    // Only qualified structural failures establish unusable evidence. Busy,
+    // locked, descriptor/resource and I/O failures retain normal recovery.
+    const sqliteCode = (error as { errcode?: number }).errcode;
+    if (sqliteCode === undefined || ![1, 11, 17, 26].includes(sqliteCode & 0xff)) throw error;
     // No selected row was established. A corrupt unrelated sibling cannot
     // hide a valid retained home. Matched-row proof failures below still stop.
     if (strict) throw new CodexSessionHomeError("codex_session_home_unproven");
@@ -64,7 +76,10 @@ async function ownsThread(home: string, threadId: string, strict = false): Promi
   } finally { db?.close(); }
   if (!row) return false;
   if (typeof row.rollout_path !== "string") throw new CodexSessionHomeError("codex_session_home_unproven");
-  const target = await fs.realpath(row.rollout_path);
+  const target = await fs.realpath(row.rollout_path).catch(error => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new CodexSessionHomeError("codex_session_home_unproven");
+    throw error;
+  });
   if (!["sessions", "archived_sessions"].some(part => target.startsWith(path.join(home, part) + path.sep)) ||
       !target.endsWith(`-${threadId}.jsonl`)) throw new CodexSessionHomeError("codex_session_home_unproven");
   const file = await fs.open(target, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
@@ -74,8 +89,13 @@ async function ownsThread(home: string, threadId: string, strict = false): Promi
     const { bytesRead } = await file.read(buffer, 0, buffer.length, 0);
     const newline = buffer.subarray(0, bytesRead).indexOf(10);
     if (newline < 0) throw new CodexSessionHomeError("codex_session_home_unproven");
-    const header = JSON.parse(buffer.subarray(0, newline).toString("utf8"));
-    if (header.type !== "session_meta" || header.payload?.id !== threadId) throw new CodexSessionHomeError("codex_session_home_unproven");
+    let header;
+    try { header = JSON.parse(buffer.subarray(0, newline).toString("utf8")); }
+    catch (error) {
+      if (error instanceof SyntaxError) throw new CodexSessionHomeError("codex_session_home_unproven");
+      throw error;
+    }
+    if (!header || typeof header !== "object" || header.type !== "session_meta" || header.payload?.id !== threadId) throw new CodexSessionHomeError("codex_session_home_unproven");
     return true;
   } finally { await file.close(); }
 }
