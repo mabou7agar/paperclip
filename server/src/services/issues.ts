@@ -1,4 +1,4 @@
-import { assertCanCreateProgressReview, assertReviewProgressOwner, assertCanChangeProgressReview, assertReviewProgressStateWrite, assertReviewProgressStateShape } from "./issue-review-progress.js";
+import { assertCanCreateProgressReview, assertReviewProgressOwner, assertCanChangeProgressReview, assertReviewProgressStateWrite, assertReviewProgressStateShape, reconcileReviewProgressSnapshot, type ReviewProgressSnapshot } from "./issue-review-progress.js";
 import { recordTaskCompletionReceipt, completionReceiptForRun } from "./task-completion-receipts.js";
 import { completionAcknowledgement, acknowledgeCompletionReceipt } from "../repositories/task-completion-receipts.js";
 import { recordMcpAttachmentCleanup, type McpAttachmentCleanup } from "./public-mcp/upload-cleanup.js";
@@ -11233,7 +11233,7 @@ export function issueService(db: Db) {
         /** Server-derived trusted board authority, not a public API field. */
         allowProgressReviewConfiguration?: boolean;
         /** Server-owned optimistic fence for reviewer progress computed from a snapshot. */
-        expectedReviewSnapshot?: Pick<typeof issues.$inferSelect, "executionState" | "executionPolicy" | "status" | "assigneeAgentId" | "assigneeUserId"> & Partial<Pick<typeof issues.$inferSelect, "responsibleUserId" | "createdByUserId">>;
+        expectedReviewSnapshot?: ReviewProgressSnapshot;
         /** Defaults to `flatten` for parent changes. Board-user routes pass `allow_nested`. */
         parentDepthPolicy?: IssueParentDepthPolicy;
         /**
@@ -11602,9 +11602,13 @@ export function issueService(db: Db) {
           .for("update")
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!receiptExisting) return null;
-        if (expectedReviewSnapshot && Object.entries(expectedReviewSnapshot).some(([key, value]) =>
-          !isDeepStrictEqual(receiptExisting[key as keyof typeof receiptExisting], value))) {
-          throw conflict("The review changed while this decision was checked. Read the current review before deciding.", { code: "review_progress_snapshot_changed" });
+        if (expectedReviewSnapshot) {
+          const nextReviewState = reconcileReviewProgressSnapshot({ expected: expectedReviewSnapshot,
+            current: receiptExisting, nextState: issueData.executionState });
+          if (issueData.executionState !== undefined) {
+            issueData.executionState = nextReviewState;
+            patch.executionState = nextReviewState;
+          }
         }
         const nextReviewPolicy = issueData.executionPolicy === undefined ? receiptExisting.executionPolicy : issueData.executionPolicy;
         const nextResponsibleUserId = issueData.responsibleUserId === undefined ? receiptExisting.responsibleUserId : issueData.responsibleUserId;

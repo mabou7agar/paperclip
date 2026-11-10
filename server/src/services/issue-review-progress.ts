@@ -82,12 +82,41 @@ export function assertCanChangeProgressReview(input: {
 
 export interface ReviewProgressSnapshot {
   status: string;
-  assigneeAgentId: string | null;
-  assigneeUserId: string | null;
-  executionPolicy: Record<string, unknown> | null;
-  executionState: Record<string, unknown> | null;
+  assigneeAgentId?: string | null;
+  assigneeUserId?: string | null;
+  executionPolicy?: Record<string, unknown> | null;
+  executionState?: Record<string, unknown> | null;
   responsibleUserId?: string | null;
   createdByUserId?: string | null;
+}
+
+/** Monitor receipts are independent of review decisions. Preserve a concurrent
+ * monitor write unless this transition itself changes the monitor, in which
+ * case both writers must agree on the original monitor receipt. */
+export function reconcileReviewProgressSnapshot(input: {
+  expected: ReviewProgressSnapshot; current: ReviewProgressSnapshot;
+  nextState?: Record<string, unknown> | null;
+}): Record<string, unknown> | null | undefined {
+  const { expected, current, nextState } = input;
+  const withoutMonitor = (state: Record<string, unknown> | null | undefined) => {
+    if (state == null) return state;
+    const { monitor: _monitor, ...review } = state;
+    return review;
+  };
+  const changed = Object.entries(expected).some(([key, value]) => key === "executionState"
+    ? !isDeepStrictEqual(withoutMonitor(value), withoutMonitor(current.executionState))
+    : !isDeepStrictEqual(current[key as keyof ReviewProgressSnapshot], value));
+  const writesMonitor = nextState !== undefined &&
+    !isDeepStrictEqual(nextState?.monitor ?? null, expected.executionState?.monitor ?? null);
+  if (changed || (writesMonitor && !isDeepStrictEqual(current.executionState?.monitor ?? null, expected.executionState?.monitor ?? null))) {
+    throw conflict("The review changed while this decision was checked. Read the current review before deciding.", { code: "review_progress_snapshot_changed" });
+  }
+  if (nextState && !writesMonitor) {
+    const { monitor: _monitor, ...review } = nextState;
+    return current.executionState && Object.hasOwn(current.executionState, "monitor")
+      ? { ...review, monitor: current.executionState.monitor } : review;
+  }
+  return nextState;
 }
 
 /** Any review-state producer must fence changes; monitor-only writes can retain current review state. */
@@ -110,6 +139,6 @@ export function assertReviewProgressStateWrite(input: {
 /** Preserve unsupported saved review state rather than restarting its counters. */
 export function assertReviewProgressStateShape(enabled: boolean, state: unknown, status?: string) {
   if (enabled && status !== "cancelled" && state != null && !issueExecutionStateSchema.safeParse(state).success) {
-    throw unprocessable("Saved progress review state is unsupported; preserve it and ask the owner to re-scope", { code: "review_progress_state_invalid" });
+    throw unprocessable("Saved progress review state is unsupported; preserve it for investigation or ask the owner to cancel the task", { code: "review_progress_state_invalid" });
   }
 }

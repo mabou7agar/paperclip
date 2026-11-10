@@ -15335,11 +15335,7 @@ export function issueRoutes(
         allowProgressReviewConfiguration: req.actor.type === "board" && req.actor.source !== "mcp_oauth",
         expectedExecutionPolicy,
         expectedStatusVersion,
-        ...(reviewAssessment || nextExecutionPolicy?.reviewGuard || previousExecutionPolicy?.reviewGuard ? { expectedReviewSnapshot: {
-          executionState: existing.executionState, executionPolicy: existing.executionPolicy,
-          status: existing.status, assigneeAgentId: existing.assigneeAgentId, assigneeUserId: existing.assigneeUserId,
-          responsibleUserId: existing.responsibleUserId, createdByUserId: existing.createdByUserId,
-        } } : {}),
+        expectedReviewSnapshot: transition.expectedReviewSnapshot,
         actorAgentId: actor.agentId ?? null,
         actorRunId: actor.agentId ? actor.runId : null,
         actorRunStopId: actor.agentId && interruptedRunId === actor.runId ? issueMutationStopId : null,

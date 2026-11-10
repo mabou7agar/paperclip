@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { updateIssueSchema, type IssueExecutionPolicy, type IssueExecutionState, type IssueReviewAssessment } from "@paperclipai/shared";
 import { applyIssueExecutionPolicyTransition, normalizeIssueExecutionPolicy, parseIssueExecutionState } from "../services/issue-execution-policy.js";
+import { reconcileReviewProgressSnapshot } from "../services/issue-review-progress.js";
 import { buildExecutionPolicy } from "../../../ui/src/lib/issue-execution-policy.js";
 
 const worker = randomUUID(), reviewer = randomUUID(), stage = randomUUID(), participant = randomUUID();
@@ -41,6 +42,30 @@ function next(state: IssueExecutionState, a?: IssueReviewAssessment) {
 }
 
 describe("verified-progress review governance", () => {
+  it("does not fence unrelated metadata and preserves the source-repair row's actual attribution", () => {
+    const issue = { status: "in_review", assigneeAgentId: reviewer, assigneeUserId: null,
+      responsibleUserId: "owner", createdByUserId: "creator", executionPolicy: policy, executionState: initial() };
+    const edit = applyIssueExecutionPolicyTransition({ issue, policy, previousPolicy: policy, requestedAssigneePatch: {}, actor: { userId: "owner" } });
+    expect(edit.expectedReviewSnapshot).toBeUndefined();
+    // Source-repair producers use a locked full repository row, not null-filled projections.
+    const repaired = applyIssueExecutionPolicyTransition({ issue, policy, previousPolicy: policy,
+      requestedStatus: "done", requestedAssigneePatch: {}, actor: { agentId: reviewer }, commentBody: "Source repaired" });
+    expect(repaired.expectedReviewSnapshot).toEqual(issue);
+    const partial = decide(initial());
+    expect(partial.expectedReviewSnapshot).not.toHaveProperty("createdByUserId");
+    expect(partial.expectedReviewSnapshot).not.toHaveProperty("assigneeUserId");
+  });
+
+  it("rejects competing monitor changes while preserving unrelated monitor receipts", () => {
+    const expected = { status: "in_review", executionState: { ...initial(), monitor: { receipt: "before" } } };
+    const current = { ...expected, executionState: { ...initial(), monitor: { receipt: "after" } } };
+    const verdict = { ...expected.executionState, lastDecisionId: "new-decision" };
+    expect(reconcileReviewProgressSnapshot({ expected, current, nextState: verdict }))
+      .toEqual({ ...verdict, monitor: { receipt: "after" } });
+    expect(() => reconcileReviewProgressSnapshot({ expected, current, nextState: { ...verdict, monitor: null } }))
+      .toThrow(/review changed/);
+  });
+
   it("permits more than three total rounds only for previously registered findings or required gates", () => {
     let state = initial();
     state = next(state, assessment(state, { openFindingIds: ["F1", "F2", "F3"], requiredGateIds: ["security"] })).state;

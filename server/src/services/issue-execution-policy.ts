@@ -1306,12 +1306,12 @@ export function applyIssueExecutionPolicyTransition(input: TransitionInput): Tra
     if (pending?.status === "pending") stageResult.patch.executionState = { ...pending, reviewEscalated: true };
   }
   if ((input.policy?.reviewGuard || previousPolicy?.reviewGuard) && stageResult.patch.executionState !== undefined) {
-    stageResult.expectedReviewSnapshot = {
-      status: input.issue.status, assigneeAgentId: input.issue.assigneeAgentId ?? null, assigneeUserId: input.issue.assigneeUserId ?? null,
-      executionPolicy: input.issue.executionPolicy ? { ...input.issue.executionPolicy } : null,
-      executionState: input.issue.executionState ? { ...input.issue.executionState } : null,
-      responsibleUserId: input.issue.responsibleUserId ?? null, createdByUserId: input.issue.createdByUserId ?? null,
-    };
+    // Partial producers must not invent null attribution/policy values that can
+    // never match the persisted row. Full repository rows fence every field.
+    stageResult.expectedReviewSnapshot = { status: input.issue.status };
+    for (const key of ["assigneeAgentId", "assigneeUserId", "executionPolicy", "executionState", "responsibleUserId", "createdByUserId"] as const) {
+      if (Object.hasOwn(input.issue, key)) Object.assign(stageResult.expectedReviewSnapshot, { [key]: input.issue[key] });
+    }
   }
   return stageResult;
 }
