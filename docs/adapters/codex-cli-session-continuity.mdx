@@ -72,6 +72,7 @@ Other configuration, quota and transient upstream recovery remain unchanged.
 
 Permanent diagnostic codes include:
 
+- `codex_session_resume_provenance_mismatch`: explicit request lacks the checked task binding.
 - `codex_session_home_identity_unproven`: saved account or home identity differs.
 - `codex_session_home_unavailable`: the exact saved native home is unavailable.
 - `codex_session_home_ambiguous`: more than one native home claims the thread.
@@ -105,3 +106,9 @@ For a bound home, control-plane-approved compatibility migrations retain the pro
 A different `thread.started` identity during a managed resume terminates the owned CLI immediately on the streamed event; its replacement turn is never accepted. Already emitted provider work cannot be undone, so the retained original session and failure receipt stay visible. Unsupported native versions, including mixed indexes, are reported by name in bound and legacy discovery paths.
 
 Native home coordinates round-trip through the Codex session codec. The server retains its control-plane metadata separately and supplies an account-epoch attestation only after its real credential compatibility check retains a resume. The adapter never relies on stripped metadata reaching the provider runtime, and standalone callers still require their saved provenance.
+
+The resume proof is bound to the raw, owned task session whose account was checked by a resolved managed runtime. An explicit request for another thread or home is refused with `codex_session_resume_provenance_mismatch` before provider launch, preserving the original checked task coordinates. Current configuration metadata alone never creates that proof.
+
+A refused unproven resume sets the generic `preserveSession` result contract. Completion records its outcome without publishing native coordinates or attaching fresh account metadata; existing task and agent pointers remain intact. Requests with no checked task row cannot become trusted on a subsequent wake. Taskless heartbeats retain the existing server credential-compatibility check: without a compatible stored account, their agent-wide ID is stripped and the run starts fresh, leaving native history on disk. Explicit unproven requests are refused only by the managed local home path; remote, caller-owned and ACP behavior remain unchanged.
+
+A display-ID-only explicit request for the checked task's own thread inherits its stored native home coordinates. Supplied conflicting coordinates are refused. An authorized compaction of that same checked thread keeps its existing fresh-session handoff policy; it is not treated as a missing-provenance request.

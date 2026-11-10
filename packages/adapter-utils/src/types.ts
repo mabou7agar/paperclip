@@ -24,6 +24,15 @@ export interface AdapterRuntime {
   sessionParams: Record<string, unknown> | null;
   sessionDisplayId: string | null;
   taskKey: string | null;
+  /** Explicit request has no compatible checked record; protected local adapters must refuse it. */
+  unprovenExplicitResume?: boolean;
+  /** Server-checked task record, never inferred from requested resume params. */
+  retainedSession?: {
+    sessionId: string;
+    credentialIdentity: string;
+    configFingerprint?: string;
+    params: Record<string, unknown>;
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -162,6 +171,8 @@ export interface AdapterExecutionResult {
   referencedProjectStagingFailures?: Array<{ projectId: string; error: string }>;
   summary?: string | null;
   clearSession?: boolean;
+  /** Refused resume: retain stored session pointers and provenance without publication. */
+  preserveSession?: boolean;
   question?: {
     prompt: string;
     choices: Array<{
@@ -243,8 +254,6 @@ export interface AdapterExecutionContext {
   sessionFingerprintEnv?: Record<string, string>;
   /** Current normalized control-plane configuration identity, not a provider payload. */
   sessionConfigFingerprint?: string;
-  /** Server-attested account epoch for a retained resume after credential checks. */
-  retainedSessionCredentialIdentity?: string;
   /** Synchronous, content-free diagnostic scope; never stop or collection authority. */
   onExecutionPhase?: AdapterExecutionPhaseSink;
   /** Run-scoped operator cancellation; adapters must settle before returning. */

@@ -596,7 +596,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     return executeCodexAcp(ctx);
   }
 
-  const { runId, agent, runtime, config, context, onLog, onMeta, onEvent, onSpawn, authToken } = ctx;
+  const { runId, agent, runtime: suppliedRuntime, config, context, onLog, onMeta, onEvent, onSpawn, authToken } = ctx;
+  let runtime = suppliedRuntime;
 
   const promptTemplate = asString(
     config.promptTemplate,
@@ -648,6 +649,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const managedSessionIdentity = asString(parseObject(config.managedAiConnection).sessionIdentity, "");
   const managedLocalSessionHome = Boolean(managedSessionIdentity) && !adapterExecutionTargetIsRemote(executionTarget) &&
     typeof envConfig.HOME === "string" && envConfig.CODEX_HOME === path.join(envConfig.HOME, "provider");
+  if (managedLocalSessionHome && runtime.unprovenExplicitResume) {
+    return { exitCode: 1, signal: null, timedOut: false, errorFamily: "configuration",
+      errorCode: "codex_session_resume_provenance_mismatch", errorMessage: "Explicit resume has no compatible checked task record.",
+      sessionId: null, sessionParams: null, sessionDisplayId: null, clearSession: false, preserveSession: true,
+      resultJson: { errorFamily: "configuration", sessionResume: { status: "provenance_mismatch", retryable: false } } };
+  }
   let sessionHomeIdentity: string | null = null;
   const executionTargetIsRemote = adapterExecutionTargetIsRemote(executionTarget);
   let configuredCodexHome =
@@ -699,8 +706,24 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       managedLocalSessionHome ? `v1-${runtimeSkillDigest}` : runtimeSkillDigest);
     if (managedLocalSessionHome) {
       sessionHomeIdentity = runtimeSkillDigest;
-      const saved = parseObject(runtime.sessionParams);
+      let saved = parseObject(runtime.sessionParams);
       const savedId = asString(saved.sessionId, runtime.sessionId ?? "");
+      const retained = ctx.sessionConfigFingerprint ? runtime.retainedSession : undefined;
+      if (retained && (savedId !== retained.sessionId || ["codexHome", "codexHomeIdentity"]
+          .some(key => Object.hasOwn(saved, key) && saved[key] !== retained.params[key]))) {
+        return { exitCode: 1, signal: null, timedOut: false, errorFamily: "configuration",
+          errorCode: "codex_session_resume_provenance_mismatch",
+          errorMessage: "Requested Codex resume does not match the checked task record; original context was retained.",
+          sessionId: retained.sessionId, sessionParams: retained.params, sessionDisplayId: retained.sessionId,
+          clearSession: false, preserveSession: true, resultJson: { errorFamily: "configuration",
+            sessionResume: { status: "provenance_mismatch", retryable: false } } };
+      }
+      if (retained) {
+        // A display-ID-only request identifies the same checked task thread.
+        // Fill omitted native coordinates; never override a conflicting one.
+        saved = { ...retained.params, ...saved };
+        runtime = { ...runtime, sessionParams: saved };
+      }
       const savedCwd = asString(saved.cwd, "");
       const compatible = savedId && (!savedCwd || path.resolve(savedCwd) === path.resolve(cwd)) &&
         adapterExecutionTargetSessionMatches(parseObject(saved.remoteExecution), executionTarget) &&
@@ -709,14 +732,13 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         configuredCodexHome = await selectCodexSessionHome({
           defaultHome: configuredCodexHome, identity: runtimeSkillDigest,
           credentialIdentity: managedSessionIdentity,
-          // The server strips control-plane metadata before adapter dispatch.
-          // Its attestation exists only when that server retained a compatible
-          // account-bound session; standalone callers still need saved proof.
-          saved: ctx.retainedSessionCredentialIdentity ? { ...saved,
-            paperclipAiCredentialIdentity: ctx.retainedSessionCredentialIdentity,
-            __paperclipConfigFingerprint: ctx.sessionConfigFingerprint,
+          // Use the checked raw record's provenance, not the requested ID's
+          // apparent account or mutable current configuration metadata.
+          saved: retained ? { ...saved,
+            paperclipAiCredentialIdentity: retained.credentialIdentity,
+            __paperclipConfigFingerprint: retained.configFingerprint,
           } : saved,
-          allowCompatibleRebind: Boolean(ctx.sessionConfigFingerprint && ctx.retainedSessionCredentialIdentity),
+          allowCompatibleRebind: Boolean(ctx.sessionConfigFingerprint && retained),
           tokenCredentialIdentity: asString(parseObject(config.managedAiConnection).identity, managedSessionIdentity),
           ...(compatible ? { sessionId: savedId } : {}),
           roots: ["skill-runtimes", "connector-runtimes"].map(group =>
@@ -727,8 +749,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         const code = error.code;
         return { exitCode: 1, signal: null, timedOut: false, errorCode: code, errorFamily: "configuration",
           errorMessage: "Saved Codex home could not be proven; retained session was not replaced.",
-          sessionId: savedId || null, sessionParams: runtime.sessionParams, sessionDisplayId: savedId || null,
-          clearSession: false, resultJson: { errorFamily: "configuration", sessionResume: { status: code, retryable: false } } };
+          sessionId: retained?.sessionId ?? null, sessionParams: retained?.params ?? null, sessionDisplayId: retained?.sessionId ?? null,
+          clearSession: false, preserveSession: true, resultJson: { errorFamily: "configuration", sessionResume: { status: code, retryable: false } } };
       }
     }
   }

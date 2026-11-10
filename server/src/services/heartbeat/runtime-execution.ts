@@ -865,8 +865,6 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
               config: runtimeConfig,
               sessionFingerprintEnv: input.config.sessionFingerprintEnv,
               sessionConfigFingerprint: sessionConfigMetadata.fingerprint,
-              retainedSessionCredentialIdentity: runtimeForAdapter.sessionId
-                ? sessionConfigMetadata.aiCredentialIdentity : undefined,
               context: adapterContext,
               executionContinuation: executionContinuation ?? null,
               runtimeCommandSpec:

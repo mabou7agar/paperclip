@@ -13,7 +13,7 @@ import { attachPaperclipSessionMetadataToSessionParams, resolveTaskSessionConfig
 const roots: string[] = [];
 afterEach(async () => { vi.unstubAllEnvs(); await Promise.all(roots.splice(0).map(root => fs.rm(root, { recursive: true, force: true }))); });
 
-it.each(["current", "lease-wait", "lease-abort", "cancel-before-launch", "compatible-config", "config-removed", "config-filesystem-error", "home-filesystem-error", "legacy", "token", "missing", "changed", "newer-refresh", "source-missing", "source-missing-link", "source-invalid", "source-filesystem-error", "source-missing-target", "accountless-residue", "damaged-residue", "wrong-account-residue"] as const)("preserves managed native state across disposable vends: %s", async mode => {
+it.each(["current", "explicit-id-only", "explicit-compaction", "reset-foreign", "no-row-foreign", "taskless", "foreign-explicit", "foreign-home", "unverified-manager", "lease-wait", "lease-abort", "cancel-before-launch", "compatible-config", "config-removed", "config-filesystem-error", "home-filesystem-error", "legacy", "token", "missing", "changed", "newer-refresh", "source-missing", "source-missing-link", "source-invalid", "source-filesystem-error", "source-missing-target", "accountless-residue", "damaged-residue", "wrong-account-residue"] as const)("preserves managed native state across disposable vends: %s", async mode => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "codex-cli-continuity-")); roots.push(root);
   const cwd = path.join(root, "workspace"); await fs.mkdir(cwd);
   vi.stubEnv("PAPERCLIP_HOME", path.join(root, "paperclip")); vi.stubEnv("PAPERCLIP_INSTANCE_ID", "continuity");
@@ -29,7 +29,7 @@ const authToken = auth.tokens?.access_token ?? auth.OPENAI_API_KEY;
 const leaseProof = path.join(home,'fixture-active-cli'); fs.writeFileSync(leaseProof,'active',{flag:'wx'});
 Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,40);
 const configText = fs.existsSync(path.join(home,'config.toml')) ? fs.readFileSync(path.join(home,'config.toml'),'utf8') : null;
-fs.readFileSync(0, 'utf8');
+const prompt = fs.readFileSync(0, 'utf8');
 const db = new DatabaseSync(path.join(home, 'state_5.sqlite'));
 db.exec('CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY, rollout_path TEXT, history_mode TEXT)');
 const id = resume ? args[args.length - 2] : crypto.randomUUID();
@@ -49,7 +49,7 @@ if (resume) {
 }
 db.close(); fs.unlinkSync(leaseProof);
 const returnedId = resume && mode === 'changed' ? crypto.randomUUID() : id;
-fs.appendFileSync(${JSON.stringify(capture)},JSON.stringify({home:fs.realpathSync(home),id,returnedId,resume,retained,authToken,configText})+'\\n');
+fs.appendFileSync(${JSON.stringify(capture)},JSON.stringify({home:fs.realpathSync(home),id,returnedId,resume,retained,authToken,configText,handoff:prompt.includes("immutable-plan-marker compaction handoff")})+'\\n');
 console.log(JSON.stringify({type:'thread.started',thread_id:returnedId}));
 if (resume && mode === 'changed') {
  setTimeout(() => fs.writeFileSync(path.join(home,'fixture-fresh-context-effect'),'must never execute'),500);
@@ -89,8 +89,22 @@ if (resume && mode === 'changed') {
       expect(resolveTaskSessionConfigFreshness({ ...input, compatibleConfigMetadata: [previousMetadata!] }).reset).toBe(false);
     }
     const stored = runtime.sessionParams;
-    const taskSession = stored ? { sessionParamsJson: stored, sessionDisplayId: runtime.sessionId } : null;
-    const decoded = sessionCodec.deserialize(stored);
+    const taskSession = stored && !(mode === "no-row-foreign" && generation !== "vend-one") && mode !== "taskless" ? { id: "checked-task-session", companyId: "company-one", agentId: "agent-one", adapterType: "codex_local", taskKey: runtime.taskKey,
+      sessionParamsJson: stored, sessionDisplayId: runtime.sessionId } : null;
+    let decoded = sessionCodec.deserialize(stored);
+    if (generation === "vend-two-refreshed-token" && ["foreign-explicit", "foreign-home", "reset-foreign", "no-row-foreign"].includes(mode)) {
+      const foreignId = mode === "foreign-home" ? runtime.sessionId! : "01935000-0000-7000-8000-000000000099";
+      const foreignHome = path.join(path.dirname(String(stored?.codexHome)), "f".repeat(64));
+      await fs.mkdir(path.join(foreignHome, "sessions"), { recursive: true });
+      const rollout = path.join(await fs.realpath(foreignHome), "sessions", "rollout-foreign-" + foreignId + ".jsonl");
+      await fs.writeFile(rollout, JSON.stringify({ type: "session_meta", payload: { id: foreignId } }) + "\nforeign-account-history\n");
+      const db = new DatabaseSync(path.join(foreignHome, "state_5.sqlite"));
+      db.exec("CREATE TABLE threads (id TEXT PRIMARY KEY, rollout_path TEXT)"); db.prepare("INSERT INTO threads VALUES (?, ?)").run(foreignId, rollout); db.close();
+      decoded = { ...decoded, sessionId: foreignId, codexHome: foreignHome };
+    }
+    if (generation === "vend-two-refreshed-token" && mode === "explicit-id-only") decoded = { sessionId: runtime.sessionId! };
+    if (generation === "vend-two-refreshed-token" && mode === "unverified-manager") metadata.aiCredentialIdentity = identity; // stale current metadata is NOT proof
+
     const freshness = resolveTaskSessionConfigFreshness({ hasTaskSession: Boolean(stored), configuredModel: "gpt-6.1-sol",
       taskSessionParams: stored, configMetadata: metadata,
       ...(mode === "compatible-config" && generation === "vend-two-refreshed-token" ? { compatibleConfigMetadata: [previousMetadata!] } : {}),
@@ -98,32 +112,34 @@ if (resume && mode === 'changed') {
     // Actual preparation strips Paperclip metadata and verifies the raw saved
     // account before retaining a native resume. Database-only row fields below
     // are irrelevant to this pure preparation step.
+    const context = { issueId: task };
     const prepared = await resolveHeartbeatAdapterSession({
       agent: { id: "agent-one", companyId: "company-one", adapterType: "codex_local" },
-      task: { context: { issueId: task }, taskKey: runtime.taskKey, issueId: task, continuationSummary: null, executionContinuation: null },
-      session: { runtime: { sessionId: runtime.sessionId }, taskSession, sessionCodec, explicitResumeSessionDisplayId: null,
-        runtimeSessionParams: decoded, managedAiRuntime: { sessionIdentity: identity, identity: "account-token-identity" },
-        prepared: { sessionConfigMetadata: metadata, sessionConfigFreshness: freshness, resetTaskSession: freshness.reset,
-          taskSessionForRun: freshness.reset ? null : taskSession, previousSessionParams: decoded },
+      task: { context, taskKey: runtime.taskKey, issueId: task, continuationSummary: null, executionContinuation: null },
+      session: { runtime: { sessionId: runtime.sessionId }, taskSession, sessionCodec, explicitResumeSessionDisplayId: generation === "vend-two-refreshed-token" && ["explicit-id-only", "explicit-compaction", "foreign-explicit", "foreign-home", "reset-foreign", "no-row-foreign"].includes(mode) ? String(decoded?.sessionId) : null,
+        runtimeSessionParams: decoded, managedAiRuntime: mode === "unverified-manager" && generation === "vend-two-refreshed-token" ? undefined : { sessionIdentity: identity, identity: "account-token-identity" },
+        prepared: { sessionConfigMetadata: metadata, sessionConfigFreshness: freshness, resetTaskSession: freshness.reset || (mode === "reset-foreign" && generation !== "vend-one"),
+          taskSessionForRun: freshness.reset || (mode === "reset-foreign" && generation !== "vend-one") ? null : taskSession, previousSessionParams: decoded },
       },
       workspace: { latestWorkspaceConfigMetadata: { version: 1, categories: [] }, workspaceConfigFreshness: {},
         reusedExecutionWorkspace: false, resolvedWorkspaceReusePolicy: { shouldRefreshWorkspaceConfigSnapshot: false },
         persistedExecutionWorkspace: null, runtimeWorkspaceWarnings: [], requestedShouldReuseExisting: false,
         workspaceReuseRequest: { requestedExecutionWorkspaceId: null },
-      }, evaluateSessionCompaction: async () => ({ rotate: false }),
+      }, evaluateSessionCompaction: async () => mode === "explicit-compaction" && generation === "vend-two-refreshed-token"
+        ? { rotate: true, reason: "qualified fixture compaction", handoffMarkdown: "immutable-plan-marker compaction handoff" } : { rotate: false },
     } as unknown as Parameters<typeof resolveHeartbeatAdapterSession>[0]);
     expect(prepared.runtimeForAdapter.sessionParams?.paperclipAiCredentialIdentity).toBeUndefined();
     expect(prepared.runtimeForAdapter.sessionParams?.__paperclipConfigFingerprint).toBeUndefined();
-    if (prepared.runtimeForAdapter.sessionId) expect(prepared.taskSessionCredentialCompatible).toBe(true);
+    if (prepared.runtimeForAdapter.sessionId && mode !== "no-row-foreign") expect(prepared.taskSessionCredentialCompatible).toBe(true);
     const result = await execute({ runId: generation, agent: { id: "agent-one", companyId: "company-one", name: "Sol", adapterType: "codex_local", adapterConfig: {} }, runtime: prepared.runtimeForAdapter,
-      config, retainedSessionCredentialIdentity: prepared.runtimeForAdapter.sessionId ? metadata.aiCredentialIdentity : undefined, signal: invocationSignal, onMeta: async () => { launchCancellation?.abort(); }, sessionConfigFingerprint: metadata.fingerprint, context: { issueId: task }, onLog: async () => {},
+      config, signal: invocationSignal, onMeta: async () => { launchCancellation?.abort(); }, sessionConfigFingerprint: metadata.fingerprint, context, onLog: async () => {},
     });
     const returnedHome = result.sessionParams?.codexHome, returnedHomeIdentity = result.sessionParams?.codexHomeIdentity;
     const persisted = resolveNextSessionState({ adapterType: "codex_local", codec: sessionCodec, adapterResult: result,
       outcome: result.exitCode === 0 && !result.errorMessage ? "succeeded" : "failed", previousParams: decoded,
       previousDisplayId: runtime.sessionDisplayId, previousLegacySessionId: runtime.sessionId,
     });
-    result.sessionParams = attachPaperclipSessionMetadataToSessionParams(persisted.params, "gpt-6.1-sol", metadata);
+    result.sessionParams = result.preserveSession ? stored : attachPaperclipSessionMetadataToSessionParams(persisted.params, "gpt-6.1-sol", metadata);
     if (result.exitCode === 0) {
       expect(typeof returnedHome).toBe("string"); expect(typeof returnedHomeIdentity).toBe("string");
       expect(result.sessionParams?.codexHome).toBe(returnedHome);
@@ -134,7 +150,7 @@ if (resume && mode === 'changed') {
     previousMetadata = metadata;
     await fs.rm(home, { recursive: true, force: true }); return result;
   };
-  const fresh = { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: "task-one" };
+  const fresh = { sessionId: null, sessionParams: null, sessionDisplayId: null, taskKey: mode === "taskless" ? null : "task-one" };
   const first = await invoke("vend-one", fresh);
   expect(first.errorCode).toBeFalsy(); expect(first.exitCode).toBe(0);
   if (!first.sessionId) throw new Error("Fixture did not return a thread ID");
@@ -238,6 +254,39 @@ if (resume && mode === 'changed') {
   if (mode === "compatible-config") expect(fingerprints[1]!.fingerprint).not.toBe(fingerprints[0]!.fingerprint);
   else expect(fingerprints[1]!.fingerprint).toBe(fingerprints[0]!.fingerprint);
   const calls = (await fs.readFile(capture, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+  if (mode === "explicit-compaction") {
+    expect(calls).toHaveLength(2); expect(second.exitCode).toBe(0); expect(calls[1].resume).toBe(false); expect(calls[1].handoff).toBe(true);
+    expect(second.sessionId).not.toBe(first.sessionId);
+    expect(await fs.readFile(path.join(calls[0].home, "sessions", `rollout-old-${first.sessionId}.jsonl`), "utf8")).toContain("immutable-plan-marker");
+    return;
+  }
+  if (mode === "taskless") {
+    expect(calls).toHaveLength(2); expect(second.exitCode).toBe(0);
+    expect(calls[1].resume).toBe(false); expect(second.sessionId).not.toBe(first.sessionId);
+    return;
+  }
+  if (mode === "reset-foreign" || mode === "no-row-foreign") {
+    expect(calls).toHaveLength(1); expect(second.exitCode).toBe(1); expect(second.preserveSession).toBe(true);
+    expect(second.sessionId).toBeNull(); expect(second.sessionParams).toEqual(saved);
+    // A refused explicit request did not publish its home/account. The next
+    // ordinary wake can only use the original record (or remain absent).
+    const third = await invoke("vend-third", { ...fresh, sessionId: first.sessionId, sessionParams: second.sessionParams ?? null });
+    const finalCalls = (await fs.readFile(capture, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+    if (mode === "reset-foreign") { expect(third.exitCode).toBe(1); expect(finalCalls).toHaveLength(1); }
+    else {
+      expect(third.exitCode).toBe(0); expect(finalCalls).toHaveLength(2);
+      expect(finalCalls[1].resume).toBe(false); expect(finalCalls[1].retained).toBe(false);
+      expect(finalCalls[1].id).not.toBe(first.sessionId);
+    }
+    return;
+  }
+  if (["foreign-explicit", "foreign-home", "unverified-manager"].includes(mode)) {
+    expect(calls).toHaveLength(1); expect(second.exitCode).toBe(1);
+    expect(second.errorCode).toBe(mode === "unverified-manager" ? "codex_session_home_identity_unproven" : "codex_session_resume_provenance_mismatch");
+    expect(second.sessionId).toBe(mode === "unverified-manager" ? null : first.sessionId); expect(second.sessionParams).toEqual(saved);
+    expect(second.preserveSession).toBe(true); expect(second.clearSession).toBe(false);
+    return;
+  }
   if (["source-missing", "source-missing-link", "source-invalid", "source-filesystem-error", "source-missing-target"].includes(mode)) {
     expect(calls).toHaveLength(1); expect(second.exitCode).toBe(1);
     expect(second.errorCode).toBe("codex_session_credential_source_unavailable");
@@ -279,4 +328,30 @@ if (resume && mode === 'changed') {
   const other = await invoke("vend-other-account", fresh, "account:epoch:1");
   expect(other.sessionParams?.codexHome).not.toBe(second.sessionParams?.codexHome);
   expect(fingerprints.at(-1)!.fingerprint).not.toBe(fingerprints[0]!.fingerprint);
+});
+
+it.each(["explicit", "taskless"] as const)("keeps account-mismatch stripping and full context for %s launches", async kind => {
+  const executionContinuation = { resumeDelta: { body: "delta without baseline" } };
+  const old = { sessionId: "old-account-thread", cwd: "/workspace" };
+  const prepared = await resolveHeartbeatAdapterSession({
+    agent: { id: "agent", companyId: "company", adapterType: "codex_local" },
+    task: { context: {}, taskKey: kind === "explicit" ? "task" : null, issueId: null, continuationSummary: null, executionContinuation },
+    session: { runtime: { sessionId: old.sessionId }, taskSession: null, sessionCodec,
+      explicitResumeSessionDisplayId: kind === "explicit" ? old.sessionId : null, runtimeSessionParams: old,
+      managedAiRuntime: { sessionIdentity: "new-account:epoch:1", identity: "new-account-token" },
+      prepared: { sessionConfigMetadata: { version: 1 }, sessionConfigFreshness: {}, resetTaskSession: false,
+        taskSessionForRun: null, previousSessionParams: old } },
+    workspace: { latestWorkspaceConfigMetadata: { version: 1, categories: [] }, workspaceConfigFreshness: {},
+      reusedExecutionWorkspace: false, resolvedWorkspaceReusePolicy: { shouldRefreshWorkspaceConfigSnapshot: false },
+      persistedExecutionWorkspace: null, runtimeWorkspaceWarnings: [], requestedShouldReuseExisting: false,
+      workspaceReuseRequest: { requestedExecutionWorkspaceId: null } },
+    evaluateSessionCompaction: async () => ({ rotate: false }),
+  } as unknown as Parameters<typeof resolveHeartbeatAdapterSession>[0]);
+  // This server input is identical for remote, caller-owned, ACP and generated
+  // homes: the old account never reaches any adapter's resume arguments.
+  expect(prepared.runtimeForAdapter.sessionId).toBeNull();
+  expect(prepared.runtimeForAdapter.sessionParams).toBeNull();
+  expect(prepared.runtimeForAdapter.retainedSession).toBeUndefined();
+  expect(executionContinuation).not.toHaveProperty("resumeDelta");
+  expect(prepared.runtimeForAdapter.unprovenExplicitResume).toBe(kind === "explicit" ? true : undefined);
 });

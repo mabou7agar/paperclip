@@ -505,7 +505,8 @@ export function createHeartbeatRunCompletion(db: Db, dependencies: HeartbeatRunC
         { legacySessionId: nextSessionState.legacySessionId },
         normalizedUsage,
       );
-      if (!taskKey) return;
+      // A refused resume must not bless requested coordinates with current account metadata.
+      if (!taskKey || adapterResult.preserveSession) return;
       if (nativeTaskSessionPublicationHandled(finalizedRun.runnerProfileJson, {
         runId: finalizedRun.id,
         companyId: finalizedRun.companyId,

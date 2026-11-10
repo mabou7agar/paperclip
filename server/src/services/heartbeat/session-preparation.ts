@@ -346,7 +346,31 @@ export async function resolveHeartbeatAdapterSession(input: HeartbeatAdapterSess
       delete executionContinuation?.resumeDelta;
     }
   }
+  // Bind proof to the raw task record whose account was actually checked.
+  // An explicit resume may request other coordinates; the native adapter must
+  // refuse those while retaining these original, checked task coordinates.
+  const checkedParams = taskSessionForRun
+    ? normalizeSessionParams(stripPaperclipSessionMetadataFromSessionParams(
+        sessionCodec.deserialize(taskSessionForRun.sessionParamsJson))) : null;
+  const checkedSessionId = readNonEmptyString(checkedParams?.sessionId);
+  const checkedIdentity = readNonEmptyString(taskSessionForRun?.sessionParamsJson?.paperclipAiCredentialIdentity);
+  const checkedTaskOwned = Boolean(taskSession && taskSessionForRun
+    && taskSession.id === taskSessionForRun.id
+    && taskSessionForRun.companyId === agent.companyId && taskSessionForRun.agentId === agent.id
+    && taskSessionForRun.adapterType === agent.adapterType && taskSessionForRun.taskKey === taskKey
+    && checkedIdentity === readNonEmptyString(taskSession.sessionParamsJson?.paperclipAiCredentialIdentity));
+  const retainedSession = managedAiRuntime && taskSessionCredentialCompatible && !resetTaskSession
+    && runtimeSessionIdForAdapter && checkedTaskOwned && checkedSessionId && checkedIdentity && checkedParams
+    ? { sessionId: checkedSessionId, credentialIdentity: checkedIdentity,
+        configFingerprint: readNonEmptyString(taskSessionForRun?.sessionParamsJson?.__paperclipConfigFingerprint) ?? undefined,
+        params: checkedParams }
+    : undefined;
   const runtimeForAdapter = {
+    ...(managedAiRuntime && agent.adapterType === "codex_local" && explicitResumeSessionDisplayId && !retainedSession
+      && !(sessionCompaction.rotate && taskSessionCredentialCompatible && !resetTaskSession
+        && checkedTaskOwned && checkedSessionId === explicitResumeSessionDisplayId)
+      ? { unprovenExplicitResume: true } : {}),
+    ...(retainedSession ? { retainedSession } : {}),
     sessionId: runtimeSessionIdForAdapter,
     sessionParams: runtimeSessionParamsForAdapter,
     sessionDisplayId: previousSessionDisplayId,
