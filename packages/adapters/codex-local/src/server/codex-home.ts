@@ -659,7 +659,7 @@ export async function seedManagedCodexHome(
   targetHome: string,
   env: NodeJS.ProcessEnv,
   onLog: AdapterExecutionContext["onLog"],
-  options: { apiKey?: string | null } = {},
+  options: { apiKey?: string | null; managedRuntimeView?: boolean } = {},
 ): Promise<void> {
   const apiKey = nonEmpty(options.apiKey ?? undefined);
 
@@ -738,7 +738,19 @@ export async function seedManagedCodexHome(
             return null;
           });
         const sourceIdentity = sourceBytes ? readSubscriptionAccountId(sourceBytes) : null;
-        if (sourceIdentity !== targetIdentity) {
+        if (options.managedRuntimeView) {
+          let usableSource = false;
+          try { usableSource = sourceBytes !== null && hasUsableAuthPayload(JSON.parse(sourceBytes.toString("utf8"))); }
+          catch { /* An unproven source cannot replace a retained credential. */ }
+          if (!usableSource) throw new Error("codex_session_credential_source_unavailable");
+          const sourceLastRefresh = readAuthLastRefreshMs(sourceBytes);
+          const targetLastRefresh = readAuthLastRefreshMs(targetBytes);
+          // A runtime view cannot select another account or keep an unproven
+          // stale copy over the authorized vend. Retain a provably newer local
+          // refresh, including when an older source lacks freshness metadata.
+          keepPromotedAuth = sourceIdentity === targetIdentity && targetLastRefresh !== null &&
+            (sourceLastRefresh === null || targetLastRefresh > sourceLastRefresh);
+        } else if (sourceIdentity !== targetIdentity) {
           keepPromotedAuth = true;
         } else {
           // Same identity: swap to the symlink only when the shared source is

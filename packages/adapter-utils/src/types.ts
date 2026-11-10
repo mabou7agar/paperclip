@@ -241,6 +241,8 @@ export interface AdapterExecutionContext {
   agentIdentity?: AgentRuntimeIdentity;
   /** Server-owned configured env before disposable scratch and launcher overlays. Never persist. */
   sessionFingerprintEnv?: Record<string, string>;
+  /** Current normalized control-plane configuration identity, not a provider payload. */
+  sessionConfigFingerprint?: string;
   /** Synchronous, content-free diagnostic scope; never stop or collection authority. */
   onExecutionPhase?: AdapterExecutionPhaseSink;
   /** Run-scoped operator cancellation; adapters must settle before returning. */

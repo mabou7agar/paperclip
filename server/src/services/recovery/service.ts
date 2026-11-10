@@ -713,7 +713,11 @@ export function classifyContinuationFailure(
       errorCode,
     };
   }
-  if (isAiAuthenticationBlocked(latestRun) || (errorCode && NON_RETRYABLE_CONTINUATION_ERROR_CODES.has(errorCode))) {
+  // Session owners explicitly refuse replay. Other configuration failures keep
+  // their existing recovery policy; no provider-specific codes are parsed here.
+  const result = parseObject(latestRun?.resultJson);
+  if ((result.errorFamily === "configuration" && parseObject(result.sessionResume).retryable === false) ||
+      isAiAuthenticationBlocked(latestRun) || (errorCode && NON_RETRYABLE_CONTINUATION_ERROR_CODES.has(errorCode))) {
     return {
       kind: "non_retryable",
       maxAttempts: 0,

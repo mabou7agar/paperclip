@@ -5,6 +5,13 @@ const run = (errorCode: string | null) =>
   ({ errorCode } as unknown as Parameters<typeof classifyContinuationFailure>[0]);
 
 describe("pause durability: continuation retry classification", () => {
+  it.each(["codex_session_home_unavailable", "codex_session_resume_unavailable", "codex_session_identity_changed", "another_provider_configuration_refusal"])("never grants the normalized permanent configuration family a retry: %s", errorCode => {
+    expect(classifyContinuationFailure({ errorCode, resultJson: { errorFamily: "configuration", sessionResume: { retryable: false } } } as Parameters<typeof classifyContinuationFailure>[0]))
+      .toMatchObject({ kind: "non_retryable", maxAttempts: 0, baseBackoffMs: 0 });
+  });
+  it("does not change recovery for other configuration errors without a permanent session refusal", () => {
+    expect(classifyContinuationFailure({ errorCode: "other_configuration", resultJson: { errorFamily: "configuration" } } as Parameters<typeof classifyContinuationFailure>[0]).kind).toBe("default");
+  });
   it.each(["workspace_git_scan_timeout", "workspace_git_scan_saturated", "workspace_git_scan_failed", "workspace_git_scan_output_limit", "workspace_git_scan_cancelled", "remote_workspace_prepare_timeout", "reusable_sandbox_resume_failed", "remote_workspace_restore_failed", "plugin_worker_unavailable", "runner_revision_mismatch"])("does not grant %s another recovery budget", (code) => {
     expect(classifyContinuationFailure(run(code))).toMatchObject({ kind: "non_retryable", maxAttempts: 0 });
   });

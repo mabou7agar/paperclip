@@ -1,5 +1,10 @@
 import path from "node:path";
 
+/** A token-era identity can migrate only before any manual credential replacement. */
+export function managedAiSessionIdentityCompatible(stored: unknown, sessionIdentity: string, credentialIdentity: string): boolean {
+  return stored === sessionIdentity || (sessionIdentity.endsWith(":0") && stored === credentialIdentity);
+}
+
 export function managedAiHomeEnvironment(home: string): Record<string, string> {
   const providerHome = path.join(home, "provider");
   return {

@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 import { inferOpenAiCompatibleBiller, resolveManagedOpenAiBilling, type AdapterExecutionContext, type AdapterExecutionResult } from "@paperclipai/adapter-utils";
 import { buildCodexAuthInboundProvision } from "./codex-auth-merge-scripts.js";
 import { copyBackCodexAuth } from "./codex-auth-copyback.js";
+import { CodexSessionHomeError, selectCodexSessionHome } from "./session-home.js";
 import {
   ensureCodexAuthCacheEntryDir,
   isCodexAuthCacheEnabled,
@@ -643,6 +644,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     : useConfiguredInsteadOfAgentHome ? "" : workspaceCwd;
   const cwd = effectiveWorkspaceCwd || configuredCwd || process.cwd();
   const envConfig = parseObject(config.env);
+  const managedSessionIdentity = asString(parseObject(config.managedAiConnection).sessionIdentity, "");
+  const managedLocalSessionHome = Boolean(managedSessionIdentity) && !adapterExecutionTargetIsRemote(executionTarget) &&
+    typeof envConfig.HOME === "string" && envConfig.CODEX_HOME === path.join(envConfig.HOME, "provider");
+  let sessionHomeIdentity: string | null = null;
   const executionTargetIsRemote = adapterExecutionTargetIsRemote(executionTarget);
   let configuredCodexHome =
     typeof envConfig.CODEX_HOME === "string" && envConfig.CODEX_HOME.trim().length > 0
@@ -667,10 +672,10 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         .map(entry => [entry.key, entry.source]).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b))),
     })).digest("hex")
     : connectorSkillDigest;
-  const runtimeCredentialHome = runtimeSkillDigest
+  const runtimeCredentialHome = runtimeSkillDigest || managedLocalSessionHome
     ? skillSourceHome ?? await prepareManagedCodexHome(process.env, onLog, agent.companyId, { apiKey: configuredOpenAiApiKey })
     : null;
-  if (runtimeSkillDigest) {
+  if (runtimeSkillDigest || managedLocalSessionHome) {
     const credentialHome = runtimeCredentialHome!;
     const credentialBytes = await fs.readFile(path.join(credentialHome, "auth.json")).catch(() => null);
     const selectedConfig = await fs.readFile(path.join(credentialHome, "config.toml")).catch(() => null);
@@ -681,13 +686,41 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     // the same subscription identity preserve its cache and session state.
     const credentialIdentity = credentialBytes
       ? readSubscriptionAccountId(credentialBytes) ?? createHash("sha256").update(credentialBytes).digest("hex") : null;
-    runtimeSkillDigest = createHash("sha256").update(JSON.stringify({
-      runtimeSkillDigest, credentialHome, credentialIdentity, selectedConfigDigest, apiKey: envConfig.OPENAI_API_KEY ?? null,
-    })).digest("hex");
+    runtimeSkillDigest = createHash("sha256").update(JSON.stringify(managedLocalSessionHome
+      ? { authorization: ctx.sessionConfigFingerprint ?? { runtimeSkillDigest, selectedConfigDigest }, managedSessionIdentity,
+          taskKey: runtime.taskKey ?? context.taskKey ?? context.issueId ?? context.taskId ?? null }
+      : { runtimeSkillDigest, credentialHome, credentialIdentity, selectedConfigDigest, apiKey: envConfig.OPENAI_API_KEY ?? null },
+    )).digest("hex");
     // Different authorized versions/assignments get separate homes, including
     // session state. Previously permitted private links cannot survive revocation.
     configuredCodexHome = path.join(resolveManagedCodexHomeDir(process.env, agent.companyId),
-      connectorSkillDigest ? "connector-runtimes" : "skill-runtimes", agent.id, runtimeSkillDigest);
+      connectorSkillDigest ? "connector-runtimes" : "skill-runtimes", agent.id,
+      managedLocalSessionHome ? `v1-${runtimeSkillDigest}` : runtimeSkillDigest);
+    if (managedLocalSessionHome) {
+      sessionHomeIdentity = runtimeSkillDigest;
+      const saved = parseObject(runtime.sessionParams);
+      const savedId = asString(saved.sessionId, runtime.sessionId ?? "");
+      const savedCwd = asString(saved.cwd, "");
+      const compatible = savedId && (!savedCwd || path.resolve(savedCwd) === path.resolve(cwd)) &&
+        adapterExecutionTargetSessionMatches(parseObject(saved.remoteExecution), executionTarget) &&
+        !fallbackModeUsesFreshSession(readCodexTransientFallbackMode(context));
+      try {
+        configuredCodexHome = await selectCodexSessionHome({
+          defaultHome: configuredCodexHome, identity: runtimeSkillDigest,
+          credentialIdentity: managedSessionIdentity, saved,
+          tokenCredentialIdentity: asString(parseObject(config.managedAiConnection).identity, managedSessionIdentity),
+          ...(compatible ? { sessionId: savedId } : {}),
+          roots: ["skill-runtimes", "connector-runtimes"].map(group =>
+            path.join(resolveManagedCodexHomeDir(process.env, agent.companyId), group, agent.id)),
+        });
+      } catch (error) {
+        const code = error instanceof CodexSessionHomeError ? error.code : "codex_session_home_unproven";
+        return { exitCode: 1, signal: null, timedOut: false, errorCode: code, errorFamily: "configuration",
+          errorMessage: "Saved Codex home could not be proven; retained session was not replaced.",
+          sessionId: savedId || null, sessionParams: runtime.sessionParams, sessionDisplayId: savedId || null,
+          clearSession: false, resultJson: { errorFamily: "configuration", sessionResume: { status: code, retryable: false } } };
+      }
+    }
   }
   if (!executionTargetIsRemote) {
     await ensureAbsoluteDirectory(cwd, { createIfMissing: true });
@@ -699,7 +732,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   // and left untouched.
   const configuredHomeIsManaged =
     configuredCodexHome != null &&
-    isManagedCodexHomePath(process.env, agent.companyId, configuredCodexHome);
+    (managedLocalSessionHome || isManagedCodexHomePath(process.env, agent.companyId, configuredCodexHome));
   // Identity-anchored cache vend (host to sandbox). Before the managed home is
   // seeded from the shared source `auth.json`, refresh the shared credential with
   // a strictly-newer cached copy of the SAME identity. The vend reads the host
@@ -735,9 +768,19 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     const seedEnv = runtimeSkillDigest ? {
       ...process.env, CODEX_HOME: runtimeCredentialHome ?? resolveManagedCodexHomeDir(process.env, agent.companyId),
     } : process.env;
-    await seedManagedCodexHome(configuredCodexHome, seedEnv, onLog, {
-      apiKey: configuredOpenAiApiKey,
-    });
+    try {
+      await seedManagedCodexHome(configuredCodexHome, seedEnv, onLog, {
+        apiKey: configuredOpenAiApiKey, managedRuntimeView: managedLocalSessionHome,
+      });
+    } catch (error) {
+      if (!managedLocalSessionHome) throw error;
+      return { exitCode: 1, signal: null, timedOut: false, errorFamily: "configuration",
+        errorCode: "codex_session_credential_source_unavailable",
+        errorMessage: "Managed Codex credential view could not be reconciled; retained state was not replaced.",
+        sessionId: runtime.sessionId, sessionParams: runtime.sessionParams, sessionDisplayId: runtime.sessionDisplayId,
+        clearSession: false, resultJson: { errorFamily: "configuration",
+          sessionResume: { status: "credential_source_unavailable", retryable: false } } };
+    }
   }
   const defaultCodexHome = resolveManagedCodexHomeDir(process.env, agent.companyId);
   const effectiveCodexHome = configuredCodexHome ?? defaultCodexHome;
@@ -825,6 +868,12 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     // Inject skills into the same CODEX_HOME that Codex will actually run with
     // (managed home in the default case, or an explicit override from adapter config).
     const codexSkillsDir = resolveCodexSkillsDir(effectiveCodexHome);
+    if (managedLocalSessionHome) {
+      // Generated local homes are runtime-owned. Rebuild their capability view
+      // before launch, including empty selections and recovered legacy homes.
+      // Never perform this reconciliation on an explicit caller-owned home.
+      await fs.rm(codexSkillsDir, { recursive: true, force: true });
+    }
     await ensureCodexSkillsInjected(
       onLog,
       {
@@ -1524,6 +1573,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         ? ({
           sessionId: resolvedSessionId,
           cwd: effectiveExecutionCwd,
+          ...(sessionHomeIdentity ? { codexHome: effectiveCodexHome, codexHomeIdentity: sessionHomeIdentity } : {}),
           ...(executionTargetIsRemote
             ? {
                 remoteExecution: adapterExecutionTargetSessionIdentity(runtimeExecutionTarget),
@@ -1650,19 +1700,37 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         (initial.proc.exitCode ?? 0) !== 0 &&
         isCodexUnknownSessionError(initial.proc.stdout, initial.rawStderr)
       ) {
-        await onLog(
-          "stdout",
-          `[paperclip] Codex resume session "${sessionId}" is unavailable; retrying with a fresh session.\n`,
-        );
-        const retry = await runAttempt(null);
-        const retryResult = toResult(retry, true, true);
-        if (retryResult.errorMessage) {
-          executionError = new Error(retryResult.errorMessage);
+        // Preserve the existing recovery policy for caller-owned and remote
+        // homes. Their authority/retention lifecycle is outside this local fix.
+        if (!managedLocalSessionHome) {
+          await onLog("stdout", `[paperclip] Codex resume session "${sessionId}" is unavailable; retrying with a fresh session.\n`);
+          const retry = await runAttempt(null);
+          const result = toResult(retry, true, true);
+          if (result.errorMessage) executionError = new Error(result.errorMessage);
+          return result;
         }
-        return retryResult;
+        const refusal = new Error("Saved Codex session is unavailable; no fresh-session retry was dispatched.");
+        executionError = refusal;
+        const result = toResult(initial);
+        return { ...result, errorCode: "codex_session_resume_unavailable", errorFamily: "configuration",
+          errorMessage: refusal.message, retryNotBefore: null,
+          sessionId, sessionParams: runtime.sessionParams, sessionDisplayId: sessionId, clearSession: false,
+          resultJson: { stdout: initial.proc.stdout, stderr: initial.proc.stderr, errorFamily: "configuration",
+            sessionResume: { status: "unavailable", requestedSessionId: sessionId, retryable: false } } };
       }
 
-      const result = toResult(initial, false, false);
+      if (managedLocalSessionHome && sessionId && initial.parsed.sessionId && initial.parsed.sessionId !== sessionId) {
+        const refusal = new Error("Codex returned a different thread during resume; retained session was not replaced.");
+        executionError = refusal;
+        return { ...toResult(initial), exitCode: 1,
+          errorCode: "codex_session_identity_changed", errorFamily: "configuration", errorMessage: refusal.message,
+          retryNotBefore: null, sessionId, sessionParams: runtime.sessionParams, sessionDisplayId: sessionId,
+          clearSession: false, resultJson: { stdout: initial.proc.stdout, stderr: initial.proc.stderr,
+            errorFamily: "configuration", sessionResume: { status: "identity_changed",
+            requestedSessionId: sessionId, returnedSessionId: initial.parsed.sessionId, retryable: false } } };
+      }
+
+      const result = toResult(initial);
       if (result.errorMessage) {
         executionError = new Error(result.errorMessage);
       }

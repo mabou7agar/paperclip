@@ -1,0 +1,91 @@
+---
+title: Codex CLI session continuity
+description: Retain native worker threads across managed credential refreshes and task continuations.
+---
+
+## Managed local CLI sessions
+
+Managed credential homes are disposable. Native Codex conversations are not.
+Local CLI execution selects a durable, private home by company, agent, task,
+the control plane's normalized configuration fingerprint, and the managed
+account/session epoch. Standalone callers without that fingerprint retain the
+stricter skill/config-byte identity checks.
+A new credential directory or refreshed token for that same identity does not
+select a different conversation store. New tasks and changed identities or skill
+inventories select separate homes. Explicit caller-owned homes and remote
+execution retain their existing ownership and confinement rules.
+
+Successful managed local runs save `codexHome` and `codexHomeIdentity` alongside
+the native `sessionId`. These are internal session coordinates, not settings.
+They do not modify the company's provider order, permissions, or model defaults.
+The generated home's credential entry is reconciled with the current authorized
+vend on every launch. A stale or unproven regular copy cannot override that vend.
+A provably newer refresh for the same account is retained, so a failed prior
+copy-back cannot discard the only fresh credential. An unreadable source is a
+named refusal that preserves the retained copy. Promoted and caller-owned
+credential stores keep their existing seeding policy.
+
+## Previous-release sessions
+
+Older CLI runs saved the thread ID but omitted its home. A compatible resume
+can recover the exact existing private home without copying credentials or
+rewriting a rollout/index. Recovery requires the saved managed credential
+identity to match (including the existing token-era, epoch-zero compatibility
+rule), a unique native SQLite thread row, and a matching bounded
+`session_meta` header inside that same company's agent-specific home.
+Lookup is bounded to 128 legacy home entries. New `v1-` homes do not consume
+that legacy allowance. Symlinked scope roots, foreign paths,
+views masquerading as native tables, ambiguous matches and unsupported evidence
+are refused. Original files and saved session coordinates remain intact.
+
+The control plane still decides whether configuration and execution identity
+permit a resume. Home recovery does not waive a reset or restore revoked access.
+An explicitly requested fresh-session fallback retains its existing semantics.
+Before any managed local launch, the runtime rebuilds its owned skills directory
+from the current authorized inventory, including empty selections. Caller-owned
+and remote skills directories are unchanged. Missing account provenance is a
+named refusal, not permission to borrow another account's native history.
+
+Native homes are retained state, not disposable caches. This fix adds no automatic
+history deletion. Operators should account for their disk usage in the existing
+retention policy and archive only completed state under that policy. If more than
+128 legacy homes remain, keep them intact and escalate once for a scoped migration;
+do not repeatedly wake tasks, raise the lookup cap, or clear their saved IDs.
+
+## Failure behavior
+
+For managed local sessions, a missing native session no longer causes a hidden
+second CLI launch with a new thread. A CLI that returns a different thread during
+that resume is also refused. Caller-owned and remote CLI homes keep their existing
+fresh-session recovery policy; this change does not assert a new remote
+confinement or retention contract.
+Neither failure replaces the saved session or schedules a provider retry.
+The adapter uses the existing normalized `configuration` failure family with
+`sessionResume.retryable=false`. Shared continuation recovery grants that explicit
+session-refusal class zero retries without knowing individual provider codes.
+Other configuration, quota and transient upstream recovery remain unchanged.
+
+Permanent diagnostic codes include:
+
+- `codex_session_home_identity_unproven`: saved account or home identity differs.
+- `codex_session_home_unavailable`: the exact saved native home is unavailable.
+- `codex_session_home_ambiguous`: more than one native home claims the thread.
+- `codex_session_home_lookup_limit`: the bounded legacy lookup was exceeded.
+- `codex_session_home_unproven`: native ownership evidence cannot be verified.
+- `codex_session_resume_unavailable`: the CLI rejected the retained thread.
+- `codex_session_identity_changed`: the CLI returned a replacement thread.
+- `codex_session_credential_source_unavailable`: credential reconciliation failed.
+
+Keep these refusals visible to the responsible lead. Retain original state for
+investigation; do not clear sessions, repeatedly wake the worker, or convert a
+resume failure into a quota/fresh-session retry.
+
+## Verification
+
+Regression checks use real temporary filesystem state and SQLite indexes with a
+fake CLI that never contacts a provider. They cover credential-home rotation,
+token refresh, old saved session shapes, task/account separation, forged or
+missing native evidence, and exactly one invocation on resume failure.
+Live handoff acceptance additionally compares actual before/after worker and CTO
+IDs, original plan revisions, native wake receipts, and a quiet window after
+completion. Session-reused flags alone are insufficient.
