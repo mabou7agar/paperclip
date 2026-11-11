@@ -164,7 +164,65 @@ const waitContinuationSchema = {
   allOf: [{ if: { properties: { kind: { const: "case_handoff" } }, required: ["kind"] }, then: { required: ["handoffId"] } }],
 } as const;
 
+export const PRP_SOURCE_CITATIONS_SCHEMA = {
+  "type": "array",
+  "maxItems": 20,
+  "description": "Optional committed-source citations. Review requires current evidence when source memory is enabled; all submitted citations are verified.",
+  "items": {
+    "type": "object",
+    "required": [
+      "repo",
+      "fullSha",
+      "path",
+      "startLine",
+      "endLine",
+      "sha256",
+      "mode"
+    ],
+    "properties": {
+      "repo": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 512
+      },
+      "fullSha": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{40}$"
+      },
+      "path": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 1024
+      },
+      "startLine": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "endLine": {
+        "type": "integer",
+        "minimum": 1
+      },
+      "sha256": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{64}$"
+      },
+      "mode": {
+        "enum": [
+          "current",
+          "historical"
+        ]
+      },
+      "receiptId": {
+        "type": "string",
+        "maxLength": 128
+      }
+    },
+    "additionalProperties": false
+  }
+} as const;
+
 const commonResultProperties = {
+  sourceCitations: PRP_SOURCE_CITATIONS_SCHEMA,
   schema: { type: "string", const: "paperclip.run_result.v1" },
   summary: {
     type: "string",

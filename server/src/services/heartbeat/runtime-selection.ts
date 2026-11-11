@@ -796,6 +796,7 @@ export async function selectHeartbeatRuntime(db: Db, input: HeartbeatRuntimeSele
                   }),
                 ) ??
                 `# ${issueRef.identifier ?? issueRef.id}: ${issueRef.title}`,
+                nativeReviewRequest ? readNonEmptyString(context.paperclipSourceMemoryMarkdown) : null,
                 !["openai_dot_mcp", "grok_bot_mcp", "muse_external", "cursor_cloud_api"].includes(nativeRuntimeResolution.profile.backend) && projectRepositoryPaths.length > 0
                   ? `## Project repositories\nThe task workspace also contains these editable Git repositories:\n${projectRepositoryPaths.map((repo) => `- ${repo}`).join("\n")}`
                   : null,

@@ -825,6 +825,7 @@ export interface IssueExecutionMonitorState {
 
 export interface IssueReviewRequest {
   instructions: string;
+  candidateSha?: string;
 }
 
 export interface IssueExecutionState {

@@ -92,6 +92,7 @@ export class PaperclipControlPlanePort implements ControlPlanePort {
   #sessionId: string | null = null;
   readonly #assertControllerActive?: () => void;
   readonly #assertRunAdmissionActive?: () => void;
+  readonly #beforeCompleteRun?: (result: Record<string, unknown>) => Promise<void>;
   readonly #onResultCommitted?: () => Promise<void>;
   readonly #onEventPersistence?: (event: PrpEvent, startedAtMs: number, endedAtMs: number) => Promise<void>;
   readonly #onCommittedEvent?: (event: PrpEvent, cursor: number) => Promise<void>;
@@ -112,6 +113,7 @@ export class PaperclipControlPlanePort implements ControlPlanePort {
       assertControllerActive?: () => void;
       /** Read-only admission may finish an existing startup solely for restart detachment. */
       assertRunAdmissionActive?: () => void;
+      beforeCompleteRun?: (result: Record<string, unknown>) => Promise<void>;
       onResultCommitted?: () => Promise<void>;
       onEventPersistence?: (event: PrpEvent, startedAtMs: number, endedAtMs: number) => Promise<void>;
       onCommittedEvent?: (event: PrpEvent, cursor: number) => Promise<void>;
@@ -129,6 +131,7 @@ export class PaperclipControlPlanePort implements ControlPlanePort {
     this.#onCommittedEvent = options.onCommittedEvent;
     this.#onEventPersistence = options.onEventPersistence;
     this.#onResultCommitted = options.onResultCommitted;
+    this.#beforeCompleteRun = options.beforeCompleteRun;
     this.#onDuplicateEvent = options.onDuplicateEvent;
     this.#nativeRecovery = options.nativeRecovery;
     this.#taskSessionPublication = options.taskSessionPublication ? structuredClone(options.taskSessionPublication) : undefined;
@@ -527,6 +530,10 @@ export class PaperclipControlPlanePort implements ControlPlanePort {
     if (validated.result.reportedWorkDisposition !== value.terminal.reportedWorkDisposition) {
       throw new Error("native_result_terminal_disposition_mismatch");
     }
+    // Source validation performs bounded reads outside the acceptance transaction.
+    // A rejection must precede accepted-result insertion and native finalization.
+    await this.#beforeCompleteRun?.(validated.result as unknown as Record<string, unknown>);
+    this.#assertActive(options);
     const canonical = {
       binding: this.#binding,
       result: validated.result,

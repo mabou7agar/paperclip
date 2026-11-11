@@ -207,6 +207,9 @@ jobs:
           version: 9.15.4
           run_install: false
 
+      - name: Source memory Node contract tests (.mjs)
+        run: node scripts/source-memory/run-tests.mjs
+
       - name: Validate migration ordering against target branch
         run: >-
           node .github/scripts/check-pr-migration-order.mjs

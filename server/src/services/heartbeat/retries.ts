@@ -1,3 +1,4 @@
+import { freshSourceMemoryRetryContext } from "./source-memory-run-state.js";
 import { runOwnerFenceHeldSql } from "../remote-workspace-writer-hold.js";
 import { isInterruptedNativePreparation } from "../cancelled-native-startup.js";
 import { isPreDispatchExecutionWaitVerified } from "../pre-dispatch-execution-wait.js";
@@ -711,7 +712,7 @@ export function createHeartbeatRetries(db: Db, dependencies: HeartbeatRetryDepen
       Object.keys(workspaceValidationRetryPayload).length > 0;
     const retryContextSnapshot: Record<string, unknown> = withRecoveryContext(
       {
-        ...contextSnapshot,
+        ...freshSourceMemoryRetryContext(contextSnapshot),
         executionRetryAccounting: accountingForScheduledRetry(run, retryReason, schedule.attempt, { quotaRenewalWait }),
         retryOfRunId: run.id,
         wakeReason,

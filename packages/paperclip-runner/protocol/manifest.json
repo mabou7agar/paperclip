@@ -120,7 +120,7 @@
     {
       "path": "schemas/result.schema.json",
       "id": "https://paperclip.dev/schemas/prp/v1/result.schema.json",
-      "sha256": "e8004ce5539e9c6a2d6357369b7ef94bf282868b284b68bead1074b01fa8f776"
+      "sha256": "79acd3efa61bc4eebb9719e367588d4975c2d2632b6bc42d502cc81bdf0e9663"
     },
     {
       "path": "schemas/semantic-tool.schema.json",

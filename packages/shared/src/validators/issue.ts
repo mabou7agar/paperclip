@@ -527,6 +527,7 @@ export const issueExecutionMonitorStateSchema = z.object({
 export const issueReviewRequestSchema = z
   .object({
     instructions: z.string().trim().min(1).max(20000),
+    candidateSha: z.string().regex(/^[a-f0-9]{40}$/).optional(),
   })
   .strict();
 

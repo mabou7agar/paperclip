@@ -9205,6 +9205,7 @@ export async function executePaperclipNativeSession(input: {
   restartRecovery?: NativeRestartRecoveryClaim;
   /** Release recovery preparation's renewal after execution owns its reference. */
   onExecutionLeaseAcquired?: () => Promise<void>;
+  beforeCompleteRun?: (result: Record<string, unknown>) => Promise<void>;
   onSpawn?: (meta: {
     pid: number;
     processGroupId: number | null;
@@ -10352,6 +10353,7 @@ async function executePaperclipNativeSessionAttempt(
         owner: { ...input.execution.binding, authorityRunId: input.execution.binding.runId,
           bootId: controller.bootId, leaseOwner, generation: controllerGeneration },
       } : undefined,
+      beforeCompleteRun: input.beforeCompleteRun,
       onResultCommitted: async () => {
         const at=Date.now();
         await trace.record({name:"completion.result_committed",parentName:"native.session.execute",startedAtMs:at,endedAtMs:at});
