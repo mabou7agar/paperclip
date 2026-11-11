@@ -42,6 +42,30 @@ at startup. Failed delivery retains the same receipt and uses the shared worker'
 retry deadline. Stale stage requests and paused participants are not selected.
 After settlement the worker becomes quiet; no additional polling is introduced.
 
+### Temporary pause and unstarted stage requests
+
+A temporary company or agent pause preserves a never-started request for the
+current review or approval stage, including when it already waits on another
+execution guard. Resume delivers that same request through normal admission.
+An explicit task/run Stop retains its cancellation semantics.
+
+For an older release that already cancelled such a request during lifecycle
+Stop, the existing startup/resume recovery event may record one new request for
+the still-current stage. It requires an active company, ready participant, a
+run-less lifecycle-cancelled assignment receipt, an explicit native pause-journal
+marker at cancellation, no termination in that original obligation window, no
+later receipt or invocation, no live or completed stage delivery, and no previous
+reconstruction key. Missing or ambiguous pause evidence stays held. An active pause on the task or
+an ancestor leaves the reconstruction key unused until that hold is released. The issue lock and
+persistent stage/participant key deduplicate concurrent recovery. The original
+cancelled receipt stays unchanged; completed worker work, provider history,
+planning context, reviews and decision counters are not rewritten. A provider
+failure or deliberate operator Stop is not an unstarted request.
+
+The saved-receipt worker rechecks execution authority and all existing guards.
+This recovery adds no scheduler or periodic scan and cannot repeat itself after
+its replacement request is cancelled.
+
 ### Stop requests recorded before provider dispatch
 
 A sealed legacy preparation can contain a pending Stop request without a
