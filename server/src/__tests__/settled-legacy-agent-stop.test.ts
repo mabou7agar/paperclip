@@ -38,6 +38,50 @@ describe("Stop after a sealed legacy preparation", () => {
   const stopped = () => agentExecutionsHaveStopped(db, [agentId]);
   const patch = (values: Partial<typeof heartbeatRuns.$inferInsert>) => db.update(heartbeatRuns).set(values).where(eq(heartbeatRuns.id, runId));
 
+  async function requestedStop() {
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    return { state: "requested", requestedAt: new Date(run.finishedAt!.getTime() - 1).toISOString() };
+  }
+
+  it.each(["claude_local", "codex_local"])("settles a sealed %s preparation with a pending Stop receipt without forging acknowledgement", async adapterType => {
+    const receipt = await requestedStop();
+    await patch({ runnerProfileJson: { adapterDispatch: { adapterType } },
+      resultJson: { stopReason: "cancelled", executionCancellation: receipt } });
+    const params = { sessionId: randomUUID(), contextMarker: "original-planning-context" };
+    await db.insert(agentTaskSessions).values({ companyId, agentId, taskKey: issueId,
+      adapterType, sessionParamsJson: params, lastRunId: runId });
+    const [before] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId));
+    expect(await stopped()).toBe(true);
+    expect(await stopped()).toBe(true);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, runId))).toEqual([before]);
+    expect((await db.select().from(issues).where(eq(issues.id, issueId)))[0]).toMatchObject({
+      status: "blocked", description: "Original plan and context" });
+    expect((await db.select().from(agentTaskSessions).where(eq(agentTaskSessions.taskKey, issueId)))[0].sessionParamsJson).toEqual(params);
+  });
+
+  it.each([null, [], {}, { state: "failed", requestedAt: "2020-01-01T00:00:00Z" },
+    { state: "requested" }, { state: "requested", requestedAt: "not-a-date" },
+    { state: "requested", requestedAt: "2020-01-01T00:00:00Z" },
+    { state: "requested", requestedAt: "2100-01-01T00:00:00Z" },
+  ])("keeps malformed or out-of-window Stop receipts held: %j", async receipt => {
+    await patch({ resultJson: { stopReason: "cancelled", executionCancellation: receipt } });
+    expect(await stopped()).toBe(false);
+  });
+
+  it.each(["extra_field", "execution_event", "journal_gap", "current_boot", "live_process", "provider_usage", "pending_cleanup"])(
+    "keeps the existing Stop guard with a requested receipt: %s", async contradiction => {
+      const receipt = await requestedStop();
+      await patch({ resultJson: { stopReason: "cancelled", executionCancellation: receipt } });
+      if (contradiction === "extra_field") await patch({ resultJson: { executionCancellation: { ...receipt, providerWorkStarted: true } } });
+      if (contradiction === "execution_event") await db.update(heartbeatRunEvents).set({ eventType: "adapter.invoke" }).where(and(eq(heartbeatRunEvents.runId, runId), eq(heartbeatRunEvents.seq, 2)));
+      if (contradiction === "journal_gap") await db.delete(heartbeatRunEvents).where(and(eq(heartbeatRunEvents.runId, runId), eq(heartbeatRunEvents.seq, 1)));
+      if (contradiction === "current_boot") await patch({ controllerBootId: legacyControllerBootId });
+      if (contradiction === "live_process") await patch({ processPid: process.pid });
+      if (contradiction === "provider_usage") await patch({ usageJson: { accountingProviderWorkStarted: true } });
+      if (contradiction === "pending_cleanup") await db.insert(environmentLeases).values({ companyId, heartbeatRunId: runId, provider: "local", status: "pending_cleanup" });
+      expect(await stopped()).toBe(false);
+    });
+
   it("allows agent cleanup without acknowledging, resuming or rewriting the historical task", async () => {
     const params = { sessionId: randomUUID(), connectionId: randomUUID(), contextMarker: "retained-plan" };
     await db.insert(agentTaskSessions).values({ companyId, agentId, taskKey: issueId,

@@ -10,7 +10,15 @@ const accountingKeys = new Set(["ledgerScope", "accountingReceiptReady", "accoun
 const refusalBeforeDispatch = new Set(["legacy_disposition_repair_suppressed", "continuation_task_ownership_changed"]);
 const preparationResultKeys = new Set(["cancellation", "conversationContinuation", "stopReason", "timeoutFired",
   "timeoutSource", "timeoutConfigured", "effectiveTimeoutSec", "startupCancellation", "cancelledByActorType",
-  "cancelledByUserId", "retryAt", "executionRecovery"]);
+  "cancelledByUserId", "retryAt", "executionRecovery", "executionCancellation"]);
+
+function isPendingPreparationStop(value: unknown, startedAt: Date, finishedAt: Date): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const receipt = value as Record<string, unknown>;
+  if (Object.keys(receipt).length !== 2 || receipt.state !== "requested" || typeof receipt.requestedAt !== "string") return false;
+  const requestedAt = Date.parse(receipt.requestedAt);
+  return Number.isFinite(requestedAt) && requestedAt >= startedAt.getTime() && requestedAt <= finishedAt.getTime();
+}
 
 /** Physical Stop proof only. Never resolves a task recovery hold or authorizes replay.
  * These built-in adapters await adapter.invoke publication before a CLI execution
@@ -33,6 +41,8 @@ export async function hasSettledLegacyPreparation(db: Db, run: CancelledExecutio
     || Object.keys(run.usageJson ?? {}).some(key => !accountingKeys.has(key))
     || Boolean(run.stdoutExcerpt) || Boolean(run.stderrExcerpt) || (run.logBytes ?? 0) > 0
     || !Number.isSafeInteger(run.nextEventSeq) || run.nextEventSeq <= 1) return false;
+  if (Object.hasOwn(run.resultJson ?? {}, "executionCancellation") &&
+      !isPendingPreparationStop(run.resultJson!.executionCancellation, run.startedAt, run.finishedAt)) return false;
   // Unclassified output cannot be assumed to be a preparation diagnostic. The
   // named refusals are server-owned gates which return before adapter dispatch.
   if (run.lastOutputSeq !== 0 && !refusalBeforeDispatch.has(run.errorCode ?? "")) return false;
