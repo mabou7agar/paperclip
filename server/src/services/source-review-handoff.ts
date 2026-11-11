@@ -51,14 +51,20 @@ export async function prepareSourceReviewHandoff(db: Db, input: {
   const previous = parseIssueExecutionState(task.executionState);
   const receipt = previous?.sourceReviewCapture;
   // Only the persisted receipt may deduplicate. An input receipt is never authority.
-  if (previous?.status === "pending" && receipt?.stageId === stage.id &&
-      receipt.participantAgentId === participant.agentId && receipt.companyId === task.companyId && receipt.issueId === task.id &&
+  const sameReview = receipt?.stageId === stage.id && receipt.participantAgentId === participant.agentId;
+  const advancingReview = previous?.currentStageType === "review" && previous.currentStageId === receipt?.stageId &&
+    previous.currentParticipant?.agentId === receipt?.participantAgentId &&
+    typeof previous.currentStageIndex === "number" && state.currentStageIndex === previous.currentStageIndex + 1 &&
+    state.completedStageIds.includes(previous.currentStageId!) && state.lastDecisionOutcome === "approved";
+  if (previous?.status === "pending" && receipt && (sameReview || advancingReview) && receipt.companyId === task.companyId && receipt.issueId === task.id &&
       receipt.workspaceId === task.executionWorkspaceId && receipt.bindingRevision === task.workspaceBindingRevision &&
       receipt.projectId === task.projectId && receipt.repositoryId === sourceMemoryRepositoryId(workspace!.repoUrl!)) {
     if (constraint && constraint !== receipt.candidateSha) sourceReviewCaptureHold("explicit_candidate_mismatch");
-    return { patch: { ...nextPatch, executionState: { ...state, sourceReviewCapture: receipt,
+    const carried = { ...receipt, stageId: stage.id, participantAgentId: participant.agentId };
+    return { patch: { ...nextPatch, executionState: { ...state, sourceReviewCapture: carried,
       reviewRequest: { instructions: state.reviewRequest?.instructions ?? "Review the frozen source candidate.", candidateSha: receipt.candidateSha } } }, event: null };
   }
+  if (previous?.status === "pending" && previous.currentStageType === "review") sourceReviewCaptureHold("frozen_review_receipt_mismatch");
   if (!input.agentId || !input.runId) sourceReviewCaptureHold("writer_missing");
   const captured = await captureWorkspaceReviewCandidate(db, task, { agentId: input.agentId, runId: input.runId, native: input.nativeOwner });
   if (constraint && constraint !== captured.candidateSha) sourceReviewCaptureHold("explicit_candidate_mismatch");

@@ -1,6 +1,9 @@
 // Dependency-free fixture loader: execute the REAL task/workspace, access and
 // authorization services. Replace storage/SQL and unrelated notification/trace
-// infrastructure only. Unexpected infrastructure calls throw, never grant access.
+// infrastructure plus protocol normalization/schema validation below. SQL predicates
+// approximate in-memory rows; they do not implement PostgreSQL NULL/join/lock
+// semantics. Completion schema/normalizer stubs are NOT protocol validation proof.
+// Unexpected infrastructure calls throw, never grant access.
 import vm from 'node:vm';
 import { readFile } from 'node:fs/promises';
 import { stripTypeScriptTypes } from 'node:module';

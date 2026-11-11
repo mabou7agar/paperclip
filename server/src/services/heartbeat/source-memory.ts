@@ -37,7 +37,18 @@ export async function prepareHeartbeatSourceMemory(input: {
       result.errorMessage = "Required current source citations were not verified.";
     },
   });
-  if (!process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG) return unavailable("source_memory_unconfigured");
+  if (!process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG) return {
+    evidence: null, beforeDispatch: async () => {}, observeCommit: async () => {},
+    // The protocol advertises this optional field even when the feature is off.
+    // Discard volunteered citations without assigning them evidence standing.
+    consumeResult: async (result: Completion) => {
+      if (result.resultJson) {
+        const { sourceCitations: _citations, sourceCitationResults: _results,
+          sourceCurrentEvidenceSatisfied: _standing, ...rest } = result.resultJson;
+        result.resultJson = rest;
+      }
+    },
+  };
   // Filter before task authorization: an opt-in for one repository cannot affect
   // unrelated companies, directory workspaces, or ephemeral workspace records.
   if (!input.persistedWorkspaceId || !await sourceMemoryBindingEnabled({ ...input.identity, repoUrl: input.workspace.repoUrl })) {

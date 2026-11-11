@@ -27,7 +27,7 @@ test('structured consumption uses real task/workspace/access authorization with 
   process.env.PAPERCLIP_ISSUE_PRIVACY_MODE = 'off';
   try {
     git('init', '-q');
-    const commit = content => { execFileSync('git', ['-C', repo, 'add', '.']); git('-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.invalid', 'commit', '-qm', content); return git('rev-parse', 'HEAD'); };
+    const commit = content => { git('add', '.'); git('-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.invalid', 'commit', '-qm', content); return git('rev-parse', 'HEAD'); };
     const old = 'old line\nsecond line\n'; await writeFile(path.join(repo, 'example.ts'), old); const historicalSha = commit('historical');
     const currentContent = 'current line\nsecond line\n'; await writeFile(path.join(repo, 'example.ts'), currentContent); const fullSha = commit('current');
     const companyId = 'synthetic-company', projectId = 'project', issueId = 'task', workspaceId = 'workspace', runId = 'run', agentId = 'agent';

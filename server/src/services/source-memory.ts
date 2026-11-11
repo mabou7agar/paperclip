@@ -43,9 +43,13 @@ export function sourceMemoryRepositoryId(url: string) {
   return `${parsed.hostname.toLowerCase()}/${name}`;
 }
 
-async function configuration(file: string): Promise<Configuration> {
+async function configuration(file: string, scope: Pick<SourceMemoryInput, "companyId" | "projectId">): Promise<Configuration | null> {
   requireValue((await stat(file)).size <= 1_048_576, "configuration_budget");
   const c = JSON.parse(await readFile(file, "utf8")) as Configuration;
+  requireValue(Array.isArray(c.bindings), "configuration_invalid");
+  const bindings = c.bindings.filter(b => b?.companyId === scope.companyId && b?.projectId === scope.projectId);
+  if (!bindings.length) return null;
+  c.bindings = bindings;
   requireValue(c.version === 1 && path.isAbsolute(c.state) && path.isAbsolute(c.reader) && path.isAbsolute(c.manifest) && Array.isArray(c.bindings), "configuration_invalid");
   for (const b of c.bindings) requireValue(b.companyId && b.projectId && b.repositoryId && Array.isArray(b.roots) && b.roots.every(r => path.isAbsolute(r)) && (!b.remoteRoots || Array.isArray(b.remoteRoots) && b.remoteRoots.every(r => path.posix.isAbsolute(r))), "configuration_invalid");
   return c;
@@ -55,17 +59,19 @@ async function configuration(file: string): Promise<Configuration> {
 export async function sourceMemoryProjectBindingEnabled(input: Pick<SourceMemoryInput, "companyId" | "projectId">,
   configFile = process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG): Promise<boolean> {
   if (!configFile || !input.projectId) return false;
-  return (await configuration(configFile)).bindings.some(b => b.companyId === input.companyId && b.projectId === input.projectId);
+  return Boolean(await configuration(configFile, input));
 }
 
 /** Opt-in filter only; this grants no task, filesystem or reader authority. */
 export async function sourceMemoryBindingEnabled(input: Pick<SourceMemoryInput, "companyId" | "projectId" | "repoUrl">,
   configFile = process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG): Promise<boolean> {
   if (!configFile || !input.projectId || !input.repoUrl) return false;
-  const config = await configuration(configFile);
+  const config = await configuration(configFile, input);
+  if (!config) return false;
   const projectBindings = config.bindings.filter(b => b.companyId === input.companyId && b.projectId === input.projectId);
   if (!projectBindings.length) return false;
-  const repositoryId = sourceMemoryRepositoryId(input.repoUrl);
+  let repositoryId: string;
+  try { repositoryId = sourceMemoryRepositoryId(input.repoUrl); } catch { return false; }
   const bindings = projectBindings.filter(b => b.repositoryId === repositoryId);
   requireValue(bindings.length <= 1, "binding_ambiguous");
   return bindings.length === 1;
@@ -74,11 +80,13 @@ export async function sourceMemoryBindingEnabled(input: Pick<SourceMemoryInput, 
 /** Absent configuration does no I/O. Enabled failures refuse source evidence, never use an old card. */
 export async function prepareSourceMemory(input: SourceMemoryInput, operation: "phase" | "commit" | "verify" | "citation" | "capture" = "phase", configFile = process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG, remoteRead?: RemoteSourceReader, expected?: Pick<SourceMemoryEvidence, "revision" | "ref" | "dirty">, citation?: CitationRead): Promise<SourceMemoryEvidence | null> {
   if (!configFile) return null;
-  const config = await configuration(configFile);
   if (!input.projectId || !input.repoUrl) return null;
+  const config = await configuration(configFile, input);
+  if (!config) return null;
   const projectBindings = config.bindings.filter(b => b.companyId === input.companyId && b.projectId === input.projectId);
   if (!projectBindings.length) return null; // Unbound projects must not parse repository input.
-  const repositoryId = sourceMemoryRepositoryId(input.repoUrl);
+  let repositoryId: string;
+  try { repositoryId = sourceMemoryRepositoryId(input.repoUrl); } catch { return null; }
   const bindings = projectBindings.filter(b => b.repositoryId === repositoryId);
   if (!bindings.length) return null; // Unbound repositories are never indexed.
   requireValue(bindings.length === 1, "binding_ambiguous");
@@ -125,6 +133,7 @@ const terminate = () => {
   try { process.kill(process.pid, 'SIGKILL'); } catch {}
 };
 const expectedParent = Number(process.argv[3]);
+if (expectedParent === 1) { process.stdout.write('source_memory_parent_pid1_unsupported'); process.exit(1); }
 if (!Number.isSafeInteger(expectedParent) || expectedParent <= 1 || process.ppid !== expectedParent || !process.connected) terminate();
 const deadline = process.hrtime.bigint() + 180_000_000_000n;
 const deadlineAt = Date.now() + 180000;
@@ -153,6 +162,7 @@ await import(pathToFileURL(process.argv[1]).href);
 
 function runWorker(payload: WorkerInput, signal?: AbortSignal, remoteRead?: RemoteSourceReader): Promise<SourceMemoryEvidence> {
   return new Promise((resolve, reject) => {
+    requireValue(process.pid !== 1, "parent_pid1_unsupported");
     requireValue(!signal?.aborted, "cancelled");
     const child = spawn(process.execPath, ["--input-type=module", "--eval", SOURCE_MEMORY_WORKER_BOOTSTRAP, fileURLToPath(import.meta.url), "--source-memory-worker", String(process.pid)], { stdio: ["pipe", "pipe", "pipe", "ipc"], detached: process.platform !== "win32", env: { ...gitEnv, NODE_OPTIONS: "", NODE_PATH: "", NODE_NO_WARNINGS: "1" } });
     let bytes = 0; let output = ""; let failure: Error | null = null;

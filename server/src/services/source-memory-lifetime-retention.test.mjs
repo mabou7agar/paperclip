@@ -121,7 +121,7 @@ for (const afterRelease of [false, true]) test(`independent watchdog kills synch
   } finally { await rm(directory,{recursive:true,force:true}); }
 });
 
-for (const scenario of ['wrong-parent','deadline','watchdog-failure','normal']) test(`independent watchdog ${scenario} fails closed or exits normally`, {timeout:8000,skip:process.platform==='win32'}, async () => {
+for (const scenario of ['pid1','wrong-parent','deadline','watchdog-failure','normal']) test(`independent watchdog ${scenario} fails closed or exits normally`, {timeout:8000,skip:process.platform==='win32'}, async () => {
   const { SOURCE_MEMORY_WORKER_BOOTSTRAP } = await import('./source-memory.ts');
   const { mkdtemp, writeFile, readFile, rm } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os'); const path = await import('node:path');
@@ -140,15 +140,16 @@ for (const scenario of ['wrong-parent','deadline','watchdog-failure','normal']) 
       assert.equal(bootstrap.split("parentPort.postMessage('ready');").length-1,1);
       bootstrap=bootstrap.replace("parentPort.postMessage('ready');","throw Error('synthetic watchdog startup failure');");
     }
-    child=spawn(process.execPath,['--input-type=module','--eval',bootstrap,entry,'--source-memory-worker',String(scenario==='wrong-parent'?process.pid+1:process.pid)],
+    child=spawn(process.execPath,['--input-type=module','--eval',bootstrap,entry,'--source-memory-worker',String(scenario==='pid1'?1:scenario==='wrong-parent'?process.pid+1:process.pid)],
       {detached:true,stdio:['ignore','pipe','pipe','ipc']});
     let output='';child.stdout.on('data',value=>output+=value);child.stderr.resume();
     const timer=setTimeout(()=>{timedOut=true;try{process.kill(-child.pid,'SIGKILL')}catch{}},5000);
     let code,signal;try{[code,signal]=await once(child,'close');}finally{clearTimeout(timer)}
     assert.equal(timedOut,false,'Fixture cleanup must not enforce the product deadline');
-    if(scenario==='normal') { assert.equal(code,0);assert.equal(signal,null);assert.match(output,/normal/); }
+    if(scenario==='pid1') { assert.equal(code,1); assert.equal(signal,null); assert.equal(output,'source_memory_parent_pid1_unsupported'); }
+    else if(scenario==='normal') { assert.equal(code,0);assert.equal(signal,null);assert.match(output,/normal/); }
     else { assert.equal(signal,'SIGKILL'); }
-    if(['wrong-parent','watchdog-failure'].includes(scenario)) await assert.rejects(readFile(marker),{code:'ENOENT'});
+    if(['pid1','wrong-parent','watchdog-failure'].includes(scenario)) await assert.rejects(readFile(marker),{code:'ENOENT'});
     else assert.equal(await readFile(marker,'utf8'),'imported');
   } finally {
     if(child?.exitCode===null&&child?.signalCode===null)try{process.kill(-child.pid,'SIGKILL')}catch{}

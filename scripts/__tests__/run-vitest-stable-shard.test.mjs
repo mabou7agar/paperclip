@@ -83,6 +83,8 @@ test("the general-server shards form a complete, non-overlapping partition", () 
 
 test("general shards retain scripts and route-named suites outside the serialized directory", () => {
   const general = dryRunJson(["--mode", "general", "--group", "general-server", "--shard-index", "0", "--shard-count", "1"]);
+  assert.ok(!general.selectedGeneralServerSuites.includes("server/src/services/source-review-handoff.test.ts"),
+    "fixture-only source review suite belongs to its gated lane");
   for (const file of [
     "server/scripts/verify-runner-vendor-dependencies.test.mjs",
     "server/src/services/openrouter-models.test.ts",

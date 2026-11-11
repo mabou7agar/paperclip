@@ -1,6 +1,7 @@
 # Maintained source evidence at runtime
 
-Prepared for OSA-371 against runtime source `cbc440ad58291f8d8a6d90264c56105dcc61ba58`.
+Historical foundation: OSA-371 on `cbc440ad58291f8d8a6d90264c56105dcc61ba58`;
+current source contract includes the A6c gates on accepted A6b `76ef6151`.
 This patch is inert until an operator supplies `PAPERCLIP_SOURCE_MEMORY_CONFIG`.
 Installation, configuration changes, live consumer activation, merge and deployment
 remain outside the implementation handoff. Final entire-diff independent actual
@@ -379,8 +380,8 @@ foundation commits are ported separately, preserving PR13 session continuity.
 A2, A4+A4b and A5 are then applied with their exact accepted patch hashes.
 The only textual conflict joins both appended runtime-document sections.
 
-Review handoff supplies a full SHA as `reviewRequest.candidateSha` in the normal
-native stage transition. The shared API validator requires 40 lowercase hex
+Review handoff captures clean writer HEAD on the server in the normal native
+stage transaction. Optional `reviewRequest.candidateSha` only constrains that capture. The shared API validator requires 40 lowercase hex
 characters when supplied. Heartbeat produces `reviewCandidateSha` only from the
 server-owned pending review stage assigned to that reviewer; caller context and
 baseRef never supply it. A configured, bound review missing this field refuses
@@ -388,7 +389,8 @@ admission with `source_memory_review_candidate_missing`. Retry creation removes
 the prior `sourceSnapshot` without changing the predecessor; the new run records
 its own actual HEAD through the existing conditional write.
 
-Unconfigured/unbound citations are rejected. Recovery does not index a new HEAD
+With configuration unset, volunteered citations and claimed evidence standing are
+stripped without failing completion. Configured but unbound citations are rejected. Recovery does not index a new HEAD
 as though it were the completed run's saved source: submitted citations fail
 closed with `recovery_snapshot_unverified` until saved authority can be verified.
 Configured recovery reviews without current evidence also fail closed. There is
@@ -465,3 +467,52 @@ native qualification are the already-arranged operator gates described in
 [source-memory-a6b-isolated-validation.md](source-memory-a6b-isolated-validation.md).
 The local Node emitted-worker tests do not replace those gates or final entire-diff
 independent Claude ACP review. Activation remains disabled.
+
+
+## A6c pre-activation requirements
+
+The server must run below an init (the shipped image uses tini), or another
+non-PID-1 parent. Node as PID 1 refuses source-memory work with
+`source_memory_parent_pid1_unsupported` before import or source access. The
+bootstrap also reports that code if supplied trusted parent PID 1. It does not
+weaken disconnect or watchdog checks to support a no-init deployment.
+
+Review-to-review advancement retains the original writerRunId, candidate SHA and
+capture event identity, rebinding only stage and participant. It never reads HEAD
+under a reviewer's lease. A missing/mismatched frozen receipt refuses with
+`frozen_review_receipt_mismatch`. Board/user entry without a writer run retains
+`writer_missing`; an operator must use the existing authorized writer handoff.
+
+Configuration must be readable JSON with a bindings array so scope can be
+identified. After that envelope is read, only matching company/project bindings
+and their shared paths are validated. Invalid paths or bindings in another scope
+do not fail unrelated work. An unreadable or syntactically invalid envelope
+cannot safely identify scope and still refuses; no cached authority is inferred.
+Unsupported/non-HTTPS workspace URLs are treated as unbound, never read. A realized
+workspace URL mismatch remains an unbound policy path, not source authorization.
+
+### CI fixture lane
+
+The normal policy lane and default Vitest shards require no source-memory fixture.
+The separate `source_memory` job is explicitly gated by repository variable
+`SOURCE_MEMORY_TESTS_ENABLED=true`. An operator must provision a code-only pinned
+reader (`SOURCE_MEMORY_READER_FIXTURE`) and the qualified emitted service for the
+exact checked-out source (`SOURCE_MEMORY_BUILT_SERVICE`) on that runner before
+enabling it. Missing files fail loudly. This source patch provisions neither,
+activates no repository variable and claims no hosted Actions execution.
+The lane runs all nine Node suites and the review-stage and transaction suites.
+Only that lane sets `PAPERCLIP_SOURCE_MEMORY_TESTS=1` to include the transaction
+suite; later normal policy checks are independent of its fixture result.
+
+The dependency-free authorization fixture executes real authorization and access
+modules with synthetic rows and SQL predicate approximations. It does not prove
+PostgreSQL joins, SQL NULL semantics, transaction locks, protocol schema validation,
+or concurrency. Its completion normalizer/schema stubs are fixture boundaries;
+full transaction evidence remains the separate qualified integration suite.
+The reviewer-time two-stage unit fixture similarly tests actual handoff logic
+with parsed synthetic policy states, not the database transition engine.
+
+Previous-release rollback restrictions are recorded in
+`rules/upgrade-safe-run-state.mdc`. Actual-bundle parent-kill qualification at the
+final candidate remains an operator activation gate; no earlier bundle receipt
+is promoted to this candidate. Recovery policy remains a separate CTO decision.

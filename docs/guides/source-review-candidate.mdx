@@ -7,6 +7,9 @@ description: Optional candidate SHA on the existing native task review API, with
 alongside the existing required `reviewRequest.instructions`. This adds a field
 to the native task API; it creates no new route or review workflow.
 
+This is a schema example, not permission to mutate a live task. The disposable
+fixture below is the only environment described here.
+
 ```json
 {
   "status": "in_review",
@@ -26,24 +29,32 @@ invalid. Malformed values return HTTP 400 with the validation path
 review-stage transition and audit rules still apply. Do not send assignee or
 execution-stage overrides.
 
-The native execution state retains the candidate in
-`executionState.reviewRequest.candidateSha`. Heartbeat derives
-`reviewCandidateSha` from the server-owned pending review stage only for its
-assigned reviewer. Missing stages, another participant, or an invalid candidate
-produce no binding. A configured, bound source-memory review without a candidate
-fails closed; a mismatched checkout also refuses admission. The field is a source
-identity constraint, never permission to execute, accept work or activate indexing.
+For a configured bound task, the server captures clean final HEAD under the
+writer's task, run and workspace leases in the same transaction as the review
+transition. Omitting `candidateSha` allows that server capture; supplying it only
+narrows capture and returns a conflict if it differs from observed HEAD. A client
+SHA never creates a trusted receipt. Board/user transitions without an eligible
+writer run refuse with `writer_missing`; they cannot manufacture writer authority.
 
-The contract owners are `packages/shared/src/validators/issue.ts`,
-`packages/shared/src/types/issue.ts`,
-`server/src/services/heartbeat/source-memory-run-state.ts` and its call in
-`server/src/services/heartbeat.ts`.
+The server persists `executionState.sourceReviewCapture` and
+`executionState.reviewRequest.candidateSha`. Heartbeat derives `reviewCandidateSha`
+only for the assigned pending reviewer and matching task/workspace/binding/stage.
+Consecutive review stages carry the original receipt and candidate forward when
+no writer handoff occurred; they do not recapture reviewer-time HEAD. A return to
+the writer requires a fresh writer-owned capture on its next review handoff.
+A configured bound review without a matching receipt fails closed. This is source
+identity, never permission to execute, accept work or activate indexing.
+
+Capture is owned by `server/src/services/workspace-source-inspection.ts` and
+`source-review-handoff.ts`; persistence by `issues.ts`. The request contract lives
+in `packages/shared/src/validators/issue.ts` and `types/issue.ts`; heartbeat consumes
+it through `server/src/services/heartbeat/source-memory-run-state.ts`.
 
 ## Compatibility and mixed-version order
 
 Existing requests with only `reviewRequest.instructions` remain valid at the API
-schema level. They do not silently acquire current-source evidence standing when
-source-memory review requires a bound candidate. Old saved results and sessions
+schema level. For configured bound tasks they use server capture under the same writer leases;
+otherwise they do not acquire current-source evidence standing. Old saved results and sessions
 remain intact; never infer a candidate from a branch, baseRef or arbitrary context.
 
 Upgrade the server schema and native candidate producer before clients send the

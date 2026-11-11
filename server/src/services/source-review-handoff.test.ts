@@ -8,7 +8,7 @@ import { beforeAll, afterAll, afterEach, describe, it, expect, vi } from "vitest
 import { createDb, companies, agents, projects, projectWorkspaces, executionWorkspaces,
   executionWorkspaceRuntimeLeases, heartbeatRuns, nativeRunFinalizations, issues, activityLog, completionContracts, agentWakeupRequests, type Db } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
-import { normalizeIssueExecutionPolicy } from "./issue-execution-policy.js";
+import { applyIssueExecutionPolicyTransition, normalizeIssueExecutionPolicy } from "./issue-execution-policy.js";
 import { issueService } from "./issues.js";
 import { prepareSourceReviewHandoff, hasConfiguredSourceReviewGate } from "./source-review-handoff.js";
 import { sourceReviewCandidateSha } from "./heartbeat/source-memory-run-state.js";
@@ -104,6 +104,25 @@ describe('source review handoff transaction (synthetic only)', () => {
     const events = await db.select().from(activityLog).where(and(eq(activityLog.entityId, f.issueId), eq(activityLog.action, 'issue.source_review_candidate_captured')));
     expect(events).toHaveLength(1);
   });
+  it('advances two review stages without recapturing reviewer-time HEAD', async () => {
+    const f = await seed(), secondStageId = randomUUID(), secondReviewerId = randomUUID();
+    await db.insert(agents).values({ id: secondReviewerId, companyId: f.companyId, name: 'Second reviewer', adapterType: 'paperclip_runner' });
+    await db.update(issues).set({ executionPolicy: normalizeIssueExecutionPolicy({ stages: [
+      { id: f.stageId, type: 'review', participants: [{ type: 'agent', agentId: f.reviewerId, userId: null }] },
+      { id: secondStageId, type: 'review', participants: [{ type: 'agent', agentId: secondReviewerId, userId: null }] },
+    ] }) }).where(eq(issues.id, f.issueId));
+    const entered = await f.enter();
+    await writeFile(join(f.repo, 'example.ts'), 'later reviewer-time HEAD\n'); f.git('add', '.');
+    f.git('-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.invalid', 'commit', '-qm', 'later HEAD');
+    expect(f.git('rev-parse', 'HEAD')).not.toBe(f.sha);
+    const transition = applyIssueExecutionPolicyTransition({ issue: entered!, policy: normalizeIssueExecutionPolicy(entered!.executionPolicy)!,
+      requestedStatus: 'done', requestedAssigneePatch: {}, actor: { agentId: f.reviewerId, userId: null }, commentBody: 'Approve the frozen candidate.' });
+    const advanced = await issueService(db).update(f.issueId, { ...transition.patch, actorAgentId: f.reviewerId });
+    expect(advanced!.executionState!.sourceReviewCapture).toEqual({ ...entered!.executionState!.sourceReviewCapture,
+      stageId: secondStageId, participantAgentId: secondReviewerId });
+    expect(advanced!.executionState!.reviewRequest!.candidateSha).toBe(f.sha);
+    expect(await db.select().from(activityLog).where(and(eq(activityLog.entityId, f.issueId), eq(activityLog.action, 'issue.source_review_candidate_captured')))).toHaveLength(1);
+  });
   it('explicit mismatch rolls back stage and event', async () => {
     const f = await seed(); await expect(f.enter('b'.repeat(40))).rejects.toMatchObject({ details: { code: 'review_candidate_capture_unavailable', reason: 'explicit_candidate_mismatch' } });
     const [task] = await db.select().from(issues).where(eq(issues.id, f.issueId)); expect(task!.status).toBe('in_progress'); expect(task!.executionState).toBeNull();
@@ -127,7 +146,12 @@ describe('source review handoff transaction (synthetic only)', () => {
         currentParticipant: { type: 'agent', agentId: f.agentId, userId: null }, returnAssignee: null, reviewRequest: null, completedStageIds: [], lastDecisionId: null, lastDecisionOutcome: null };
       await expect(prepareSourceReviewHandoff(db, { task: task!, patch: { status: 'in_review', executionState: state as never },
         agentId: f.agentId, runId: f.runId, nativeOwner: f.owner })).rejects.toBeInstanceOf(SourceReviewCaptureUnavailable);
-    } else await expect(f.enter()).rejects.toBeInstanceOf(SourceReviewCaptureUnavailable);
+    } else {
+      const reasons = { remote: 'workspace_not_local_worktree', plugin: 'workspace_not_local_worktree', unbound: 'workspace_unbound',
+        nonrepository: 'workspace_unbound', directory: 'source_unverifiable', dirty: 'source_unverifiable', detached: 'source_unverifiable',
+        lease: 'workspace_writer_lease_mismatch', nativeLease: 'native_lease_mismatch', binding: 'writer_binding_mismatch' };
+      await expect(f.enter()).rejects.toMatchObject({ details: { code: 'review_candidate_capture_unavailable', reason: reasons[mode] } });
+    }
     const [task] = await db.select().from(issues).where(eq(issues.id, f.issueId)); expect(task!.status).toBe('in_progress');
   });
   it('ordinary native done with omitted candidate enters the configured stage and wakes its participant once', async () => {

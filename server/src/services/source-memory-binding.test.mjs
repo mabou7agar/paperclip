@@ -19,8 +19,8 @@ test('configured source memory filters company/project bindings before parsing U
   await t.test('another company cannot inherit a project binding or parse its malformed URL', async () => {
     assert.equal(await prepareSourceMemory({ ...input, companyId: 'other-company' }, 'phase', configFile), null);
   });
-  await t.test('bound projects retain URL validation', async () => {
-    await assert.rejects(prepareSourceMemory(input, 'phase', configFile), { code: 'ERR_INVALID_URL' });
+  await t.test('unsupported repository URLs remain unbound', async () => {
+    assert.equal(await prepareSourceMemory(input, 'phase', configFile), null);
   });
   await t.test('matching bound repository proceeds to its remote-authority guard', async () => {
     await assert.rejects(prepareSourceMemory({ ...input, repoUrl: 'https://github.com/example/synthetic.git' }, 'phase', configFile), /source_memory_remote_source_attestation_unavailable/);
@@ -85,4 +85,40 @@ test('heartbeat filters opt-in before real task authorization', async t => {
     if (previous === undefined) delete process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG; else process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG = previous;
     if (privacy === undefined) delete process.env.PAPERCLIP_ISSUE_PRIVACY_MODE; else process.env.PAPERCLIP_ISSUE_PRIVACY_MODE = privacy;
   }
+});
+
+
+test('unconfigured heartbeat strips volunteered citations and succeeds without authority or IO', async () => {
+  const { prepareHeartbeatSourceMemory } = await import('./heartbeat/source-memory.ts');
+  const saved = process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG;
+  delete process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG;
+  const forbidden = async () => { throw Error('disabled feature must perform no IO'); };
+  try {
+    const prepared = await prepareHeartbeatSourceMemory({
+      identity: { companyId: 'company', projectId: 'project', issueId: 'task', runId: 'run', phase: 'review' },
+      workspace: { cwd: '/unused', repoUrl: 'invalid' }, persistedWorkspaceId: 'workspace',
+      recovering: false, authority: null, remote: null, authorize: forbidden, recordRevision: forbidden,
+      assertOwned: forbidden, readAuthority: forbidden,
+    });
+    await prepared.beforeDispatch(); await prepared.observeCommit();
+    const completion = { exitCode: 0, resultJson: { answer: 'finished', sourceCitations: [{ mode: 'current' }],
+      sourceCurrentEvidenceSatisfied: true, sourceCitationResults: ['untrusted'] } };
+    await prepared.consumeResult(completion);
+    assert.equal(completion.exitCode, 0); assert.equal(completion.errorCode, undefined);
+    assert.deepEqual(completion.resultJson, { answer: 'finished' });
+  } finally {
+    if (saved === undefined) delete process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG; else process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG = saved;
+  }
+});
+
+test('unrelated companies ignore invalid configured paths and bindings', async t => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'source-config-scope-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const file = path.join(root, 'config.json');
+  await writeFile(file, JSON.stringify({ version: 9, state: null, bindings: [
+    { companyId: 'bound', projectId: 'project', roots: null }, null,
+  ] }));
+  const input = { companyId: 'other', projectId: 'project', repoUrl: 'https://github.com/example/repo' };
+  assert.equal(await prepareSourceMemory(input, 'phase', file), null);
+  await assert.rejects(prepareSourceMemory({ ...input, companyId: 'bound' }, 'phase', file), /configuration_invalid/);
 });

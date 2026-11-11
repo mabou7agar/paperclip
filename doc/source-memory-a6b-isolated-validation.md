@@ -225,7 +225,7 @@ For the actual bundle gate use source-controlled
 `scripts/source-memory/qualify-bundled-worker.mjs` (the successor to the retained
 external wrapper) with its four existing arguments: absolute final qualifier,
 absolute unique `.mjs` worker chunk, qualifier SHA-256, chunk SHA-256. Set the
-existing emitted-service and code-only-reader variables. It checks the **five
+existing emitted-service and code-only-reader variables. It checks the **six
 worker arguments** and maps **only index 3**, the module filename, to the actual
 chunk. The `--eval` bootstrap string, final worker flag, IPC/options/env and all
 deadlines remain exact production inputs. The old first-argument mapping is

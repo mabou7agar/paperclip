@@ -10,7 +10,8 @@ import { prepareSourceMemory, assertCurrentSourceCitation, affectedSourceFiles, 
 
 const base = await mkdtemp(path.join(os.tmpdir(), 'source-memory-fixture-'));
 const repo = path.join(base, 'repo'); await mkdir(repo);
-const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim();
+const isolatedGit = (args, options = {}) => execFileSync('git', args, { ...options, env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', ...options.env } });
+const git = (...args) => isolatedGit(['-C', repo, ...args], { encoding: 'utf8', env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim();
 git('init', '--quiet'); git('remote', 'add', 'origin', 'https://github.com/example/synthetic'); git('config', 'user.name', 'Synthetic Fixture'); git('config', 'user.email', 'fixture@example.invalid');
 const commit = () => { git('add', '.'); git('-c', 'core.hooksPath=/dev/null', 'commit', '--quiet', '-m', 'synthetic source'); return git('rev-parse', 'HEAD'); };
 await mkdir(path.join(repo, 'src')); await mkdir(path.join(repo, 'tests'));
@@ -131,9 +132,9 @@ test('isolated runtime source-memory contract', async t => {
   });
   await t.test('a frozen review checkout remains independent from a changing task branch', async () => {
     const frozen = path.join(base, 'frozen');
-    execFileSync('git', ['clone', '--quiet', '--no-hardlinks', '--local', repo, frozen]);
-    execFileSync('git', ['-C', frozen, 'remote', 'set-url', 'origin', input.repoUrl]);
-    execFileSync('git', ['-C', frozen, '-c', 'core.hooksPath=/dev/null', 'checkout', '--quiet', '--detach', first]);
+    isolatedGit(['clone', '--quiet', '--no-hardlinks', '--local', repo, frozen]);
+    isolatedGit(['-C', frozen, 'remote', 'set-url', 'origin', input.repoUrl]);
+    isolatedGit(['-C', frozen, '-c', 'core.hooksPath=/dev/null', 'checkout', '--quiet', '--detach', first]);
     const frozenConfig = path.join(base, 'frozen.json');
     await writeFile(frozenConfig, JSON.stringify({ ...config, bindings: [{ ...scope, roots: [repo, frozen] }] }));
     const live = git('rev-parse', 'HEAD');
@@ -145,12 +146,12 @@ test('isolated runtime source-memory contract', async t => {
     const roots = [];
     for (const name of ['alpha', 'beta']) {
       const target = path.join(base, name); roots.push(target);
-      execFileSync('git', ['clone', '--quiet', '--no-hardlinks', '--local', repo, target]);
-      execFileSync('git', ['-C', target, 'remote', 'set-url', 'origin', input.repoUrl]);
-      execFileSync('git', ['-C', target, 'checkout', '--quiet', '--detach', first]);
+      isolatedGit(['clone', '--quiet', '--no-hardlinks', '--local', repo, target]);
+      isolatedGit(['-C', target, 'remote', 'set-url', 'origin', input.repoUrl]);
+      isolatedGit(['-C', target, 'checkout', '--quiet', '--detach', first]);
       await writeFile(path.join(target, `${name}.ts`), `export const ${name} = true;\n`);
-      execFileSync('git', ['-C', target, 'add', '.']);
-      execFileSync('git', ['-C', target, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--quiet', '-m', name]);
+      isolatedGit(['-C', target, 'add', '.']);
+      isolatedGit(['-C', target, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '--quiet', '-m', name]);
     }
     const file = path.join(base, 'detached.json');
     await writeFile(file, JSON.stringify({ ...config, bindings: [{ ...scope, roots }] }));

@@ -22,7 +22,13 @@ if (caseEvidence) { assert.ok(path.isAbsolute(caseEvidence)); await writeFile(ca
 async function recordCase(value) {
   if (caseEvidence) await appendFile(caseEvidence, JSON.stringify({ at: new Date().toISOString(), ...value })+'\n');
 }
-const started = performance.now(); let driver, workerPid, killedParent = false, workerConfirmedStopped = false;
+const started = performance.now(); let driver, workerPid, workerStartTicks, killedParent = false, workerConfirmedStopped = false;
+async function startTicks(pid) {
+  try {
+    const value = await readFile('/proc/'+pid+'/stat', 'utf8');
+    return value.slice(value.lastIndexOf(')')+1).trim().split(/\s+/)[19];
+  } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+}
 try {
   const repo = path.join(root, 'repo'); await mkdir(repo);
   const git = (...args) => execFileSync('git', ['-C', repo, ...args], { env: cleanEnv, encoding: 'utf8' }).trim();
@@ -65,6 +71,7 @@ await prepareSourceMemory(${JSON.stringify(input)},'phase',${JSON.stringify(conf
     delay(15_000).then(() => { throw new Error('Worker spawn receipt deadline'); }),
   ]);
   workerPid = pidReceipt.workerPid; assert.ok(Number.isInteger(workerPid));
+  workerStartTicks = process.platform === 'linux' ? await startTicks(workerPid) : null;
   await recordCase({ case: 'disconnect', status: 'worker-spawned', parentPid: driver.pid, workerPid, expectedParentPid: pidReceipt.expectedParentPid, workerArgumentCount: pidReceipt.workerArgumentCount });
   driver.kill('SIGKILL'); killedParent = true; await closed;
   await recordCase({ case: 'disconnect', status: 'parent-killed', parentPid: driver.pid, workerPid });
@@ -84,6 +91,6 @@ await prepareSourceMemory(${JSON.stringify(input)},'phase',${JSON.stringify(conf
 } finally {
   if(driver?.exitCode===null&&!killedParent)driver.kill('SIGKILL');
   // Only this fixture's own recorded worker process can be stopped here.
-  if(workerPid && !workerConfirmedStopped)try{process.kill(process.platform==='win32'?workerPid:-workerPid,'SIGKILL')}catch{}
+  if(workerPid && !workerConfirmedStopped && process.platform === 'linux' && workerStartTicks && await startTicks(workerPid) === workerStartTicks)try{process.kill(process.platform==='win32'?workerPid:-workerPid,'SIGKILL')}catch{}
   await rm(root, { recursive: true, force: true });
 }

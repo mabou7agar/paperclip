@@ -117,6 +117,45 @@ jobs:
           appendFileSync(process.env.GITHUB_OUTPUT, `plan=${JSON.stringify(plan)}\n`);
           NODE
 
+  # Operator-provisioned code-only fixtures; no implicit download or real indexing.
+  # Disabled until a qualified runner has both pinned reader and emitted service.
+  source_memory:
+    needs: [gate]
+    if: ${{ vars.SOURCE_MEMORY_TESTS_ENABLED == 'true' }}
+    runs-on: ${{ needs.gate.outputs.runner }}
+    timeout-minutes: 15
+    env:
+      PAPERCLIP_SOURCE_MEMORY_TESTS: '1'
+      SOURCE_MEMORY_READER_FIXTURE: ${{ vars.SOURCE_MEMORY_READER_FIXTURE }}
+      SOURCE_MEMORY_BUILT_SERVICE: ${{ vars.SOURCE_MEMORY_BUILT_SERVICE }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Require operator fixture inputs
+        run: |
+          test -f "$SOURCE_MEMORY_READER_FIXTURE"
+          test -f "$SOURCE_MEMORY_BUILT_SERVICE"
+      - name: Source memory Node contract tests (.mjs)
+        run: node scripts/source-memory/run-tests.mjs
+      - name: Source review stage advancement
+        run: node --experimental-vm-modules --test scripts/source-memory/review-stage.test.mjs
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          version: 9.15.4
+          run_install: false
+      - name: Restore materialized dependencies and shared builds
+        uses: ./.github/actions/setup-ci-dependencies
+      - name: Source review handoff transaction
+        run: pnpm exec vitest run --project @paperclipai/server server/src/services/source-review-handoff.test.ts
+
   policy:
     needs: [gate]
     runs-on: ${{ needs.gate.outputs.runner }}
@@ -206,9 +245,6 @@ jobs:
         with:
           version: 9.15.4
           run_install: false
-
-      - name: Source memory Node contract tests (.mjs)
-        run: node scripts/source-memory/run-tests.mjs
 
       - name: Validate migration ordering against target branch
         run: >-
