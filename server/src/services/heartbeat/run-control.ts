@@ -1,3 +1,4 @@
+import { pendingExecutionStageReceiptSql } from "./execution-stage-receipt.js";
 import { instanceSettingsService } from "../instance-settings.js";
 import { writeDeferredExecutionWait } from "../deferred-execution-wait.js";
 import type { DeferredReceiptRecoveryOptions } from "../deferred-execution-notifications.js";
@@ -1735,8 +1736,11 @@ export function createHeartbeatRunControl(db: Db, dependencies: HeartbeatRunCont
           isNull(agentWakeupRequests.runId),
           // A pause is temporary: a message it deferred waits for the pause to
           // lift (work-intent outbox), so the pause's own stop keeps it.
-          options.preservePauseDeferred ? sql`not (${agentWakeupRequests.status} = 'deferred_issue_execution'
-            and coalesce(${agentWakeupRequests.payload}->'executionWait'->>'trigger', '') = 'pause_lifted')` : undefined,
+          options.preservePauseDeferred ? sql`not (
+            (${agentWakeupRequests.status} = 'deferred_issue_execution'
+              and coalesce(${agentWakeupRequests.payload}->'executionWait'->>'trigger', '') = 'pause_lifted')
+            or ${pendingExecutionStageReceiptSql}
+          )` : undefined,
         ));
       if (!wakeups.length) return 0;
       for (const companyId of new Set(wakeups.map(row => row.companyId))) {

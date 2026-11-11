@@ -1,3 +1,4 @@
+import { saveUnstartedExecutionStageReceipt } from "./unstarted-execution-stage.js";
 import { unknownQuotaResetBackoffSeconds } from "../provider-quota-reset.js";
 import { phaseRoutingSettingsRepository } from "../../repositories/phase-routing-settings.js";
 import { wakeWaitersOfStalledIssues, type BlockerStallWakeup } from "./blocker-stall-wakeups.js";
@@ -5242,6 +5243,14 @@ export function recoveryService(
           continue;
         }
         const participantLatestRun = participantLatestRunForRecovery;
+        // Older lifecycle Stop cancelled unstarted stage receipts. Reconstruct
+        // that one obligation on the existing resume/startup recovery signal.
+        if (!participantLatestRun && agentInvokable && !(await isInvocationBudgetBlocked(issue, participantAgentId))
+          && await saveUnstartedExecutionStageReceipt(db, { companyId: issue.companyId, issueId: issue.id, agentId: participantAgentId })) {
+          result.reviewParticipantRequeued += 1;
+          result.issueIds.push(issue.id);
+          continue;
+        }
 
         if (
           !participantLatestRun ||

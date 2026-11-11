@@ -1,3 +1,5 @@
+import { updateIssueSchema } from "@paperclipai/shared";
+import { saveUnstartedExecutionStageReceipt } from "../services/recovery/unstarted-execution-stage.js";
 import * as adapterRegistry from "../adapters/index.js";
 import * as runControl from "../services/heartbeat/run-control.js";
 import { applyIssueExecutionPolicyTransition, normalizeIssueExecutionPolicy } from "../services/issue-execution-policy.js";
@@ -16,9 +18,9 @@ import { createHeartbeatQueue } from "../services/heartbeat/queue.js";
 import { createHeartbeatQueueTestDependencies } from "./helpers/heartbeat-queue.js";
 import { issueTreeControlService } from "../services/issue-tree-control.js";
 import { randomUUID } from "node:crypto";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { activityLog, agents, agentWakeupRequests, authUsers, chatActions, environmentLeases, nativeRunFinalizations, chatEndpoints, toolApplications, toolConnections, companies, companyMemberships, costEvents, createDb, projects, reconcileDatabaseWork, heartbeatRuns, issueComments, issueRelations, issues } from "@paperclipai/db";
+import { activityLog, agents, agentWakeupRequests, resourceLifecycleEvents, authUsers, chatActions, environmentLeases, nativeRunFinalizations, chatEndpoints, toolApplications, toolConnections, companies, companyMemberships, costEvents, createDb, projects, reconcileDatabaseWork, heartbeatRuns, issueComments, issueRelations, issues } from "@paperclipai/db";
 import { resolveExternalTestDatabaseUrl } from "./helpers/external-test-database.js";
 import { startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { createDeliveryWorkCoordinator } from "../services/delivery-work-coordinator.js";
@@ -179,6 +181,17 @@ describe("deferred receipt durable dispatch", () => {
     }))).returning();
     return { f, stageId, current, obsolete, payload };
   }
+  async function oldPauseCancellation(f: Awaited<ReturnType<typeof fixture>>, current: typeof agentWakeupRequests.$inferSelect,
+    others: string[] = []) {
+    await db.insert(resourceLifecycleEvents).values({ companyId: f.companyId, resourceType: "agent", resourceId: f.agent.id,
+      action: "pause", createdAt: current.createdAt });
+    // Use the database clock: this suite deliberately fakes Date independently
+    // of PostgreSQL. The saved historical receipt must have a valid interval.
+    await db.update(agentWakeupRequests).set({ status: "cancelled", error: "Agent lifecycle stop requested", finishedAt: sql`now()` })
+      .where(inArray(agentWakeupRequests.id, [current.id, ...others]));
+    const [saved] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, current.id));
+    expect(saved.finishedAt!.getTime()).toBeGreaterThanOrEqual(saved.createdAt.getTime());
+  }
   function approveStageWithFakeProvider(f: Awaited<ReturnType<typeof fixture>>) {
     const adapter = adapterRegistry.getServerAdapter("process");
     const execute = vi.fn(async (ctx: Parameters<typeof adapter.execute>[0]) => {
@@ -219,6 +232,167 @@ describe("deferred receipt durable dispatch", () => {
     expect(checked).toEqual([current.id, current.id]);
   });
 
+  it.each(["review", "approval"] as const)("reconstructs an old pause-cancelled unstarted %s through native recovery exactly once", async type => {
+    const { f, current, obsolete, stageId } = await stageReceiptFixture(type);
+    // A finished worker precedes the first reviewer turn. Keep the real
+    // release predecessor; only the current participant has never invoked.
+    const [worker] = await db.insert(agents).values({ companyId: f.companyId, name: "Previous worker", adapterType: "process" }).returning();
+    await db.update(heartbeatRuns).set({ agentId: worker.id }).where(eq(heartbeatRuns.id, f.source.id));
+    await db.update(issues).set({ description: "Frozen plan and accepted candidate remain attached" }).where(eq(issues.id, f.issue.id));
+    await oldPauseCancellation(f, current, [obsolete.id]);
+    const original = (await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, current.id)))[0];
+    const execute = approveStageWithFakeProvider(f);
+    const outcomes = await Promise.all([heartbeat.reconcileStrandedAssignedIssues({ issueId: f.issue.id }),
+      heartbeat.reconcileStrandedAssignedIssues({ issueId: f.issue.id })]);
+    expect(outcomes.reduce((n, o) => n + o.reviewParticipantRequeued, 0)).toBe(1);
+    const [saved] = await db.select().from(agentWakeupRequests).where(sql`${agentWakeupRequests.idempotencyKey} like 'execution-stage-resume:%'`);
+    expect(saved).toMatchObject({ status: "deferred_issue_execution", runId: null,
+      payload: { recoveredUnstartedReceiptId: current.id, executionStage: { stageId } } });
+    await heartbeat.registerDeferredReceiptWork(coordinator, () => !drain).ready;
+    await heartbeat.registerRunDispatchWork(coordinator, () => !drain).ready;
+    await waitForReal(() => expect(execute).toHaveBeenCalledTimes(1), { timeout: 40_000 });
+    const read = async () => (await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, saved.id)))[0];
+    await heartbeat.waitForRunExecutionDrain((await read()).runId!, { timeoutMs: 30_000 });
+    await quiet();
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, current.id)))[0]).toEqual(original);
+    const [task] = await db.select().from(issues).where(eq(issues.id, f.issue.id));
+    expect(task).toMatchObject({ description: "Frozen plan and accepted candidate remain attached",
+      executionState: { status: "completed", completedStageIds: [stageId] } });
+    expect(await saveUnstartedExecutionStageReceipt(db, { companyId: f.companyId, issueId: f.issue.id, agentId: f.agent.id })).toBeNull();
+  });
+  it("automatically restores an old unstarted approval on shared-worker startup and stays quiet", async () => {
+    const { f, current, obsolete, stageId } = await stageReceiptFixture("approval");
+    const [worker] = await db.insert(agents).values({ companyId: f.companyId, name: "Completed predecessor", adapterType: "process" }).returning();
+    await db.update(heartbeatRuns).set({ agentId: worker.id }).where(eq(heartbeatRuns.id, f.source.id));
+    await oldPauseCancellation(f, current, [obsolete.id]);
+    const execute = approveStageWithFakeProvider(f);
+    await heartbeat.registerIssueStateRecoveryWork(coordinator, () => !drain).ready;
+    await heartbeat.registerDeferredReceiptWork(coordinator, () => !drain).ready;
+    await heartbeat.registerRunDispatchWork(coordinator, () => !drain).ready;
+    await waitForReal(() => expect(execute).toHaveBeenCalledTimes(1), { timeout: 40_000 });
+    const [saved] = await db.select().from(agentWakeupRequests).where(sql`${agentWakeupRequests.idempotencyKey} like 'execution-stage-resume:%'`);
+    expect(saved.payload).toMatchObject({ recoveredUnstartedReceiptId: current.id, executionStage: { stageId } });
+    await heartbeat.waitForRunExecutionDrain(saved.runId!, { timeoutMs: 30_000 });
+    await quiet();
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(await db.select().from(agentWakeupRequests).where(sql`${agentWakeupRequests.idempotencyKey} like 'execution-stage-resume:%'`)).toHaveLength(1);
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, current.id)))[0]).toMatchObject({ status: "cancelled", runId: null });
+    expect((await db.select().from(issues).where(eq(issues.id, f.issue.id)))[0].executionState)
+      .toMatchObject({ status: "completed", completedStageIds: [stageId] });
+  });
+  it("leaves the reconstruction key unused under an ancestor tree hold and recovers after release", async () => {
+    const { f, current } = await stageReceiptFixture("approval");
+    const [parent] = await db.insert(issues).values({ companyId: f.companyId, title: "Held parent", status: "todo" }).returning();
+    await db.update(issues).set({ parentId: parent.id }).where(eq(issues.id, f.issue.id));
+    await oldPauseCancellation(f, current);
+    const tree = issueTreeControlService(db), actor = { actorType: "user" as const, actorId: f.actorId, userId: f.actorId };
+    const { hold } = await tree.createHold(f.companyId, parent.id, { mode: "pause", actor });
+    const before = await db.select().from(agentWakeupRequests);
+    expect(await saveUnstartedExecutionStageReceipt(db, { companyId: f.companyId, issueId: f.issue.id, agentId: f.agent.id })).toBeNull();
+    expect(await db.select().from(agentWakeupRequests)).toEqual(before);
+    await tree.releaseHold(f.companyId, parent.id, hold.id, { actor });
+    expect(await saveUnstartedExecutionStageReceipt(db, { companyId: f.companyId, issueId: f.issue.id, agentId: f.agent.id })).toEqual(expect.any(String));
+    expect(await db.select().from(agentWakeupRequests).where(sql`${agentWakeupRequests.idempotencyKey} like 'execution-stage-resume:%'`)).toHaveLength(1);
+  });
+  it("removing coordinator blockers persists the accepted PATCH fields and emits one native continuation", async () => {
+    const f = await fixture(), service = issueService(db);
+    await db.delete(heartbeatRuns).where(eq(heartbeatRuns.id, f.source.id));
+    const [waiting, done] = await db.insert(issues).values([
+      { companyId: f.companyId, title: "Worker acceptance remains pending", status: "blocked", assigneeUserId: f.actorId },
+      { companyId: f.companyId, title: "CTO decision completed", status: "done" },
+    ]).returning();
+    await service.update(f.issue.id, { status: "blocked", description: "Original frozen plan", blockedByIssueIds: [waiting.id, done.id],
+      unblockDescriptor: { owner: { agentId: f.agent.id }, action: "Wait for decision before admitting existing worker" },
+      actorUserId: f.actorId, companyGuard: f.companyId });
+    const parsed = updateIssueSchema.parse({ blockedByIssueIds: [done.id],
+      unblockDescriptor: { owner: { agentId: f.agent.id }, action: "Read accepted decision and admit existing worker once" } });
+    expect(parsed.unblockDescriptor?.action).toBe("Read accepted decision and admit existing worker once");
+    const adapter = adapterRegistry.getServerAdapter("process"), runs: string[] = [];
+    const execute = vi.fn(async (ctx: Parameters<typeof adapter.execute>[0]) => {
+      runs.push(ctx.runId);
+      expect((await db.select().from(issues).where(eq(issues.id, f.issue.id)))[0])
+        .toMatchObject({ description: "Original frozen plan", unblockDescriptor: parsed.unblockDescriptor });
+      await service.update(f.issue.id, { status: "done",
+        actorAgentId: f.agent.id, actorRunId: ctx.runId, companyGuard: f.companyId });
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null, summary: "Decision consumed; bounded coordination completed" };
+    });
+    vi.spyOn(adapterRegistry, "getServerAdapter").mockReturnValue({ ...adapter, execute });
+    await heartbeat.registerIssueStateRecoveryWork(coordinator, () => !drain).ready;
+    await heartbeat.registerDeferredReceiptWork(coordinator, () => !drain).ready;
+    await heartbeat.registerRunDispatchWork(coordinator, () => !drain).ready;
+    // Keep the clock on wall time while the native dependency workers finish
+    // their first pass; advancing it here would expire real PostgreSQL leases.
+    await waitForReal(async () => {
+      await Promise.allSettled([...passes]);
+      expect(passes.size).toBe(0); expect(idleWorkSnapshot().active).toBe(0);
+    }, { timeout: 15_000 });
+    expect(execute).not.toHaveBeenCalled();
+    // The real service's relation update is the producer; no manual wake,
+    // recovery call or queue sweep occurs after it.
+    await service.update(f.issue.id, { blockedByIssueIds: parsed.blockedByIssueIds, unblockDescriptor: parsed.unblockDescriptor,
+      actorUserId: f.actorId, companyGuard: f.companyId });
+    await waitForReal(() => expect(execute).toHaveBeenCalledTimes(1), { timeout: 40_000 });
+    await heartbeat.waitForRunExecutionDrain(runs[0], { timeoutMs: 30_000 });
+    await quiet();
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect((await db.select().from(issues).where(eq(issues.id, waiting.id)))[0].status).toBe("blocked");
+    expect((await db.select().from(issues).where(eq(issues.id, f.issue.id)))[0])
+      .toMatchObject({ status: "done", description: "Original frozen plan" });
+  });
+  it.each(["operator_stop", "stale_stage", "wrong_company", "paused_agent", "closed_task", "invoked", "completed_receipt", "repair_already_cancelled", "later_operator_stop", "later_failed_receipt", "invoked_context_only", "invoked_native_only", "missing_pause_marker", "terminated_marker", "cascade_terminated", "invalid_reporting_chain"])(
+    "does not reconstruct an old cancelled stage when %s", async kind => {
+      const { f, current, stageId } = await stageReceiptFixture("approval");
+      await oldPauseCancellation(f, current);
+      if (kind === "operator_stop") await db.update(agentWakeupRequests).set({ error: "Cancelled by operator" }).where(eq(agentWakeupRequests.id, current.id));
+      if (kind === "stale_stage") await db.update(issues).set({ executionState: { ...((await db.select().from(issues).where(eq(issues.id, f.issue.id)))[0].executionState!), currentStageId: randomUUID() } }).where(eq(issues.id, f.issue.id));
+      if (kind === "paused_agent") await db.update(agents).set({ status: "paused", lifecycleState: "paused", lifecycleHolds: ["manual"] }).where(eq(agents.id, f.agent.id));
+      if (kind === "closed_task") await db.update(issues).set({ status: "done" }).where(eq(issues.id, f.issue.id));
+      if (kind === "invoked") await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.agent.id, issueId: f.issue.id, status: "failed", responsibleUserId: f.actorId });
+      if (["completed_receipt", "repair_already_cancelled"].includes(kind)) await db.insert(agentWakeupRequests).values({
+        companyId: f.companyId, agentId: f.agent.id, source: "assignment", payload: current.payload,
+        status: kind === "completed_receipt" ? "completed" : "cancelled",
+        idempotencyKey: kind === "repair_already_cancelled" ? `execution-stage-resume:${f.issue.id}:${stageId}:${f.agent.id}` : null,
+      });
+      if (["later_operator_stop", "later_failed_receipt"].includes(kind)) await db.insert(agentWakeupRequests).values({
+        companyId: f.companyId, agentId: f.agent.id, source: "assignment", payload: current.payload,
+        status: kind === "later_operator_stop" ? "cancelled" : "failed", error: "Cancelled by operator", finishedAt: new Date(),
+      });
+      if (["invoked_context_only", "invoked_native_only"].includes(kind)) await db.insert(heartbeatRuns).values({
+        companyId: f.companyId, agentId: f.agent.id, status: "failed", issueId: null, responsibleUserId: f.actorId,
+        ...(kind === "invoked_context_only" ? { contextSnapshot: { issueId: f.issue.id } } : { nativeIssueId: f.issue.id }),
+      });
+      if (kind === "missing_pause_marker") await db.delete(resourceLifecycleEvents).where(eq(resourceLifecycleEvents.companyId, f.companyId));
+      if (["terminated_marker", "cascade_terminated"].includes(kind)) await db.insert(resourceLifecycleEvents).values({
+        companyId: f.companyId, resourceType: "agent", resourceId: kind === "terminated_marker" ? f.agent.id : randomUUID(),
+        action: "terminate", createdAt: current.createdAt,
+      });
+      if (kind === "invalid_reporting_chain") {
+        const [manager] = await db.insert(agents).values({ companyId: f.companyId, name: "Terminated manager", status: "terminated", lifecycleState: "terminated" }).returning();
+        await db.update(agents).set({ reportsTo: manager.id }).where(eq(agents.id, f.agent.id));
+      }
+      // Obsolete work must not make a refused repair look like a live path.
+      const before = await db.select().from(agentWakeupRequests);
+      expect(await saveUnstartedExecutionStageReceipt(db, { companyId: kind === "wrong_company" ? randomUUID() : f.companyId,
+        issueId: f.issue.id, agentId: f.agent.id })).toBeNull();
+      expect(await db.select().from(agentWakeupRequests)).toEqual(before);
+    });
+  it.each(["queued", "deferred_issue_execution"])("temporary pause preserves a %s current-stage request behind another guard", async status => {
+    const { f, current, obsolete } = await stageReceiptFixture("approval");
+    const [worker] = await db.insert(agents).values({ companyId: f.companyId, name: "Worker still settling", adapterType: "process" }).returning();
+    await db.update(heartbeatRuns).set({ agentId: worker.id, status: "running", startedAt: new Date(), finishedAt: null }).where(eq(heartbeatRuns.id, f.source.id));
+    await db.update(issues).set({ executionRunId: f.source.id, checkoutRunId: f.source.id }).where(eq(issues.id, f.issue.id));
+    await db.update(agents).set({ status: "paused", lifecycleState: "paused", lifecycleHolds: ["manual"] }).where(eq(agents.id, f.agent.id));
+    await db.update(agentWakeupRequests).set({ status, payload: { ...current.payload,
+      executionWait: { reason: "physical_cleanup", trigger: "lock_released" } } }).where(eq(agentWakeupRequests.id, current.id));
+    const before = (await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, current.id)))[0];
+    await heartbeat.stopInvocationsForAgents([f.agent.id], "Agent lifecycle stop requested", { preservePauseDeferred: true });
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, current.id)))[0]).toEqual(before);
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, obsolete.id)))[0].status).toBe("cancelled");
+    // Hard Stop has different authority from a temporary pause.
+    await heartbeat.stopInvocationsForAgents([f.agent.id], "Explicit operator Stop");
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, current.id)))[0]).toMatchObject({ status: "cancelled", runId: null });
+  });
   it("does not poll or revive a stage cancelled by an operator Stop", async () => {
     const { f, current, stageId } = await stageReceiptFixture("review"), tree = issueTreeControlService(db);
     const actor = { actorType: "user" as const, actorId: f.actorId, userId: f.actorId };
@@ -271,7 +445,10 @@ describe("deferred receipt durable dispatch", () => {
     const lifecycleWorker = configureAgentLifecycle(db, { requiredPluginIds: async () => [],
       runHost: async () => "complete", runPlugin: async () => "complete" });
     lifecycleWorkers.add(lifecycleWorker);
-    await lifecycle.pauseAgent(f.agent.id); await lifecycleWorker.process(f.agent.id);
+    await lifecycle.pauseAgent(f.agent.id);
+    // Exercise the real Stop used by company/agent pause, not a fake host ACK.
+    await heartbeat.stopInvocationsForAgents([f.agent.id], "Agent lifecycle stop requested", { preservePauseDeferred: true });
+    await lifecycleWorker.process(f.agent.id);
     const execute = approveStageWithFakeProvider(f);
     await heartbeat.registerDeferredReceiptWork(coordinator, () => !drain).ready;
     await heartbeat.registerRunDispatchWork(coordinator, () => !drain).ready;
