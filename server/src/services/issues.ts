@@ -11719,7 +11719,18 @@ export function issueService(db: Db) {
           const actorRun = await assertAgentRunWriteAllowed(tx, receiptExisting.companyId, {
             agentId: actorAgentId, runId: actorRunId, stopId: actorRunStopId,
           });
-          assertLegacyRunTaskOwnership(actorRun, receiptExisting);
+          assertLegacyRunTaskOwnership(actorRun, receiptExisting, actorAgentId);
+          // The receipt and assignment commit together. A same-task mention or
+          // manager run that never owned this task must retain normal authority.
+          if (actorRun?.runtimeMode === "legacy" && actorRun.contextSnapshot?.issueId === id &&
+              receiptExisting.assigneeAgentId === actorAgentId &&
+              typeof patch.assigneeAgentId === "string" && patch.assigneeAgentId !== actorAgentId &&
+              parseIssueExecutionState(patch.executionState)?.status === "pending") {
+            await tx.update(heartbeatRuns).set({ resultJson: sql`jsonb_set(coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb),
+              '{legacyWorkflowHandoffIssueId}', to_jsonb(${id}::text), true)` })
+              .where(and(eq(heartbeatRuns.id, actorRunId), eq(heartbeatRuns.companyId, receiptExisting.companyId),
+                eq(heartbeatRuns.agentId, actorAgentId)));
+          }
         }
         if (blockedByIssueIds !== undefined) {
           await assertOnboardingFirstTaskDependenciesAllowed(tx as Db, {

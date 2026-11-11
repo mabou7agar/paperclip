@@ -2886,6 +2886,104 @@ describe("agent issue mutation checkout ownership", () => {
     expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 
+  describe("native workflow self-handoff", () => {
+    const run = { id: ownerRunId, companyId, agentId: ownerAgentId, runtimeMode: "legacy",
+      status: "running", contextSnapshot: { issueId } };
+    const policy = { mode: "normal", commentRequired: true, stages: [{
+      id: "88888888-8888-4888-8888-888888888888", type: "review", approvalsNeeded: 1,
+      participants: [{ id: "99999999-9999-4999-8999-999999999999", type: "agent", agentId: peerAgentId, userId: null }],
+    }] };
+    const workflowApp = (actor: Record<string, unknown>) => createApp(actor,
+      createRunContextDb({}, ownerAgentId, ownerRunId, [], true));
+    beforeEach(() => {
+      mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_progress", executionRunId: ownerRunId,
+        checkoutRunId: ownerRunId, executionPolicy: policy }));
+      mockHeartbeatService.getRun.mockResolvedValue(run);
+      mockAgentService.resolveByReference.mockImplementation(async (_companyId: string, id: string) => ({
+        ambiguous: false, agent: await mockAgentService.getById(id),
+      }));
+      mockHeartbeatService.cancelRun.mockRejectedValue(new Error("Own request must not be stopped"));
+    });
+
+    it("commits a server-derived review handoff without cancelling its own HTTP caller", async () => {
+      const app = workflowApp({ ...ownerActor(), source: "agent_jwt" });
+      const server = app.listen(0, "127.0.0.1");
+      await new Promise<void>(resolve => server.once("listening", resolve));
+      let res: { status: number; body: Record<string, unknown> };
+      try {
+        const address = server.address() as { port: number };
+        const response = await fetch(`http://127.0.0.1:${address.port}/api/issues/${issueId}`, {
+          method: "PATCH", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: "done", comment: "Ready for independent review" }),
+        });
+        res = { status: response.status, body: await response.json() as Record<string, unknown> };
+      } finally {
+        await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+      }
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(res.body).toMatchObject({ status: "in_review", assigneeAgentId: peerAgentId,
+        executionState: { status: "pending", currentStageType: "review", currentParticipant: { agentId: peerAgentId } } });
+      expect(mockHeartbeatService.cancelRun).not.toHaveBeenCalled();
+      expect(mockIssueService.update.mock.calls[0]?.[1]).toMatchObject({ actorRunId: ownerRunId, actorRunStopId: null });
+      expect(mockLogActivity.mock.calls.some(call => call[1].action === "issue.updated")).toBe(true);
+      expect(mockHeartbeatService.wakeup).toHaveBeenCalledWith(peerAgentId,
+        expect.objectContaining({ reason: "execution_review_requested" }));
+    });
+
+    it.each(["edit", "complete", "reclaim"])("fences the outgoing caller's late %s", async kind => {
+      const app = workflowApp({ ...ownerActor(), source: "agent_jwt" });
+      const submitted = await request(app).patch(`/api/issues/${issueId}`)
+        .send({ status: "done", comment: "Ready for independent review" });
+      expect(submitted.status, JSON.stringify(submitted.body)).toBe(200);
+      mockIssueService.getById.mockResolvedValue(makeIssue(submitted.body));
+      mockHeartbeatService.getRun.mockResolvedValue({ ...run, resultJson: { legacyWorkflowHandoffIssueId: issueId } });
+      mockIssueService.update.mockClear();
+      const res = await request(app).patch(`/api/issues/${issueId}`).send(kind === "edit"
+        ? { title: "Late outgoing edit" } : kind === "complete" ? { status: "done", comment: "Late approval" }
+          : { assigneeAgentId: ownerAgentId });
+      expect(res.status, JSON.stringify(res.body)).toBe(403);
+      expect(res.body.details).toMatchObject({ code: "issue_handed_off" });
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+    });
+
+    it("keeps a same-task manager edit inside normal permissions", async () => {
+      mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_progress", assigneeAgentId: peerAgentId }));
+      mockAccessService.decide.mockImplementation(async (input: { action: string }) => ({
+        allowed: ["issue:read", "issue:mutate", "tasks:manage_active_checkouts"].includes(input.action),
+        action: input.action, reason: "allow_explicit_grant", explanation: "Explicit manager grant",
+      }));
+      const res = await request(workflowApp({ ...ownerActor(), source: "agent_jwt" }))
+        .patch(`/api/issues/${issueId}`).send({ title: "Manager clarification" });
+      expect(res.status, JSON.stringify(res.body)).toBe(200);
+      expect(mockIssueService.update).toHaveBeenCalled();
+    });
+
+    it.each(["agent_key", "other_run", "native", "other_issue", "other_agent", "other_company", "explicit_assignee"])(
+      "keeps the Stop or earlier authorization boundary for %s", async kind => {
+        const actor = { ...ownerActor(), source: kind === "agent_key" ? "agent_key" : "agent_jwt" };
+        mockHeartbeatService.getRun.mockResolvedValue({ ...run,
+          ...(kind === "other_run" ? { id: recoveryActionId } : {}),
+          ...(kind === "native" ? { runtimeMode: "native" } : {}),
+          ...(kind === "other_issue" ? { contextSnapshot: { issueId: recoveryActionId } } : {}),
+          ...(kind === "other_agent" ? { agentId: peerAgentId } : {}),
+          ...(kind === "other_company" ? { companyId: recoveryActionId } : {}),
+        });
+        const res = await request(workflowApp(actor)).patch(`/api/issues/${issueId}`)
+          .send({ status: "done", comment: "Submit", ...(kind === "explicit_assignee" ? { assigneeAgentId: peerAgentId } : {}) });
+        expect(res.status, JSON.stringify(res.body)).not.toBe(200);
+        if (kind === "native") {
+          expect(res.status, JSON.stringify(res.body)).toBe(409);
+          expect(res.body.details).toMatchObject({ code: "native_run_status_reported_by_finish" });
+          expect(mockHeartbeatService.cancelRun).not.toHaveBeenCalled();
+        } else {
+          expect(res.status, JSON.stringify(res.body)).toBe(500);
+          expect(mockHeartbeatService.cancelRun).toHaveBeenCalled();
+        }
+        expect(mockIssueService.update).not.toHaveBeenCalled();
+      },
+    );
+  });
+
   describe("human self-handoff", () => {
     const runningRun = {
       id: ownerRunId,

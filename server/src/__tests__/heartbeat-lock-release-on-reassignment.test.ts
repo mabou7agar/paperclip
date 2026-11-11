@@ -36,6 +36,8 @@ vi.mock("@paperclipai/shared/telemetry", async () => {
 });
 
 import { heartbeatService } from "../services/heartbeat.ts";
+import { createPostgresWakeQueueAdapter } from "../modules/wake-queue/adapters/postgres.js";
+import { createReleaseIssueExecution } from "../modules/wake-queue/application/use-cases.js";
 
 const embeddedPostgresSupport = await getEmbeddedPostgresTestSupport();
 const describeEmbeddedPostgres = embeddedPostgresSupport.supported ? describe : describe.skip;
@@ -159,9 +161,11 @@ describeEmbeddedPostgres("heartbeat lock release on cross-agent reassignment", (
     };
   }
 
-  it("defers a cross-agent wake while the holder is still running and leaves the holder alone", async () => {
+  it.each(["present", "cleared"])("defers a cross-agent wake with a %s lock while the holder still runs", async lock => {
     const { coderAgentId, reviewerAgentId, issueId, holderRunId, wakeupRequestId } =
       await seedCrossAgentScenario({ holderStatus: "running" });
+    if (lock === "cleared") await db.update(issues).set({ executionRunId: null, executionAgentNameKey: null,
+      executionLockedAt: null }).where(eq(issues.id, issueId));
 
     const heartbeat = heartbeatService(db);
     const followupRun = await heartbeat.wakeup(reviewerAgentId, {
@@ -220,6 +224,39 @@ describeEmbeddedPostgres("heartbeat lock release on cross-agent reassignment", (
       .then((rows) => rows[0] ?? null);
 
     expect(issue?.executionRunId).toBe(holderRunId);
+  });
+
+  it("promotes the reviewer once after the outgoing legacy run finishes", async () => {
+    const f = await seedCrossAgentScenario({ holderStatus: "running" });
+    await db.update(issues).set({ executionRunId: null, executionAgentNameKey: null,
+      executionLockedAt: null }).where(eq(issues.id, f.issueId));
+    await db.update(agentWakeupRequests).set({ runId: f.holderRunId, status: "enqueued" })
+      .where(eq(agentWakeupRequests.id, f.wakeupRequestId));
+    // Use the native release module below without executing post-commit
+    // dispatch effects. No provider fixture is needed to prove promotion.
+    const queued = await heartbeat.wakeup(f.reviewerAgentId, { source: "automation", reason: "issue_assigned",
+      payload: { issueId: f.issueId }, contextSnapshot: { issueId: f.issueId, taskId: f.issueId },
+      requestedByActorType: "user", requestedByActorId: "local-board" });
+    expect(queued).toBeNull();
+    const [before] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, f.holderRunId));
+    expect(before.status).toBe("running");
+    const [finished] = await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() })
+      .where(eq(heartbeatRuns.id, f.holderRunId)).returning();
+    const release = createReleaseIssueExecution({ issueLock: createPostgresWakeQueueAdapter(db, {
+      resolveResponsibleUserId: async () => "responsible-user",
+      getRoutineEnv: async () => ({ routineId: null, env: null, responsibleUserId: null }),
+      resolveSessionBeforeForWakeup: async () => null,
+    }), recovery: { escalateStrandedAssignedIssue: async () => undefined,
+      escalateStrandedRecoveryIssueInPlace: async () => undefined } });
+    const released = await release({ companyId: f.companyId, runId: finished.id, now: new Date(), suppressImmediateRecovery: true });
+    expect(released.outcome.kind).toBe("promoted");
+    const again = await release({ companyId: f.companyId, runId: finished.id, now: new Date(), suppressImmediateRecovery: true });
+    expect(again.postCommitEffects.filter(effect => effect.kind === "run_queued")).toHaveLength(0);
+    const successor = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, f.reviewerAgentId));
+    expect(successor).toHaveLength(1);
+    expect(successor[0].status).toBe("queued");
+    expect(successor[0].contextSnapshot?.issueId).toBe(f.issueId);
+    expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.agentId, f.coderAgentId))).toHaveLength(1);
   });
 
   // Race-guard regression: the cancel UPDATE for the queued holder is pinned
