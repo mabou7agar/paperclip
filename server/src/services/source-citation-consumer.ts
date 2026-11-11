@@ -15,7 +15,7 @@ export class SourceCitationError extends Error {
 export type CitationBinding = {
   companyId: string; projectId: string; repositoryId: string; frozenSha: string;
 };
-const fail = (reason: string): never => { throw new SourceCitationError(reason); };
+const fail: (reason: string) => never = (reason: string): never => { throw new SourceCitationError(reason); };
 
 /** The repository check is part of authorization, before the reader sees a path or SHA. */
 export function assertSourceCitationBinding(binding: CitationBinding, citation: SubmittedSourceCitation) {
