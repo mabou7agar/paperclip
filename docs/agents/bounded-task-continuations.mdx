@@ -41,3 +41,16 @@ also reconstructs saved requests for the current review or approval participant
 at startup. Failed delivery retains the same receipt and uses the shared worker's
 retry deadline. Stale stage requests and paused participants are not selected.
 After settlement the worker becomes quiet; no additional polling is introduced.
+
+### Stop requests recorded before provider dispatch
+
+A sealed legacy preparation can contain a pending Stop request without a
+provider acknowledgement. Physical cleanup may use the existing preparation
+proof only when that receipt contains exactly `state: requested` and a valid
+`requestedAt` within the run's start and finish times. The earlier-controller,
+complete non-execution journal, built-in adapter, no-output, process and
+environment cleanup checks still apply. Contradictory or incomplete evidence
+keeps the hold.
+
+This proof does not write an acknowledgement, resume the cancelled task, remove
+its recovery hold or change its saved provider session or planning context.
