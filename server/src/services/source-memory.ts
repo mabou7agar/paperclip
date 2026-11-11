@@ -93,10 +93,29 @@ export async function prepareSourceMemory(input: SourceMemoryInput, operation: "
   return runWorker(payload, signal, remoteRead);
 }
 
+/** Minimal Node entry evaluated before importing the potentially large bundled
+ * service graph. Its absolute deadline survives the handover to the core guard.
+ * The only module path is the server-owned import.meta.url argument, never a
+ * task/config path. No source, reader or state access occurs before the guard. */
+export const SOURCE_MEMORY_WORKER_BOOTSTRAP = `
+import { pathToFileURL } from 'node:url';
+const key = Symbol.for('paperclip.source-memory-worker-bootstrap.v1');
+const terminate = () => {
+  if (process.platform !== 'win32') { try { process.kill(-process.pid, 'SIGKILL'); } catch {} }
+  process.exit(1);
+};
+const deadlineAt = Date.now() + 180000;
+process.once('disconnect', terminate);
+const timer = setTimeout(terminate, Math.max(0, deadlineAt - Date.now()));
+globalThis[key] = { deadlineAt, release() { clearTimeout(timer); process.removeListener('disconnect', terminate); delete globalThis[key]; } };
+if (!process.connected) terminate();
+await import(pathToFileURL(process.argv[1]).href);
+`;
+
 function runWorker(payload: WorkerInput, signal?: AbortSignal, remoteRead?: RemoteSourceReader): Promise<SourceMemoryEvidence> {
   return new Promise((resolve, reject) => {
     requireValue(!signal?.aborted, "cancelled");
-    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), "--source-memory-worker"], { stdio: ["pipe", "pipe", "pipe", "ipc"], detached: process.platform !== "win32", env: { ...gitEnv, NODE_OPTIONS: "", NODE_PATH: "", NODE_NO_WARNINGS: "1" } });
+    const child = spawn(process.execPath, ["--input-type=module", "--eval", SOURCE_MEMORY_WORKER_BOOTSTRAP, fileURLToPath(import.meta.url), "--source-memory-worker"], { stdio: ["pipe", "pipe", "pipe", "ipc"], detached: process.platform !== "win32", env: { ...gitEnv, NODE_OPTIONS: "", NODE_PATH: "", NODE_NO_WARNINGS: "1" } });
     let bytes = 0; let output = ""; let failure: Error | null = null;
     const stop = (code: string) => {
       failure = new Error(`source_memory_${code}`);
@@ -232,9 +251,15 @@ export function guardSourceMemoryWorker(lifetimeMs = 180_000) {
     }
     process.exit(1);
   };
+  const bootstrap = Reflect.get(globalThis, Symbol.for("paperclip.source-memory-worker-bootstrap.v1"));
+  const remaining = bootstrap && Number.isFinite(bootstrap.deadlineAt)
+    ? Math.max(0, Math.min(lifetimeMs, bootstrap.deadlineAt - Date.now())) : lifetimeMs;
   process.once("disconnect", terminate);
-  const deadline = setTimeout(terminate, lifetimeMs);
-  if (!process.connected) terminate();
+  const deadline = setTimeout(terminate, remaining);
+  // Register the core lifetime before retiring bootstrap ownership. Import time
+  // consumes the original bound; it never buys a fresh worker deadline.
+  if (typeof bootstrap?.release === "function") bootstrap.release();
+  if (remaining <= 0 || !process.connected) terminate();
   return () => { clearTimeout(deadline); process.removeListener("disconnect", terminate); };
 }
 

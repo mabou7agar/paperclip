@@ -313,6 +313,16 @@ activation or release acceptance.
 The dedicated worker installs an IPC-disconnect handler before consuming stdin
 or opening state. Parent exit closes IPC and terminates the worker; on POSIX,
 termination kills its dedicated process group, including local Git subprocesses.
+The child starts with a fixed, dependency-free Node `--eval` bootstrap before
+importing the service module or its production bundle chunk. It registers IPC
+disconnect and an absolute 180-second deadline first. The core installs its own
+guard before releasing the bootstrap and inherits only the remaining time;
+module initialization never resets that budget. The child argv is
+`--input-type=module --eval <fixed bootstrap> <server-owned module> --source-memory-worker`.
+The module path remains `fileURLToPath(import.meta.url)`, not a task/config path.
+The previous direct worker entry still registers the core guard for compatibility.
+No persisted run/session/state shape or source authorization changes.
+
 A worker-owned 180-second deadline also applies if the parent remains alive.
 Normal completion removes the guard before disconnecting. Windows terminates the
 worker only; descendant process-tree cleanup is not claimed there. These are

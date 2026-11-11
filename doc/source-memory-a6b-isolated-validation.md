@@ -170,3 +170,72 @@ The full operator log remains in task document
 Do not repeat earlier 16, reader 7, captured-consumer 1 or historical proof suites.
 The next operator event uses only the corrected source delta and the new fixture
 inside the already-owned isolated scratch. No install/bootstrap or new question.
+
+## Fourth-turn runtime findings and bounded corrections
+
+The operator qualified `331385e9` with source semantics **exit 0 / 2,035 production
+files**, mechanical emit/assets/stamp/bundle exit 0. Actual environment was the
+same uninterrupted compiler process increased to **6 GiB / 2 CPU**, nonroot,
+network none, mounts zero, capability drop all/no-new-privileges. Do not report
+a 4-GiB-only pass. Runner source remained unchanged; its prior semantic receipt
+was retained. Native focused execution had **18 pass / 3 fail of 21**; nine-suite
+CI had **59 pass / 2 fail / 61 counters / zero skipped**, with one unique failed
+child plus its failed parent aggregate. Actual bundle cancellation failed its
+five-second bound; no full packaging pass exists. All failures and the original
+external wrapper remain in the task documents and packet.
+
+Corrections are scoped to those findings:
+
+- Handoff fixture passes only the real structured binding DTO (company, issue,
+  run, agent, session, contract and source/controller identities), excluding its
+  synthetic Git helper function. Real capture/authorization/finalizer are retained.
+- The native failed-execution hold starts at one in `issue-recovery-actions.ts`.
+  The fixture now asserts that original accounting value **and its equality
+  before/after rejected finalizer replays**; no count is reset. No wake/monitor,
+  recovery task, accepted result or successor is permitted.
+- The prior Stop fixture called native controller cancellation without the user
+  attribution that `hasAcknowledgedNativeStopIntent` requires. It now supplies
+  synthetic trusted caller attribution before the actual cancellation API creates
+  the durable intent/ACK. The expected cancellation exception and all terminal,
+  no-retry, normal heartbeat Stop projection and ownership/resource assertions
+  remain. No production cancellation bypass or exception-text-only fix is added.
+- The .mjs loader accidentally joined three module paths into one path. It now
+  loads the actual completion-port class, whose dependency graph already includes
+  the real canonical and validation modules. The affected consumer suite locally
+  passed **exit 0 / 13 tests / zero skipped**. This checks the repaired shared
+  synthetic loader; no guard is mocked away.
+- The bundle core registered disconnect handling only after its shared imports
+  initialized. A fixed lightweight bootstrap now owns disconnect and the original
+  absolute deadline **before dynamic import**, with gap-free handover to the
+  existing core guard. No reader/state/Git access precedes lifetime ownership;
+  subprocess groups, input/output/read budgets, clean env and protocol stay.
+  New bootstrap-during-initialization regression passed locally **exit 0 / 1**
+  using fresh strip-emitted code. A direct TS invocation first failed to resolve
+  the existing `.js` sibling before executing a case; that attempt is retained.
+
+Local Node syntax/whitespace is separate from production semantic qualification.
+The production worker input changed, so `331` semantics and packaging are
+historical and require corrected-input qualification. Do not rerun unchanged
+native cases: filter `ordinary native done|terminalizes` (three cases). The core
+and loader change affects the CI roster, so the arranged operator must qualify
+all nine suites once on final inputs, with no silent skips. No old Unit/proof/
+smoke/54-case baseline is repeated.
+
+For the actual bundle gate use source-controlled
+`scripts/source-memory/qualify-bundled-worker.mjs` (the successor to the retained
+external wrapper) with its four existing arguments: absolute final qualifier,
+absolute unique `.mjs` worker chunk, qualifier SHA-256, chunk SHA-256. Set the
+existing emitted-service and code-only-reader variables. It checks the **five
+worker arguments** and maps **only index 3**, the module filename, to the actual
+chunk. The `--eval` bootstrap string, final worker flag, IPC/options/env and all
+deadlines remain exact production inputs. The old first-argument mapping is
+incompatible and must not be used. Save exact derived driver through
+`SOURCE_MEMORY_BUNDLED_DRIVER_EVIDENCE`; set `SOURCE_MEMORY_WORKER_CASE_EVIDENCE`
+to a new owned absolute JSONL path for phase/duplicate receipt and cancellation
+PIDs/timestamps/status even if a later assertion fails. No standalone emitted
+packaging replay is required in addition to the actual bundle gate.
+
+Final whole Claude ACP must cover this wrapper **and** the entire retained old
+external wrapper/derived-driver evidence and API harness, all cumulative authored
+files and actual qualification receipts. Fourth source turn uses the same session
+and branch; **4/6 used, 2 remain including reserved HANDOFF**. All holds remain.

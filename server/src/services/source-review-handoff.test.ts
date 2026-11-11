@@ -140,7 +140,8 @@ describe('source review handoff transaction (synthetic only)', () => {
     await db.update(heartbeatRuns).set({ nativeSessionId: sessionId, runnerInstanceId: sourceInstanceId,
       completionContractId: contractId, completionContractSha256: contractId }).where(eq(heartbeatRuns.id, f.runId));
     await db.update(nativeRunFinalizations).set({ leaseOwner: null, leaseExpiresAt: null }).where(eq(nativeRunFinalizations.runId, f.runId));
-    const port = new PaperclipControlPlanePort(db, { ...f, sessionId, completionContractId: contractId,
+    const port = new PaperclipControlPlanePort(db, { companyId: f.companyId, issueId: f.issueId,
+      runId: f.runId, agentId: f.agentId, sessionId, completionContractId: contractId,
       completionContractSha256: contractId, sourceInstanceId, controlPlaneSourceInstanceId: 'synthetic-controller' });
     await port.completeRun({ result: CONTROL_PLANE_CONFORMANCE_RESULT, terminal: CONTROL_PLANE_CONFORMANCE_TERMINAL, callerResultId: f.runId+':result' });
     const finalize = () => finalizeNativeRun({ db, runId: f.runId, workspaceFinalizeStatus: 'succeeded', projectRunStatus: true,

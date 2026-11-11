@@ -1,7 +1,7 @@
 // One bounded operator invocation on the FINAL emitted artifact. No build,
 // install, network, model/provider, existing repository or existing ledger I/O.
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, appendFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -15,6 +15,13 @@ assert.ok(service && path.isAbsolute(service) && service.endsWith('.js'), 'SOURC
 assert.ok(reader && path.isAbsolute(reader), 'Verified code-only reader fixture required');
 const root = await mkdtemp(path.join(tmpdir(), 'source-built-worker-'));
 const cleanEnv = { PATH: process.env.PATH, HOME: '/nonexistent', LANG: 'C.UTF-8', NODE_OPTIONS: '', NODE_PATH: '', GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
+// Optional NEW operator-owned JSONL survives a later failed assertion. It
+// contains only fixture PIDs/timestamps/artifact scope, never source or env.
+const caseEvidence = process.env.SOURCE_MEMORY_WORKER_CASE_EVIDENCE;
+if (caseEvidence) { assert.ok(path.isAbsolute(caseEvidence)); await writeFile(caseEvidence, '', { flag: 'wx', mode: 0o600 }); }
+async function recordCase(value) {
+  if (caseEvidence) await appendFile(caseEvidence, JSON.stringify({ at: new Date().toISOString(), ...value })+'\n');
+}
 const started = performance.now(); let driver, workerPid, killedParent = false, workerConfirmedStopped = false;
 try {
   const repo = path.join(root, 'repo'); await mkdir(repo);
@@ -42,6 +49,7 @@ process.stdout.write(JSON.stringify({revision:first.revision,citations:first.cit
 `);
   const proof = execFileSync(process.execPath, [fixture], { env: cleanEnv, encoding: 'utf8', timeout: 180_000, maxBuffer: 262_144 });
   const receipt = JSON.parse(proof.trim());
+  await recordCase({ case: 'phase-and-duplicate', status: 'passed', ...receipt });
   const parent = path.join(root, 'parent.mjs');
   await writeFile(parent, `import childProcess from 'node:child_process';import {syncBuiltinESMExports} from 'node:module';
 const original=childProcess.spawn;
@@ -57,7 +65,9 @@ await prepareSourceMemory(${JSON.stringify(input)},'phase',${JSON.stringify(conf
     delay(15_000).then(() => { throw new Error('Worker spawn receipt deadline'); }),
   ]);
   workerPid = pidReceipt.workerPid; assert.ok(Number.isInteger(workerPid));
+  await recordCase({ case: 'disconnect', status: 'worker-spawned', parentPid: driver.pid, workerPid });
   driver.kill('SIGKILL'); killedParent = true; await closed;
+  await recordCase({ case: 'disconnect', status: 'parent-killed', parentPid: driver.pid, workerPid });
   async function stopped(pid) {
     try { process.kill(pid, 0); } catch (e) { if(e.code==='ESRCH') return true; throw e; }
     if(process.platform==='linux') { try { const value=await readFile('/proc/'+pid+'/stat','utf8');return /^\s*Z\b/.test(value.slice(value.lastIndexOf(')')+1)); } catch(e) {if(e.code==='ENOENT')return true;throw e;} }
@@ -66,6 +76,7 @@ await prepareSourceMemory(${JSON.stringify(input)},'phase',${JSON.stringify(conf
   let workerStopped = false;
   for(let attempt=0;attempt<50;attempt++){if(await stopped(workerPid)){workerStopped=true;break}await delay(100)}
   workerConfirmedStopped = workerStopped;
+  await recordCase({ case: 'disconnect', status: workerStopped ? 'passed' : 'failed', workerPid, workerStopped });
   assert.ok(workerStopped, 'Built worker must terminate after parent IPC disconnect');
   console.log(JSON.stringify({ schema: 'source-built-worker-qualification.v1', service,
     artifactSha256: createHash('sha256').update(await readFile(service)).digest('hex'), ...receipt,
@@ -73,6 +84,6 @@ await prepareSourceMemory(${JSON.stringify(input)},'phase',${JSON.stringify(conf
 } finally {
   if(driver?.exitCode===null&&!killedParent)driver.kill('SIGKILL');
   // Only this fixture's own recorded worker process can be stopped here.
-  if(workerPid && !workerConfirmedStopped)try{process.kill(workerPid,'SIGKILL')}catch{}
+  if(workerPid && !workerConfirmedStopped)try{process.kill(process.platform==='win32'?workerPid:-workerPid,'SIGKILL')}catch{}
   await rm(root, { recursive: true, force: true });
 }

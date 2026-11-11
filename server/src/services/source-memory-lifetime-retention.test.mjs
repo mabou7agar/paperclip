@@ -66,3 +66,25 @@ test('worker-owned deadline kills worker and its local subprocess group', {timeo
       ${JSON.stringify(`import {guardSourceMemoryWorker} from ${JSON.stringify(moduleUrl)}; import {spawn} from 'node:child_process'; guardSourceMemoryWorker(150); spawn(process.execPath,['-e','setTimeout(()=>{},60000)'],{stdio:['ignore',1,2]}); console.log('ready');`)}],{detached:true,stdio:['ignore',1,2,'ipc']});
     child.on('exit',(code,signal)=>{if(signal!=='SIGKILL') process.exitCode=1;});`);
 });
+
+test('early bootstrap owns disconnect while the service import is still initializing', {timeout:8000}, async () => {
+  const { SOURCE_MEMORY_WORKER_BOOTSTRAP } = await import('./source-memory.ts');
+  // New data-only fixture module deliberately never finishes its initialization.
+  // The exact production bootstrap must guard it before the core can register.
+  const initializing = "process.stdout.write('ready\\n');process.send('ready');await new Promise(r=>setTimeout(r,60000));";
+  // Production passes a local filename; use a disposable module with that same
+  // argv layout instead of changing the bootstrap to accept arbitrary URLs.
+  const { mkdtemp, writeFile, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const path = await import('node:path');
+  const directory = await mkdtemp(path.join(tmpdir(), 'source-worker-initializing-'));
+  try {
+    const entry = path.join(directory, 'initializing.mjs');
+    await writeFile(entry, initializing);
+    await runParent(`import {spawn} from 'node:child_process';
+      const child=spawn(process.execPath,['--input-type=module','--eval',${JSON.stringify(SOURCE_MEMORY_WORKER_BOOTSTRAP)},${JSON.stringify(entry)},'--source-memory-worker'],
+        {detached:process.platform!=='win32',stdio:['ignore',1,2,'ipc']});
+      console.log('worker-pid='+child.pid);
+      child.once('message',()=>process.exit(0));`);
+  } finally { await rm(directory,{recursive:true,force:true}); }
+});

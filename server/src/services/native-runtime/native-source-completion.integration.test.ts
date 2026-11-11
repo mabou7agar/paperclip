@@ -98,6 +98,12 @@ describe("source completion through the outer native executor (synthetic only)",
         expect(activeNativeExecutionRunIds.has(f.runId)).toBe(true);
         expect(await getNativeSessionSteeringState(f.runId)).toEqual({ disposition: "available", activeTurnId: f.native.turnId });
         if (scenario === "Stop") {
+          // A direct controller cancellation is not itself a user Stop. Seed
+          // the trusted caller attribution that normal heartbeat Stop records;
+          // the real cancellation API must still produce the intent and ACK.
+          await db.update(heartbeatRuns).set({ resultJson: {
+            cancelledByActorType: "user", cancelledByUserId: "synthetic-stop-user",
+          } }).where(eq(heartbeatRuns.id, f.runId));
           expect(await cancelNativeSession(f.runId, "Synthetic Stop", { db, scope: "run" })).toMatchObject({ dispatched: true });
           throw new Error("native_finalization_missing: session returned no semantic result");
         }
@@ -153,6 +159,7 @@ describe("source completion through the outer native executor (synthetic only)",
       expect(run.status).toBe("cancelled"); expect(run.finishedAt).not.toBeNull();
       expect(run.resultJson?.nativeCancellation).toMatchObject({ dispatchState: "acknowledged", dispatched: true });
     }
+    const holdsBeforeReplay = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, f.issueId));
     // No accepted result exists to finalize. Repeated real finalizer entry must
     // refuse, rather than manufacturing acceptance, status effects or a retry.
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -164,10 +171,13 @@ describe("source completion through the outer native executor (synthetic only)",
     expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.companyId, f.companyId))).toHaveLength(1);
     // A board-owned diagnostic hold is not automatic recovery work. No recovery
     // task, wake policy or attempted successor may be created for a refusal.
+    // issue-recovery-actions.ts initializes the first failed-execution hold at
+    // one; a retry would increment it. Rejected finalizer replay must not.
     const holds = await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, f.issueId));
+    expect(holds).toEqual(holdsBeforeReplay);
     expect(holds.length).toBe(scenario === "Stop" ? 0 : 1);
     for (const hold of holds) expect(hold).toMatchObject({ ownerType: "board", ownerAgentId: null,
-      recoveryIssueId: null, wakePolicy: null, monitorPolicy: null, attemptCount: 0 });
+      recoveryIssueId: null, wakePolicy: null, monitorPolicy: null, attemptCount: 1 });
     expect(controller.execute).toHaveBeenCalledOnce();
   }, 30_000);
 });

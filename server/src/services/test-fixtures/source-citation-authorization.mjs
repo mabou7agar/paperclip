@@ -94,7 +94,7 @@ export function syntheticAuthorizationStore(rows) {
   return { db, reads };
 }
 
-const port = load(path.join(root, 'native-runtime/completion-validation.ts','native-runtime/canonical.ts','native-runtime/paperclip-control-plane-port.ts'));
+const port = load(path.join(root, 'native-runtime/paperclip-control-plane-port.ts'));
 await port.link((s, parent) => load(resolve(s, parent.identifier)));
 await port.evaluate();
 export const PaperclipControlPlanePort = port.namespace.PaperclipControlPlanePort;
