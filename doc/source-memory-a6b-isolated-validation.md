@@ -239,3 +239,62 @@ Final whole Claude ACP must cover this wrapper **and** the entire retained old
 external wrapper/derived-driver evidence and API harness, all cumulative authored
 files and actual qualification receipts. Fourth source turn uses the same session
 and branch; **4/6 used, 2 remain including reserved HANDOFF**. All holds remain.
+
+## Fifth source turn: independent worker watchdog
+
+Actual `0040ba477` operator qualification passed **2,035 production-file semantic
+checks, exit 0**, stamped native build (3,076 inputs / 151 chunks / 302 files),
+all-nine CI **62/62, zero failed/skipped**, and the **three repaired native cases**.
+Earlier 18 native cases remain retained. Actual bundle phase cited one range and
+duplicate read zero blobs. Do not repeat those unchanged successful cases.
+
+Actual bundle worker PIDs survived 5 seconds as **running** reparented processes;
+the operator's `/proc` receipts supersede the earlier speculation about the
+correct zombie regex. Full logs, cancellation-only measurement and the read-only
+Claude ACP diagnostic are saved on the task. That diagnosis is not final review.
+Both failed groups were forcibly cleaned by their own fixture owner.
+
+The production correction adds one small Worker-thread watchdog inside the source
+worker process, before any large import. It verifies the trusted expected parent,
+requires READY after an initial check, and keeps comparing parent identity and a
+single monotonic absolute deadline on its independent event loop. The watchdog
+is not retired by core guard release. It uses no provider, DB, network, file scan
+or new daemon. Its 200-ms checks last at most this active worker's 180 seconds;
+this is an explicit bounded active-lifetime exception to the idle-polling rule.
+Normal exit is unref'd; startup/early exit/error refuses import. Process-group
+kill targets only its own POSIX detached group, with its own PID fallback.
+Windows descendant-tree cleanup remains an explicit gap.
+
+All bootstrap invocations now carry **six arguments**, ending in the trusted
+spawning process PID. Bundle shims verify exact parent PID and replace **only
+index 3**, preserving eval source, IPC/options/env/protocol and time bounds.
+Standalone cancellation receipts record expected parent and argument count.
+
+Focused synthetic tests (fresh strip-emitted siblings, no reader/ledger/provider):
+first attempt **exit 1 / four pass / two fail of six**. Two fixture imports still
+had the worker flag set and started the core stdin entrypoint; corrected only
+inside the disposable fixture before importing the guard. Second filtered run
+**exit 0 / five pass**, which inadvertently included three already-passing NEW
+cases because “normal” also matched “normally”. No further replay was made. The
+six distinct final cases have passing evidence: synchronous import parent death;
+synchronous work after core release plus descendant; wrong parent/no import;
+test-only short monotonic deadline; watchdog startup failure/no import; normal
+exit. Initial failures remain preserved. These are synthetic watchdog proofs,
+not an actual-production-bundle pass.
+
+The one remaining source turn is reserved for **HANDOFF** after operator
+qualification. Freeze this fifth source candidate; no more source fix round or
+budget reset. Operator qualifies changed production semantic/build and only the
+new/affected watchdog and **actual bundle cancellation** obligations in the new
+owned 6-GiB scratch. No unchanged nine-suite CI, native cases, phase/duplicate,
+old Unit/proof/smoke or paid provider is repeated. Existing actual external
+`diagnose-bundled-worker-disconnect.mjs` must preserve its exact method and map
+entry index 3 under **six** arguments, leaving the trusted PID unchanged. Retain
+its exact derived source/hash, process birth/PID/group/state/timestamp and cleanup
+receipts. Do not reuse the expired scratch or increase the five-second assertion.
+
+Final whole independent Claude ACP still covers every cumulative authored file,
+all docs/tests/config/Bruno/MDX, the complete external API harness, original and
+updated bundle wrappers, actual 331/0040 derived drivers, the full diagnostic and
+raw lifetime receipts and final actual operator qualification. No acceptance or
+activation follows from the diagnostic. All holds and TL2/CTO2/story caps remain.

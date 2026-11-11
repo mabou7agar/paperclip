@@ -93,29 +93,68 @@ export async function prepareSourceMemory(input: SourceMemoryInput, operation: "
   return runWorker(payload, signal, remoteRead);
 }
 
-/** Minimal Node entry evaluated before importing the potentially large bundled
- * service graph. Its absolute deadline survives the handover to the core guard.
- * The only module path is the server-owned import.meta.url argument, never a
- * task/config path. No source, reader or state access occurs before the guard. */
+/** Runs on its own event loop while the worker's main thread is blocked by
+ * synchronous bundle initialization or SQLite. Only its own detached process
+ * group may be killed; expectedParent is used for comparison, never as a target.
+ * The active lifetime is bounded by one monotonic 180-second deadline. */
+const SOURCE_MEMORY_WATCHDOG = `
+const { parentPort, workerData } = require('node:worker_threads');
+const { expectedParent, deadline, group } = workerData;
+const terminate = () => {
+  if (group) { try { process.kill(-process.pid, 'SIGKILL'); } catch {} }
+  try { process.kill(process.pid, 'SIGKILL'); } catch {}
+};
+const check = () => {
+  try { if (process.ppid !== expectedParent || process.hrtime.bigint() >= deadline) terminate(); }
+  catch { terminate(); }
+};
+check();
+setInterval(check, 200);
+parentPort.postMessage('ready');
+`;
+
+/** Fixed pre-import entry. No task/config path or source/state access occurs
+ * before watchdog readiness. The trusted parent PID comes only from runWorker.
+ * A dead/reparented caller or failed watchdog refuses import permanently. */
 export const SOURCE_MEMORY_WORKER_BOOTSTRAP = `
 import { pathToFileURL } from 'node:url';
+import { Worker } from 'node:worker_threads';
 const key = Symbol.for('paperclip.source-memory-worker-bootstrap.v1');
 const terminate = () => {
   if (process.platform !== 'win32') { try { process.kill(-process.pid, 'SIGKILL'); } catch {} }
-  process.exit(1);
+  try { process.kill(process.pid, 'SIGKILL'); } catch {}
 };
+const expectedParent = Number(process.argv[3]);
+if (!Number.isSafeInteger(expectedParent) || expectedParent <= 1 || process.ppid !== expectedParent || !process.connected) terminate();
+const deadline = process.hrtime.bigint() + 180_000_000_000n;
 const deadlineAt = Date.now() + 180000;
+let exiting = false;
+process.once('exit', () => { exiting = true; });
+const watchdog = new Worker(${JSON.stringify(SOURCE_MEMORY_WATCHDOG)}, {
+  eval: true, execArgv: [], argv: [],
+  workerData: { expectedParent, deadline, group: process.platform !== 'win32' },
+  resourceLimits: { maxOldGenerationSizeMb: 16, maxYoungGenerationSizeMb: 4 },
+});
+await new Promise(resolve => {
+  const readiness = setTimeout(terminate, 5000);
+  watchdog.once('message', message => { clearTimeout(readiness); if (message === 'ready') resolve(); else terminate(); });
+  watchdog.once('error', () => { if (!exiting) terminate(); });
+  watchdog.once('exit', () => { if (!exiting) terminate(); });
+});
+watchdog.unref();
+// Supplemental main-thread fast paths may hand over to the core. The watchdog
+// is deliberately NOT part of release and outlives synchronous core work.
 process.once('disconnect', terminate);
 const timer = setTimeout(terminate, Math.max(0, deadlineAt - Date.now()));
 globalThis[key] = { deadlineAt, release() { clearTimeout(timer); process.removeListener('disconnect', terminate); delete globalThis[key]; } };
-if (!process.connected) terminate();
+if (process.ppid !== expectedParent || !process.connected || process.hrtime.bigint() >= deadline) terminate();
 await import(pathToFileURL(process.argv[1]).href);
 `;
 
 function runWorker(payload: WorkerInput, signal?: AbortSignal, remoteRead?: RemoteSourceReader): Promise<SourceMemoryEvidence> {
   return new Promise((resolve, reject) => {
     requireValue(!signal?.aborted, "cancelled");
-    const child = spawn(process.execPath, ["--input-type=module", "--eval", SOURCE_MEMORY_WORKER_BOOTSTRAP, fileURLToPath(import.meta.url), "--source-memory-worker"], { stdio: ["pipe", "pipe", "pipe", "ipc"], detached: process.platform !== "win32", env: { ...gitEnv, NODE_OPTIONS: "", NODE_PATH: "", NODE_NO_WARNINGS: "1" } });
+    const child = spawn(process.execPath, ["--input-type=module", "--eval", SOURCE_MEMORY_WORKER_BOOTSTRAP, fileURLToPath(import.meta.url), "--source-memory-worker", String(process.pid)], { stdio: ["pipe", "pipe", "pipe", "ipc"], detached: process.platform !== "win32", env: { ...gitEnv, NODE_OPTIONS: "", NODE_PATH: "", NODE_NO_WARNINGS: "1" } });
     let bytes = 0; let output = ""; let failure: Error | null = null;
     const stop = (code: string) => {
       failure = new Error(`source_memory_${code}`);

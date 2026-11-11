@@ -53,7 +53,7 @@ process.stdout.write(JSON.stringify({revision:first.revision,citations:first.cit
   const parent = path.join(root, 'parent.mjs');
   await writeFile(parent, `import childProcess from 'node:child_process';import {syncBuiltinESMExports} from 'node:module';
 const original=childProcess.spawn;
-childProcess.spawn=(command,args,options)=>{const child=original(command,args,options);if(args?.includes('--source-memory-worker'))child.once('spawn',()=>process.stdout.write(JSON.stringify({workerPid:child.pid})+'\\n'));return child};syncBuiltinESMExports();
+childProcess.spawn=(command,args,options)=>{const child=original(command,args,options);if(args?.includes('--source-memory-worker')){if(args.length!==6||args[5]!==String(process.pid))throw Error('Worker trusted-parent argv changed');child.once('spawn',()=>process.stdout.write(JSON.stringify({workerPid:child.pid,expectedParentPid:process.pid,workerArgumentCount:args.length})+'\\n'));}return child};syncBuiltinESMExports();
 const {prepareSourceMemory}=await import(${JSON.stringify(pathToFileURL(service).href)});
 await prepareSourceMemory(${JSON.stringify(input)},'phase',${JSON.stringify(config)});
 `);
@@ -65,7 +65,7 @@ await prepareSourceMemory(${JSON.stringify(input)},'phase',${JSON.stringify(conf
     delay(15_000).then(() => { throw new Error('Worker spawn receipt deadline'); }),
   ]);
   workerPid = pidReceipt.workerPid; assert.ok(Number.isInteger(workerPid));
-  await recordCase({ case: 'disconnect', status: 'worker-spawned', parentPid: driver.pid, workerPid });
+  await recordCase({ case: 'disconnect', status: 'worker-spawned', parentPid: driver.pid, workerPid, expectedParentPid: pidReceipt.expectedParentPid, workerArgumentCount: pidReceipt.workerArgumentCount });
   driver.kill('SIGKILL'); killedParent = true; await closed;
   await recordCase({ case: 'disconnect', status: 'parent-killed', parentPid: driver.pid, workerPid });
   async function stopped(pid) {

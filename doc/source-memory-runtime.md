@@ -310,27 +310,40 @@ activation or release acceptance.
 
 ## A5 worker lifetime and provenance retention (source only)
 
-The dedicated worker installs an IPC-disconnect handler before consuming stdin
-or opening state. Parent exit closes IPC and terminates the worker; on POSIX,
-termination kills its dedicated process group, including local Git subprocesses.
-The child starts with a fixed, dependency-free Node `--eval` bootstrap before
-importing the service module or its production bundle chunk. It registers IPC
-disconnect and an absolute 180-second deadline first. The core installs its own
-guard before releasing the bootstrap and inherits only the remaining time;
-module initialization never resets that budget. The child argv is
-`--input-type=module --eval <fixed bootstrap> <server-owned module> --source-memory-worker`.
-The module path remains `fileURLToPath(import.meta.url)`, not a task/config path.
-The previous direct worker entry still registers the core guard for compatibility.
-No persisted run/session/state shape or source authorization changes.
+The dedicated worker starts a fixed Node `--eval` bootstrap before importing
+its service module or production bundle chunk. It validates the expected parent
+PID supplied by `runWorker` against `process.ppid` and requires live IPC. It starts
+a small Worker-thread watchdog with its own event loop, waits for its first
+successful check/READY, then imports the server-owned module. Failure or a wrong
+parent kills only the worker's own detached process group and refuses import.
 
-A worker-owned 180-second deadline also applies if the parent remains alive.
-Normal completion removes the guard before disconnecting. Windows terminates the
-worker only; descendant process-tree cleanup is not claimed there. These are
-Node event-loop guards: synchronous work (including the existing bounded SQLite
-lock wait) can delay delivery, and a stopped/uninterruptible process is outside
-this guarantee. The controller's existing deadline and cancellation remain.
-Remote reads retain the existing owning runner's lifecycle; this patch does not
-claim to cancel an already dispatched remote command.
+The watchdog compares the current parent PID and a single monotonic
+`process.hrtime.bigint()` absolute 180-second deadline every 200 ms for this active
+worker lifetime. This bounded observation is needed while synchronous bundle or
+SQLite work can block the main event loop. It is not an idle company scan. The
+watchdog remains owned until process exit, independent of core guard release;
+`unref()` lets normal exit stop it. Failed watchdog startup/exit is fail closed.
+The existing main-thread IPC/deadline guards remain supplemental, inheriting the
+remaining deadline during handover. The controller still owns cancellation,
+output limits and its original 180-second process-group deadline.
+
+Child argv (six arguments): `--input-type=module --eval <fixed bootstrap>
+<server-owned module> --source-memory-worker <trusted parent PID>`. Only the module
+at index 3 is mapped by the operator's bundle fixture. PID is supplied from the
+spawning server process, never a task/config field or a kill target. The module
+is still `fileURLToPath(import.meta.url)`. POSIX spawn remains detached; local Git
+children inherit that group. No source/reader/state access precedes watchdog
+readiness. No persisted run/session/state shape or source authorization changes.
+Previous direct worker entries retain the core guard; their historical proof
+cannot establish the new synchronous-work lifetime guarantee.
+
+POSIX group kill covers the worker and local descendants even during synchronous
+work. Windows kills this worker process only; descendant tree termination is an
+explicit gap (no Job Object is added). OS-stopped/uninterruptible processes or
+starvation of every thread are outside this guarantee. Remote reads retain their
+own runner lifecycle; this does not cancel an already-dispatched remote command.
+Normal completion retires only supplemental core guards; the independent
+watchdog is never retired by `release()`.
 
 ### Retention proposal only (supersedes accepted A5 pruning)
 

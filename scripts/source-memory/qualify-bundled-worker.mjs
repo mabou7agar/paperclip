@@ -38,13 +38,13 @@ assert.equal(source.split(importNeedle).length - 1, 2, 'Expected both frozen fix
 // serialization, environment, IPC and child lifecycle; map that entry only.
 const parentShim = `import bundledChildProcess from 'node:child_process';import {syncBuiltinESMExports as syncBundleSpawn} from 'node:module';
 const bundleSpawn=bundledChildProcess.spawn;
-bundledChildProcess.spawn=(command,args,options)=>{if(args?.includes('--source-memory-worker')){if(args.length!==5||args[0]!=='--input-type=module'||args[1]!=='--eval'||args[4]!=='--source-memory-worker')throw Error('Worker bootstrap argv changed');args=[...args];args[3]=${JSON.stringify(chunk)};}return bundleSpawn(command,args,options)};syncBundleSpawn();
+bundledChildProcess.spawn=(command,args,options)=>{if(args?.includes('--source-memory-worker')){if(args.length!==6||args[0]!=='--input-type=module'||args[1]!=='--eval'||args[4]!=='--source-memory-worker'||args[5]!==String(process.pid))throw Error('Worker bootstrap argv changed');args=[...args];args[3]=${JSON.stringify(chunk)};}return bundleSpawn(command,args,options)};syncBundleSpawn();
 `;
 source = source.replace(importNeedle, parentShim + importNeedle);
 const spawnNeedle = 'childProcess.spawn=(command,args,options)=>{const child=original(command,args,options);';
 assert.equal(source.split(spawnNeedle).length - 1, 1, 'Expected frozen cancellation parent');
 source = source.replace(spawnNeedle,
-  `childProcess.spawn=(command,args,options)=>{if(args?.includes('--source-memory-worker')){if(args.length!==5||args[0]!=='--input-type=module'||args[1]!=='--eval'||args[4]!=='--source-memory-worker')throw Error('Worker bootstrap argv changed');args=[...args];args[3]=${JSON.stringify(chunk)};}const child=original(command,args,options);`);
+  `childProcess.spawn=(command,args,options)=>{if(args?.includes('--source-memory-worker')){if(args.length!==6||args[0]!=='--input-type=module'||args[1]!=='--eval'||args[4]!=='--source-memory-worker'||args[5]!==String(process.pid))throw Error('Worker bootstrap argv changed');args=[...args];args[3]=${JSON.stringify(chunk)};}const child=original(command,args,options);`);
 
 const scratch = await mkdtemp(path.join(tmpdir(), 'source-bundle-qualification-'));
 try {
