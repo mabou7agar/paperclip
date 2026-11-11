@@ -1,99 +1,142 @@
-# A6b isolated validation checkpoint
+# A6b source implementation and final operator qualification
 
-This is a partial source checkpoint, not a completed candidate or activation
-qualification. Accepted base: `41ecd2aabd5faec5ec11b21f52dd04710fe16f58`.
-Review anchor: `93c63ede68f18d735cda1e9616874ec8c193a5d6`.
+Source-only, activation held. Accepted base:
+`41ecd2aabd5faec5ec11b21f52dd04710fe16f58`; review anchor:
+`93c63ede68f18d735cda1e9616874ec8c193a5d6`. The frozen implementation SHA and
+byte manifests are attached to the task, avoiding a self-referential source hash.
 
-## Recorded focused checks
+## Authority and implementation
 
-Node 24.22.2, UID 1000, disposable synthetic state only:
+The saved CTO capture decision and `actual-unblock-inputs-20261111` supersede the
+first checkpoint's design/tooling hold. Five source turns remained on admission;
+this is the second implementation run overall, with one later turn reserved for
+HANDOFF. No task, stage, session, budget or approval is reset.
 
-| Command | Exit | Result |
+- The generic issue-update hook owns capture and audit persistence with the stage
+  transaction. Native governance exposes an opted-in configured gate; the native
+  committer enters it through that hook before materializing effects which may
+  release checkout. The existing policy transition selects the participant. The
+  ordinary completion's notification targets that captured participant.
+- The source-inspection owner reads only the currently bound isolated local Git
+  worktree. It verifies current task/run identity, the native finalizer lease (or
+  running legacy controller deadline), and the existing runtime-lease owner's
+  exact task/run/agent proof. Rows remain locked through commit. The read uses
+  the pinned source-memory Git guards, clean final writes, a named branch and
+  repeated source identity. Capture opens no ledger or blob cache.
+- The stage stores the server-owned full SHA and a task/project/repository,
+  workspace binding revision, writer run, stage and participant receipt. The
+  optional explicit SHA only narrows capture. Inherited prior request fields do
+  not become explicit constraints on a new native handoff. Reasserting an existing
+  stage preserves its captured candidate even if the worktree later advances.
+- One audit event is deduplicated under the issue lock by `(issue, stage, sha)`.
+  Incoming receipt fields never authorize dedup; only the persisted receipt does.
+  Reader admission checks the captured repository scope and full candidate before
+  preparation. The reviewer consumer checks task, workspace revision, stage and
+  participant. No schema migration or client/UI/skill/MCP field is added.
+- Unsupported local-source/lease/access cases throw a typed
+  `review_candidate_capture_unavailable` hold. Native finalization records it as
+  terminal with no next attempt. Trusted source-completion rejection is a typed
+  terminal native failure; concurrent/replayed rejected completions coalesce
+  their bounded reads before any accepted-result transaction.
+
+Previous-release story: records without the optional capture receipt still decode
+and are retained. They cannot acquire new current-evidence authority for a bound
+review. Named missing-candidate/recovery failures preserve source/session/task
+context; no saved session is cleared, migrated or silently rebound. Previously
+accepted review records are not rewritten. Condition 3 remains a procedure
+proposal only in `source-memory-review-recovery-proposal.md`.
+
+## Evidence collected in this source worktree
+
+Node 24.22.2; nonroot; only newly created disposable synthetic state:
+
+| Check | Exit | Result |
 | --- | --- | --- |
-| `node scripts/source-memory/run-tests.mjs source-memory-binding` | 0 | 10 tests passed, 0 failed/skipped |
-| `node scripts/source-memory/run-tests.mjs source-memory-current` | 0 | 6 tests passed, 0 failed/skipped |
-| `node scripts/source-memory/run-tests.mjs` without reader variable | 1 | Expected loud refusal, 0 suites executed |
-| `node --check scripts/source-memory/run-tests.mjs` | 0 | Syntax only |
-| `git diff --check` | 0 | Whitespace only |
+| Earlier `source-memory-binding` focused suite | 0 | 10 passed; retained, not repeated |
+| Earlier `source-memory-current` focused suite | 0 | 6 passed; retained, not repeated |
+| Earlier all-suite command without reader | 1 | Expected loud refusal; 0 suites executed |
+| Changed `heartbeat/source-memory-admission` suite | 0 | 7 passed, 0 failed/skipped |
+| New `captured review consumer` case only | 0 | 1 passed, 0 failed/skipped |
+| Changed-source syntax and whitespace checks | 0 | Syntax/whitespace only; not semantics |
 
-The binding regression executes real authorization services over synthetic
-storage, including a bound scope reaching authorization and a revoked agent
-being refused before reader access. Full bound-reader success remains in
-`heartbeat/source-memory-admission.test.mjs` and has not run in this checkpoint.
-The existing mocked current-evidence tests remain distinct from that proof.
-The runner emits stripped JS for tests; this is not a semantic build.
+The admission attempt initially failed before cases executed because a new
+parameter property was incompatible with Node strip-only mode; it was corrected
+and the affected suite passed. Both logs are preserved. All 38 reader code hashes
+and its manifest hash were verified before copying only those files to new scratch.
+No existing knowledge state/SQLite was opened. The reader manifest remains
+`0024f01f17032a78c99cd2b14c8c58ddf5501025c24e9528e9c448679514b71a`.
 
-## Missing validation inputs; one operator request
+The seven-case suite emits JS by stripping types. It proves a real worker process
+and new source admission/capture scenarios, not semantic correctness or production
+bundle qualification. No old 54-case/PG/Unit/proof/smoke suite was repeated here.
+The first checkpoint incorrectly looked for the checker at repository root;
+the correct existing path is **server/scripts/typecheck-layers.mjs**, CWD `server`.
 
-This checkout has no `node_modules`, `server/node_modules`, or `server/dist`.
-`SOURCE_MEMORY_READER_FIXTURE` was not supplied. The task-named command
-`node scripts/typecheck-layers.mjs --declarations-only` cannot run because that
-script is absent at this accepted base. Do not install, bootstrap Corepack,
-download, traverse private caches, or run a substitute monolithic compiler.
-A lead/operator must provide approved cached dependencies, the verified reader
-bundle and a matching declaration-checker/build procedure for this exact source.
-No missing-fixture suite was reported as passing; no hosted Actions run occurred.
+## Already-arranged final-source operator qualification
 
-## Prepared finite isolated checks for conditions 4 and 5
+Use the final frozen source only, in the operator-owned no-network/no-mount,
+nonroot scratch with approved cached image, reader and dependencies. No bootstrap,
+Corepack, install, download or production environment is authorized. These entries
+are prepared; results are not yet claimed.
 
-These checks are not executed evidence and do not authorize paid/live dispatch.
-Bind them to the final frozen SHA after the remaining producer implementation.
-Run each changed scenario once, using fresh disposable Git and database state;
-any missing/ambiguous result causes one lead hold, never automatic resubmission.
+1. From CWD `server`, run:
+   `PAPERCLIP_TYPECHECK_LOW_MEMORY=1 node scripts/typecheck-layers.mjs --declarations-only`.
+   Do not set emit-only/noCheck for this semantic proof. Then emit final native JS,
+   runtime assets/stamp and the normal runtime bundle using the existing cached
+   procedure. Record exact source/artifact inventories and hashes.
+2. Set `SOURCE_MEMORY_BUILT_SERVICE` to the absolute emitted
+   `server/dist/services/source-memory.js`, and `SOURCE_MEMORY_READER_FIXTURE` to
+   the verified code-only fixture. From repository root, run only the new TS cases:
+   `node node_modules/vitest/vitest.mjs run server/src/services/source-review-handoff.test.ts server/src/services/native-runtime/native-source-completion.test.ts --maxWorkers=1`.
+   These create their own fresh Postgres/Git state. They never use an existing
+   external database URL. The handoff fixture uses the actual emitted source
+   worker and real task authorization; no authorization function is mocked.
+3. The handoff cases cover default omission, explicit match/mismatch, stage and
+   participant/task/workspace revision, rollback, unsupported source/lease holds,
+   advanced-worktree replay, audit dedup, and a real accepted-result → native
+   finalizer → configured-stage/participant notification path without any provider.
+4. Condition 4's never-paid controller fixture drives the real completion port,
+   bounded citation consumer and executor failure classifier. It checks terminal
+   no-retry disposition, concurrent/rejected replay read counts, no accepted-result
+   transaction, and Stop. Distinguish this scope from a full native executor
+   dispatch/cleanup trace; the arranged operator qualification must supply that
+   terminal/resource-cleanup proof before readiness. No paid provider is allowed.
+5. For condition 5, run once:
+   `node scripts/source-memory/qualify-built-worker.mjs` with those two variables.
+   It imports the actual emitted service in a clean child with empty
+   `NODE_OPTIONS`/`NODE_PATH`, checks phase and duplicate receipts/zero duplicate
+   blob reads, then kills a disposable parent and asserts its real worker stops
+   after IPC disconnect. It records the artifact hash and process cleanup. All
+   repositories, config and ledgers are new; the fixture removes its own state.
+6. The separate required CI-roster proof is:
+   `CI=1 node scripts/source-memory/run-tests.mjs` with the verified reader.
+   It must run all nine suites or fail; no subset/filter is permitted in CI.
+   This required roster proof is distinct from replaying old checks for status.
+   No hosted Actions run is claimed while push is held.
 
-- Condition 4: use the real native completion port, finalizer and status committer
-  with a never-paid in-process driver/fake controller. Submit a structurally valid
-  review result with absent current evidence, then a bad digest, and ensure each
-  rejection yields the named terminal failure with no accepted result or successor
-  review dispatch. Deliver the same completion identity twice and record bounded
-  authorization/read counts and durable dedup effects. Include cancellation during
-  the read and a terminal replay. The earlier port-only throw test does not prove
-  finalizer terminal/retry behavior. Capture exit, assertions, accepted-result and
-  finalization counts, controller calls and cleanup evidence. Do not rewrite real
-  stage/session/assignment records to construct the test.
-- Condition 5: build with approved cached tools, then import the actual emitted
-  `source-memory.js` in a child with empty `NODE_OPTIONS`/`NODE_PATH`. Use the
-  manifest-verified reader and a new synthetic repository/config/state namespace.
-  Invoke one phase and its duplicate commit; require a full-SHA receipt, bounded
-  citations, zero new blob reads on the duplicate and no provider calls. Stop the
-  parent during a separate disposable worker operation and prove process-group
-  termination/transaction release. Record build/artifact hashes and child paths;
-  stripped-source test output is not the built artifact proof.
+Each remaining qualification is once-only on the final inputs. Preserve exit code,
+totals, failures, run/environment IDs, cleanup and full logs. A missing/ambiguous
+receipt gets one lead hold, no resubmission or monitoring loop. Do not check the
+intermediate checkpoint or repeat passing cases without a changed input/gap.
 
-## Unresolved trusted producer boundary
+## Mandatory entire-final independent review
 
-`heartbeat.ts` records `sourceSnapshot` during preparation before provider
-execution. It cannot identify the final implementation commit. Its pending-stage
-consumer in `heartbeat/source-memory-run-state.ts` accepts a candidate but never
-produces one. `workspace-source-inspection.ts` returns source verification status,
-not a handoff-time commit. The local close-readiness inspection in
-`execution-workspaces.ts` returns dirty/ref/ancestry metadata without a head SHA;
-remote inspection returns persistence readiness rather than a revision. Plugin
-inspection may return a head but is not a generic active native-writer capture.
+After operator qualification, use the existing native Tech Lead → CTO stages,
+with final SHA in `reviewRequest.instructions` only. The old live API must not
+receive `candidateSha`. Do not create duplicate review tasks or stages.
 
-What is missing is a generic, authorized handoff-boundary revision capture tied
-to task/workspace selection and current native writer/lease, persisted atomically
-with the review stage. Implementing an ad hoc route Git read, trusting the initial
-run snapshot, or waiting until reviewer startup would violate the requested trust
-boundary. The Platform Lead should resolve the internal CTO design gap once:
-identify an existing eligible primitive or authorize its narrowly scoped owner
-extension, preserving current source/access/lease checks and same-task budgets.
-No automatic producer or omission/explicit/mismatch/stage-binding acceptance
-proof is claimed here. No client or API workaround was added.
+The final Claude ACP review must inventory every authored cumulative file against
+the review anchor: production, every test/fixture, configuration, Bruno, MDX and
+all docs, particularly `source-memory-runtime.md`. The prior assembly document
+`isolated-validation-602d-final-20261111`, revision
+`05efefcb-1fbc-4ed5-8e99-9072eb920dc4`, contains the **entire external API harness
+and isolation proof** and must also be read. Its body SHA-256 is
+`570d3d9fb562fb67c989e628065bfced545c110f15ba10e469bad99b4e580947`.
+Prior receipts are historical, not full qualification of this changed source.
+Mechanical generated-validator reproducibility can replace manual reading of
+its generated bytes, with explicit coverage recorded.
 
-## Required final independent review
-
-After implementation and isolated verification, the existing native Claude ACP
-review must inventory the entire combined diff against the review anchor,
-including production, all tests/fixtures, configuration, Bruno, MDX and all docs,
-especially `source-memory-runtime.md`. It must also read the external API harness
-and isolation proof from the prior assembly's final validation document. Preserve
-prior receipts without treating them as full final coverage. Generated validator
-reproducibility may replace a manual read of generated bytes. Then use the
-existing Tech Lead → CTO stages, with full final SHA in review instructions;
-never submit `candidateSha` to the old live API or create duplicate stages/tasks.
-
-Production inputs outside this checkpoint delta are unchanged. No configuration
-was enabled, real repository indexed, model dispatched by a test, data/ledger
-opened, branch changed, push/merge/install/deployment performed, or old proof,
-full Unit suite or installation smoke repeated.
+All configuration enablement, real indexing, activation, merge/push/install/deploy,
+production/legacy data, root, DBA and source-anchor holds remain in force. There
+were no new questions for the supplied technical inputs, paid test providers,
+session resets, arbitrary Git reads or changes outside this task's worktree.

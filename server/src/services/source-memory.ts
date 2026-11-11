@@ -27,7 +27,7 @@ export type SourceMemoryInput = {
   signal?: AbortSignal; query?: string;
 };
 type CitationRead = { revision: string; path: string; startLine: number; endLine: number };
-type WorkerInput = { config: Configuration; scope: Scope; input: Omit<SourceMemoryInput, "signal">; operation: "phase" | "commit" | "verify" | "citation"; citation?: CitationRead; expected?: Pick<SourceMemoryEvidence, "revision" | "ref" | "dirty"> };
+type WorkerInput = { config: Configuration; scope: Scope; input: Omit<SourceMemoryInput, "signal">; operation: "phase" | "commit" | "verify" | "citation" | "capture"; citation?: CitationRead; expected?: Pick<SourceMemoryEvidence, "revision" | "ref" | "dirty"> };
 export type SourceMemoryEvidence = {
   schema: 1; scope: Scope; revision: string; ref: string; taskRef: string; event: "changed" | "duplicate";
   dirty: { trackedDiffSha256: string; untrackedPathsSha256: string; trackedBytes: number; untrackedPaths: number };
@@ -51,6 +51,13 @@ async function configuration(file: string): Promise<Configuration> {
   return c;
 }
 
+/** Project opt-in for a configured review handoff, before any source URL read. */
+export async function sourceMemoryProjectBindingEnabled(input: Pick<SourceMemoryInput, "companyId" | "projectId">,
+  configFile = process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG): Promise<boolean> {
+  if (!configFile || !input.projectId) return false;
+  return (await configuration(configFile)).bindings.some(b => b.companyId === input.companyId && b.projectId === input.projectId);
+}
+
 /** Opt-in filter only; this grants no task, filesystem or reader authority. */
 export async function sourceMemoryBindingEnabled(input: Pick<SourceMemoryInput, "companyId" | "projectId" | "repoUrl">,
   configFile = process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG): Promise<boolean> {
@@ -65,7 +72,7 @@ export async function sourceMemoryBindingEnabled(input: Pick<SourceMemoryInput, 
 }
 
 /** Absent configuration does no I/O. Enabled failures refuse source evidence, never use an old card. */
-export async function prepareSourceMemory(input: SourceMemoryInput, operation: "phase" | "commit" | "verify" | "citation" = "phase", configFile = process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG, remoteRead?: RemoteSourceReader, expected?: Pick<SourceMemoryEvidence, "revision" | "ref" | "dirty">, citation?: CitationRead): Promise<SourceMemoryEvidence | null> {
+export async function prepareSourceMemory(input: SourceMemoryInput, operation: "phase" | "commit" | "verify" | "citation" | "capture" = "phase", configFile = process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG, remoteRead?: RemoteSourceReader, expected?: Pick<SourceMemoryEvidence, "revision" | "ref" | "dirty">, citation?: CitationRead): Promise<SourceMemoryEvidence | null> {
   if (!configFile) return null;
   const config = await configuration(configFile);
   if (!input.projectId || !input.repoUrl) return null;
@@ -251,6 +258,16 @@ async function worker(payload: WorkerInput) {
   }
   const before = await sourceIdentity(input.cwd);
   if (operation === "verify") requireValue(payload.expected && JSON.stringify(before) === JSON.stringify({ revision: payload.expected.revision, ref: payload.expected.ref, dirty: payload.expected.dirty }), "stale_before_dispatch");
+  if (operation === "capture") {
+    requireValue(before.ref.startsWith("refs/heads/"), "review_detached_ambiguous");
+    requireValue(before.dirty.trackedBytes === 0 && before.dirty.untrackedPaths === 0, "review_final_writes_pending");
+    requireValue(JSON.stringify(await sourceIdentity(input.cwd)) === JSON.stringify(before), "source_changed_during_capture");
+    // No ledger/cache is opened. The immutable commit is captured after final
+    // writes, through the same pinned Git storage/executable guards as reads.
+    return { schema: 1, scope, ...before, taskRef: "", event: "duplicate", phase: input.phase,
+      provider: input.provider, model: input.model, runId: input.runId, affectedFiles: 0,
+      affectedQueue: [], queueTruncated: false, blobReads: 0, citations: [] };
+  }
   const state = path.join(config.state, "runtime-v1", identity(scope));
   await mkdir(state, { recursive: true, mode: 0o700 });
   requireValue(((await stat(state)).mode & 0o077) === 0, "state_permissions");

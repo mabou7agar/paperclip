@@ -1,3 +1,4 @@
+import { NativeCompletionValidationError } from "./native-runtime/completion-validation.js";
 import { taskCompletionReceiptInstruction } from "./task-completion-receipts.js";
 import { isAddressedInteractionWakeContext } from "./addressed-interaction-wake.js";
 import { ConnectionUsageCapReached } from "./connection-usage-caps.js";
@@ -3467,7 +3468,10 @@ export function heartbeatService(
         // Candidate comes only from the server-owned pending review stage. Never
         // inherit a caller-supplied context candidate or infer one from baseRef.
         context.reviewCandidateSha = sourceReviewCandidateSha(
-          parseIssueExecutionState(issueContext?.executionState), agent.id);
+          parseIssueExecutionState(issueContext?.executionState), agent.id, {
+            companyId: run.companyId, issueId: issueRef?.id ?? "", workspaceId: persistedExecutionWorkspace?.id ?? null,
+            bindingRevision: issueContext?.workspaceBindingRevision ?? -1,
+          });
         const sourceMemory = await timePreparation("source_memory", () => prepareHeartbeatSourceMemory({
           identity: { companyId: run.companyId, projectId: executionWorkspace.projectId, issueId: issueRef?.id ?? "",
             runId: run.id, phase: phaseRoute?.phase ?? null, provider: phaseRoute?.profile?.binding.provider ?? null,
@@ -3477,6 +3481,7 @@ export function heartbeatService(
           workspace: executionWorkspace, recovering: !issueRef || Boolean(runOptions.nativeRestartRecovery),
           // A handed-off candidate only narrows review admission; baseRef is never a snapshot.
           frozenRevision: readNonEmptyString(context.reviewCandidateSha),
+          frozenScope: parseIssueExecutionState(issueContext?.executionState)?.sourceReviewCapture ?? null,
           recordRevision: async revision => {
             if (!persistedExecutionWorkspace) throw new Error("source_memory_task_binding_missing");
             const sourceSnapshot = { workspaceId: persistedExecutionWorkspace.id, revision };
@@ -3595,7 +3600,7 @@ export function heartbeatService(
                 sourceCurrentEvidenceSatisfied: result.resultJson.sourceCurrentEvidenceSatisfied,
               })}::jsonb` }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.status, "running")));
             }
-            if (result.errorCode === "source_citation_rejected") throw new Error("source_citation_rejected");
+            if (result.errorCode === "source_citation_rejected") throw new NativeCompletionValidationError("source_citation_rejected");
           },
           task: {
             issueRef,

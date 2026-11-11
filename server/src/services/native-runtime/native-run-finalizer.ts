@@ -1,3 +1,4 @@
+import { SourceReviewCaptureUnavailable } from "../source-review-capture-error.js";
 import { notifyNativeEnvironmentSettlement } from "../native-environment-settlement-notifications.js";
 import { isContextCompactionRun } from "../context-compaction.js";
 import { notifyExternalAgentSettlement } from "../../modules/external-agents/index.js";
@@ -655,7 +656,7 @@ export async function recordNativeFinalizationFailure(input: {
   const message =
     input.error instanceof Error ? input.error.message : String(input.error);
   if (message === "native_finalization_lease_busy") return coordinator;
-  const failureCode = message.startsWith("native_")
+  const failureCode = input.error instanceof SourceReviewCaptureUnavailable ? "review_candidate_capture_unavailable" : message.startsWith("native_")
     ? message
     : "native_finalization_invalid";
   return recordRetryableFailure({
@@ -664,8 +665,11 @@ export async function recordNativeFinalizationFailure(input: {
     coordinator,
     failureCode,
     message,
+    permanent: input.permanent || input.error instanceof SourceReviewCaptureUnavailable,
     nextAction:
-      input.failureScope === "workspace"
+      input.error instanceof SourceReviewCaptureUnavailable
+        ? "Resolve the typed source-capture hold through the responsible lead; preserve the task, stage, session and source. No automatic retry."
+        : input.failureScope === "workspace"
         && (message === "native_plugin_workspace_branch_mismatch" || message === "native_plugin_workspace_owner_mismatch")
         ? "Repair the plugin workspace branch or owner, then resume finalization without another provider turn."
         : input.failureScope === "workspace"
@@ -675,7 +679,6 @@ export async function recordNativeFinalizationFailure(input: {
         : "Repair the persisted native result or contract discriminator, then resume finalization from the coordinator.",
     projectRunStatus: input.projectRunStatus,
     failureScope: input.failureScope,
-    permanent: input.permanent,
     failureCause: input.failureCause,
   });
 }
@@ -1906,13 +1909,16 @@ export async function finalizeNativeRun(input: {
         db: input.db,
         run,
         coordinator,
+        permanent: error instanceof SourceReviewCaptureUnavailable,
         failureCode:
-          error instanceof NativeStatusRaceError
+          error instanceof SourceReviewCaptureUnavailable ? "review_candidate_capture_unavailable" : error instanceof NativeStatusRaceError
             ? "status_cas_exhausted"
             : "side_effect_planning_failed",
         message: error instanceof Error ? error.message : String(error),
         nextAction:
-          error instanceof NativeStatusRaceError
+          error instanceof SourceReviewCaptureUnavailable
+            ? "Resolve the typed source-capture hold through the responsible lead; preserve task/stage/session/source. No automatic retry."
+            : error instanceof NativeStatusRaceError
             ? "Reassess against the latest authoritative issue status version."
             : "Retry atomic status and liveness materialization from the persisted assessment.",
         projectRunStatus: input.projectRunStatus,

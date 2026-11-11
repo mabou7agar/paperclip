@@ -1,3 +1,5 @@
+import { prepareSourceReviewHandoff } from "./source-review-handoff.js";
+import type { NativeSourceReviewOwner } from "./workspace-source-inspection.js";
 import { assertCanCreateProgressReview, assertReviewProgressOwner, assertCanChangeProgressReview, assertReviewProgressStateWrite, assertReviewProgressStateShape, reconcileReviewProgressSnapshot, type ReviewProgressSnapshot } from "./issue-review-progress.js";
 import { recordTaskCompletionReceipt, completionReceiptForRun } from "./task-completion-receipts.js";
 import { completionAcknowledgement, acknowledgeCompletionReceipt } from "../repositories/task-completion-receipts.js";
@@ -11225,6 +11227,10 @@ export function issueService(db: Db) {
         /** Server-owned transfer being applied; never accepted from HTTP input. */
         caseHandoffId?: string;
         actorRunStopId?: string | null;
+        /** Internal native status committer only; never an API mutation field. */
+        sourceReviewHandoffOwner?: NativeSourceReviewOwner;
+        /** Parsed optional request constraint; null means this caller omitted it. */
+        sourceReviewRequestedCandidate?: string | null;
         actorUserId?: string | null;
         companyGuard?: string;
         workspaceSelectionActor?: AuthorizationActor;
@@ -11321,6 +11327,8 @@ export function issueService(db: Db) {
         actorRunId,
         caseHandoffId,
         actorRunStopId,
+        sourceReviewHandoffOwner,
+        sourceReviewRequestedCandidate,
         actorUserId,
         companyGuard,
         workspaceSelectionActor,
@@ -11602,6 +11610,32 @@ export function issueService(db: Db) {
           .for("update")
           .then((rows: Array<typeof issues.$inferSelect>) => rows[0] ?? null);
         if (!receiptExisting) return null;
+        const sourceHandoff = await prepareSourceReviewHandoff(tx as Db, {
+          task: receiptExisting, patch, agentId: sourceReviewHandoffOwner?.agentId ?? actorAgentId,
+          runId: sourceReviewHandoffOwner?.runId ?? actorRunId,
+          nativeOwner: sourceReviewHandoffOwner, requestedCandidate: sourceReviewRequestedCandidate,
+        });
+        if (sourceHandoff) {
+          Object.assign(patch, sourceHandoff.patch);
+          Object.assign(issueData, sourceHandoff.patch);
+          if (patch.assigneeAgentId && patch.assigneeAgentId !== receiptExisting.assigneeAgentId) {
+            await assertAssignableAgent(tx as Db, receiptExisting.companyId, patch.assigneeAgentId, { kind: "work" });
+          }
+          const priorCaptureEvent = sourceHandoff.event ? await tx.select({ id: activityLog.id }).from(activityLog).where(and(
+            eq(activityLog.companyId, receiptExisting.companyId), eq(activityLog.entityType, "issue"), eq(activityLog.entityId, id),
+            eq(activityLog.action, "issue.source_review_candidate_captured"),
+            sql`${activityLog.details}->>'eventKey' = ${sourceHandoff.event.eventKey}`,
+          )).limit(1) : [];
+          if (sourceHandoff.event && priorCaptureEvent.length === 0) {
+            const { publication } = await persistActivity(tx as Db, {
+              companyId: receiptExisting.companyId, actorType: "agent", actorId: (sourceReviewHandoffOwner?.agentId ?? actorAgentId)!,
+              runId: sourceReviewHandoffOwner?.runId ?? actorRunId,
+              action: "issue.source_review_candidate_captured", entityType: "issue", entityId: id,
+              details: { ...sourceHandoff.event },
+            });
+            activityPublications.push(publication);
+          }
+        }
         if (expectedReviewSnapshot) {
           const nextReviewState = reconcileReviewProgressSnapshot({ expected: expectedReviewSnapshot,
             current: receiptExisting, nextState: issueData.executionState });

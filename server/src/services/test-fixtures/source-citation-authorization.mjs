@@ -7,11 +7,12 @@ import { stripTypeScriptTypes } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as util from 'node:util';
+import * as crypto from 'node:crypto';
 import * as source from '../source-memory.ts';
 import * as consumer from '../source-citation-consumer.ts';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const real = ['source-citation-authorization.ts', 'task-workspace-access.ts', 'authorization.ts', 'access.ts',
-  'native-runtime/paperclip-control-plane-port.ts', 'trust-preset-resolver.ts', 'task-repository-acquisition.ts', 'execution-identity.ts', '../errors.ts', '../lib/agent-permissions.ts'];
+  'native-runtime/completion-validation.ts','native-runtime/canonical.ts','native-runtime/paperclip-control-plane-port.ts', 'trust-preset-resolver.ts', 'task-repository-acquisition.ts', 'execution-identity.ts', '../errors.ts', '../lib/agent-permissions.ts'];
 const files = new Map();
 const names = new Map();
 const resolve = (s, parent) => s.startsWith('.') ? path.resolve(path.dirname(parent), s.replace(/\.js$/, '.ts')) : s;
@@ -53,6 +54,7 @@ function load(id) {
   else if (id === path.join(root, 'source-memory.ts')) module = synthetic(id, source);
   else if (id === path.join(root, 'source-citation-consumer.ts')) module = synthetic(id, consumer);
   else if (id === 'node:util') module = synthetic(id, util);
+  else if (id === 'node:crypto') module = synthetic(id, crypto);
   else {
     const exports = {};
     for (const name of names.get(id) ?? []) {
@@ -92,7 +94,7 @@ export function syntheticAuthorizationStore(rows) {
   return { db, reads };
 }
 
-const port = load(path.join(root, 'native-runtime/paperclip-control-plane-port.ts'));
+const port = load(path.join(root, 'native-runtime/completion-validation.ts','native-runtime/canonical.ts','native-runtime/paperclip-control-plane-port.ts'));
 await port.link((s, parent) => load(resolve(s, parent.identifier)));
 await port.evaluate();
 export const PaperclipControlPlanePort = port.namespace.PaperclipControlPlanePort;

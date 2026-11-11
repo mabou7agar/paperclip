@@ -9,7 +9,7 @@ import { spawnSync } from 'node:child_process';
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const core = ['source-memory','source-memory-remote','source-citation-consumer','source-citation-reader','heartbeat/source-memory','heartbeat/source-memory-run-state'];
 const fixtures = ['source-citation-authorization.ts','task-workspace-access.ts','authorization.ts','access.ts',
- 'native-runtime/paperclip-control-plane-port.ts','trust-preset-resolver.ts','task-repository-acquisition.ts','execution-identity.ts',
+ 'native-runtime/completion-validation.ts','native-runtime/canonical.ts','native-runtime/paperclip-control-plane-port.ts','trust-preset-resolver.ts','task-repository-acquisition.ts','execution-identity.ts',
  '../errors.ts','../lib/agent-permissions.ts','test-fixtures/source-citation-authorization.mjs'];
 const tests = ['source-memory-binding','source-memory-current','source-citation-consumer','source-memory-lifetime-retention','heartbeat/source-memory-run-state'];
 tests.push('source-memory','source-memory-events','source-memory-blob-integrity','heartbeat/source-memory-admission');

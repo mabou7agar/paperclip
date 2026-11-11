@@ -18,6 +18,7 @@ export async function prepareHeartbeatSourceMemory(input: {
   authorize: (admission?: boolean) => Promise<CitationBinding>;
   recordRevision: (revision: string) => Promise<void>;
   frozenRevision?: string | null;
+  frozenScope?: { companyId: string; projectId: string; repositoryId: string } | null;
   authority: Authority | null;
   remote: Pick<Remote, "execute" | "baseCwd"> | null;
   assertOwned: () => Promise<void>;
@@ -50,6 +51,11 @@ export async function prepareHeartbeatSourceMemory(input: {
       !input.workspace.repoUrl || admitted.repositoryId !== sourceMemoryRepositoryId(input.workspace.repoUrl)) {
     throw new Error("source_memory_binding_changed");
   }
+  if (input.identity.phase === "review") {
+    if (!input.frozenRevision) throw new Error("source_memory_review_candidate_missing");
+    if (input.frozenScope && (input.frozenScope.companyId !== admitted.companyId || input.frozenScope.projectId !== admitted.projectId ||
+        input.frozenScope.repositoryId !== admitted.repositoryId)) throw new Error("source_memory_binding_changed");
+  }
   const source: SourceMemoryInput = { ...input.identity,
     cwd: input.authority?.location?.remoteCwd ?? input.workspace.cwd,
     repoUrl: input.workspace.repoUrl, remoteAuthority: Boolean(input.authority) };
@@ -73,7 +79,6 @@ export async function prepareHeartbeatSourceMemory(input: {
   const evidence = await prepareSourceMemory(source, "phase", undefined, remoteRead);
   if (!evidence) return unavailable("source_memory_unbound");
   if (evidence) {
-    if (input.identity.phase === "review" && !input.frozenRevision) throw new Error("source_memory_review_candidate_missing");
     if (input.identity.phase === "review" && input.frozenRevision && evidence.revision !== input.frozenRevision) throw new Error("source_memory_wrong_task_revision");
     await input.recordRevision(evidence.revision);
   }

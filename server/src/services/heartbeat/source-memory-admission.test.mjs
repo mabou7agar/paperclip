@@ -122,3 +122,33 @@ test('provider finish and canonical result declare optional typed citations',()=
     assert.equal(schema.properties.sourceCitations.items.properties.fullSha.pattern,'^[a-f0-9]{40}$');
   }
 });
+
+test('handoff capture uses emitted worker with no ledger and refuses unfinished or detached source', async t => {
+  const { prepareSourceMemory } = await import(new URL('file://'+compiled+'/source-memory.js'));
+  const { stat } = await import('node:fs/promises');
+  const root = await mkdtemp(path.join(tmpdir(), 'review-capture-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const repo = path.join(root, 'repo'); await mkdir(repo);
+  const git = (...args) => execFileSync('git', ['-C', repo, ...args], { encoding: 'utf8',
+    env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } }).trim();
+  git('init', '-q', '-b', 'candidate'); git('remote', 'add', 'origin', 'https://github.com/example/capture');
+  await writeFile(path.join(repo, 'example.ts'), 'export const value = 1;\n'); git('add', '.');
+  git('-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Synthetic', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'final writes');
+  const sha = git('rev-parse', 'HEAD');
+  const reader = process.env.SOURCE_MEMORY_READER_FIXTURE; assert.ok(reader);
+  const config = path.join(root, 'config.json'), state = path.join(root, 'must-not-exist');
+  await writeFile(config, JSON.stringify({ version: 1, state, reader,
+    manifest: path.join(path.dirname(reader), 'tooling-9c477cebfff7-manifest.json'),
+    bindings: [{ companyId: 'company', projectId: 'project', repositoryId: 'github.com/example/capture', roots: [repo] }] }));
+  const input = { companyId: 'company', projectId: 'project', issueId: 'task', runId: 'run', phase: 'review',
+    provider: 'server', model: 'no-provider', cwd: repo, repoUrl: 'https://github.com/example/capture', remoteAuthority: false };
+  const first = await prepareSourceMemory(input, 'capture', config);
+  assert.equal(first.revision, sha); assert.equal(first.ref, 'refs/heads/candidate'); assert.equal(first.blobReads, 0);
+  assert.equal((await prepareSourceMemory(input, 'capture', config)).revision, sha);
+  await assert.rejects(stat(state), { code: 'ENOENT' });
+  await writeFile(path.join(repo, 'example.ts'), 'unfinished\n');
+  await assert.rejects(prepareSourceMemory(input, 'capture', config), /review_final_writes_pending/);
+  git('checkout', '--', 'example.ts'); git('checkout', '--detach', sha);
+  await assert.rejects(prepareSourceMemory(input, 'capture', config), /review_detached_ambiguous/);
+  await assert.rejects(stat(state), { code: 'ENOENT' });
+});

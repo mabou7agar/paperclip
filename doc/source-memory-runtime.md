@@ -405,8 +405,40 @@ scopes remain rejected, while ordinary uncited work is unaffected. Bound recover
 reviews still fail closed; the proposed operator procedure is in
 [source-memory-review-recovery-proposal.md](source-memory-review-recovery-proposal.md).
 
-Automatic handoff capture is **not implemented in this checkpoint**. Existing
-`sourceSnapshot` is an admission snapshot, not the final implementation commit.
-Default omission of `candidateSha` remains an activation blocker. No caller text,
-base ref, latest worktree HEAD at review admission, or manually changed stage
-may substitute for an authoritative handoff-time revision.
+## A6b server-owned native handoff capture (source only)
+
+The CTO-approved generic issue transaction hook captures the candidate after final
+writes and before native completion effects can release the current writer. Native
+arbitration exposes a configured opted-in source review and uses the normal policy
+transition to select its participant. The source-inspection owner admits only the
+task's bound isolated local Git worktree, current task/run identity, exact writer
+runtime lease and native finalizer lease (or live legacy controller deadline).
+The existing runtime-lease owner supplies the locked proof; capture neither claims
+nor extends it. Remote/plugin, nonrepository, detached/dirty or unverifiable source
+fails with a typed terminal hold and no automatic retry.
+
+Capture uses the pinned Git execution/storage guards and repeated source identity,
+reads no ledger/cache, and persists its full SHA in the stage's existing state in
+the same transaction as the stage change. The receipt binds company, task, project,
+repository, workspace binding revision, writer run, stage and participant. An
+explicit request SHA is only a matching constraint; omission captures automatically.
+No client/UI/skill/MCP changes are needed. Only the parsed explicit constraint is
+carried through the route; there is no route-level Git read or authority shortcut.
+The prep snapshot, provider prose and reviewer-time HEAD are never substitutes.
+An existing stage reassertion preserves its frozen target; an advanced worktree
+fails normal review admission against that target. Audit capture is deduplicated
+by task/stage/SHA under the task row lock. New reviewer notifications use the
+captured configured participant.
+
+Shared state has an optional server-owned receipt and needs no migration. Old
+state still decodes and is preserved, but missing capture cannot acquire current
+source standing. A typed completion-guard rejection becomes a terminal native
+failure; concurrent/replayed rejected completions coalesce their bounded reads.
+Accepted prior reviews are retained. Recovery remains fail closed and its operator
+procedure is a proposal, not a bypass.
+
+Final source semantic checking, actual built-worker re-entry and no-provider
+native qualification are the already-arranged operator gates described in
+[source-memory-a6b-isolated-validation.md](source-memory-a6b-isolated-validation.md).
+The local Node emitted-worker tests do not replace those gates or final entire-diff
+independent Claude ACP review. Activation remains disabled.
