@@ -30,19 +30,19 @@ describe("PF-4 shouldResetTaskSessionForWake", () => {
     ).toBe(false);
   });
 
-  it("keeps assignment, approval, and review-participant recovery as fresh boundaries", () => {
+  it("keeps assignment and review-participant recovery as fresh boundaries", () => {
     for (const wakeReason of [
       "issue_assigned",
-      "execution_approval_requested",
       "execution_review_participant_recovery",
     ] as const) {
       expect(shouldResetTaskSessionForWake({ wakeReason })).toBe(true);
     }
   });
 
-  it("does not reset execution handoffs by wake reason alone", () => {
+  it("does not reset review, approval, or changes-requested handoffs by wake reason alone", () => {
     for (const wakeReason of [
       "execution_review_requested",
+      "execution_approval_requested",
       "execution_changes_requested",
     ] as const) {
       expect(shouldResetTaskSessionForWake({ wakeReason })).toBe(false);
@@ -51,6 +51,9 @@ describe("PF-4 shouldResetTaskSessionForWake", () => {
 
   it("still respects forceFreshSession === true", () => {
     expect(shouldResetTaskSessionForWake({ forceFreshSession: true })).toBe(true);
+    expect(shouldResetTaskSessionForWake({
+      wakeReason: "execution_approval_requested", forceFreshSession: true,
+    })).toBe(true);
   });
 
   it("does not reset for transient_failure_retry (resume in-flight work)", () => {
@@ -88,16 +91,14 @@ describe("PF-4 describeSessionResetReason", () => {
     expect(describeSessionResetReason({ wakeReason: "issue_assigned" })).toBe(
       "wake reason is issue_assigned",
     );
-    expect(describeSessionResetReason({ wakeReason: "execution_approval_requested" })).toBe(
-      "wake reason is execution_approval_requested",
-    );
     expect(
       describeSessionResetReason({ wakeReason: "execution_review_participant_recovery" }),
     ).toBe("wake reason is execution_review_participant_recovery");
   });
 
-  it("does not report review/change-request handoffs as reset reasons", () => {
+  it("does not report review/approval/change-request handoffs as reset reasons", () => {
     expect(describeSessionResetReason({ wakeReason: "execution_review_requested" })).toBeNull();
+    expect(describeSessionResetReason({ wakeReason: "execution_approval_requested" })).toBeNull();
     expect(describeSessionResetReason({ wakeReason: "execution_changes_requested" })).toBeNull();
   });
 
