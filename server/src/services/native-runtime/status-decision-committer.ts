@@ -794,7 +794,7 @@ async function materializeDecisionEffect(input: {
       tx: input.tx,
       companyId: input.companyId,
       issueId: input.issue.id,
-      agentId: reviewAgentId ?? effect.agentId,
+      agentId: effect.agentId,
       reason: "issue_status_changed",
       idempotencyKey: `native-status:${input.decisionId}:continuation`,
       payload: {
@@ -866,7 +866,7 @@ async function materializeDecisionEffect(input: {
       tx: input.tx,
       companyId: input.companyId,
       issueId: input.issue.id,
-      agentId: reviewAgentId ?? effect.agentId,
+      agentId: effect.agentId,
       reason: "issue_status_changed",
       idempotencyKey: `native-status:${input.decisionId}:retry`,
       payload: {

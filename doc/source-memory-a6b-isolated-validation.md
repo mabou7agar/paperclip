@@ -9,8 +9,8 @@ byte manifests are attached to the task, avoiding a self-referential source hash
 
 The saved CTO capture decision and `actual-unblock-inputs-20261111` supersede the
 first checkpoint's design/tooling hold. Five source turns remained on admission;
-this is the second implementation run overall, with one later turn reserved for
-HANDOFF. No task, stage, session, budget or approval is reset.
+the implementation now includes the third bounded source turn, with one later
+turn reserved for HANDOFF. No task, stage, session, budget or approval is reset.
 
 - The generic issue-update hook owns capture and audit persistence with the stage
   transaction. Native governance exposes an opted-in configured gate; the native
@@ -87,7 +87,7 @@ are prepared; results are not yet claimed.
 2. Set `SOURCE_MEMORY_BUILT_SERVICE` to the absolute emitted
    `server/dist/services/source-memory.js`, and `SOURCE_MEMORY_READER_FIXTURE` to
    the verified code-only fixture. From repository root, run only the new TS cases:
-   `node node_modules/vitest/vitest.mjs run server/src/services/source-review-handoff.test.ts server/src/services/native-runtime/native-source-completion.test.ts --maxWorkers=1`.
+   `node node_modules/vitest/vitest.mjs run server/src/services/source-review-handoff.test.ts server/src/services/native-runtime/native-source-completion.test.ts server/src/services/native-runtime/native-source-completion.integration.test.ts --maxWorkers=1`.
    These create their own fresh Postgres/Git state. They never use an existing
    external database URL. The handoff fixture uses the actual emitted source
    worker and real task authorization; no authorization function is mocked.
@@ -95,12 +95,23 @@ are prepared; results are not yet claimed.
    participant/task/workspace revision, rollback, unsupported source/lease holds,
    advanced-worktree replay, audit dedup, and a real accepted-result → native
    finalizer → configured-stage/participant notification path without any provider.
-4. Condition 4's never-paid controller fixture drives the real completion port,
-   bounded citation consumer and executor failure classifier. It checks terminal
-   no-retry disposition, concurrent/rejected replay read counts, no accepted-result
-   transaction, and Stop. Distinguish this scope from a full native executor
-   dispatch/cleanup trace; the arranged operator qualification must supply that
-   terminal/resource-cleanup proof before readiness. No paid provider is allowed.
+4. Condition 4 now also has `native-source-completion.integration.test.ts`:
+   two focused scenarios drive the **real outer executor**, completion port,
+   citation consumer, coordinator transaction, Stop API and real finalizer entry.
+   Only the in-process controller is replaced; real backend construction and
+   backend methods throw. Assertions cover concurrent/exact/reordered refusals
+   (one guard, nineteen reads), terminal/no-next-attempt persistence, zero accepted
+   results/status decisions/wakes/successors, coordinator lease/deadline release,
+   active-run/session removal, and Stop's durable acknowledgement. Repeated real
+   finalizer calls must refuse a missing result. The controller's synthetic
+   resource closes in its own `finally`; this proves controller-resource cleanup
+   and server ownership cleanup, not an OS subprocess, sandbox/environment lease
+   teardown, remote confinement or paid-driver shutdown. No such resources are
+   acquired. A board-owned diagnostic hold may persist on rejection, with null
+   wake/monitor policies, zero attempts and no recovery task; automatic recovery
+   work remains zero. The narrower three-case unit fixture remains distinct.
+   These new TS integration cases are **prepared, not run locally**; the arranged
+   operator must execute them before any condition-4 pass/readiness claim.
 5. For condition 5, run once:
    `node scripts/source-memory/qualify-built-worker.mjs` with those two variables.
    It imports the actual emitted service in a clean child with empty
@@ -140,3 +151,22 @@ All configuration enablement, real indexing, activation, merge/push/install/depl
 production/legacy data, root, DBA and source-anchor holds remain in force. There
 were no new questions for the supplied technical inputs, paid test providers,
 session resets, arbitrary Git reads or changes outside this task's worktree.
+
+## Third-turn operator findings and corrected inputs
+
+The operator's first source-semantic check on `05e683bd` exited **2** after
+2,035 production files (1,107 below / 664 cycle / 264 above). Three unique errors:
+missing `IssueSourceReviewCapture` type-barrel export and two out-of-scope
+`reviewAgentId` references in continuation/retry effects. The correction exports
+that existing type and restores `effect.agentId` for those two ordinary effects;
+the scoped captured-review override remains exclusive to `notify_owner`.
+No schema, dependency, provider, capture contract or approval gate changes.
+
+The prior Runner inputs were byte-identical to qualified inputs; the operator's
+mechanical emit exited **0**, which is preparation only. New semantic, TS test,
+full native fixture, built worker and CI-nine qualification have no pass yet.
+The full operator log remains in task document
+`operator-05e-semantic-findings-and-native-gate-20261111`; its failure is retained.
+Do not repeat earlier 16, reader 7, captured-consumer 1 or historical proof suites.
+The next operator event uses only the corrected source delta and the new fixture
+inside the already-owned isolated scratch. No install/bootstrap or new question.
