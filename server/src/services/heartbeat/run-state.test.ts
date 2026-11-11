@@ -90,6 +90,7 @@ describe("heartbeat run state module", () => {
     expect(projectedSql(ascii.columns[2].resultJson)).toContain("startupPreparationSettledAt");
     // A pending reassignment Stop is read through this projection on SQL_ASCII.
     expect(projectedSql(ascii.columns[2].resultJson)).toContain("reassignmentStopRequested");
+    expect(projectedSql(ascii.columns[2].resultJson)).toContain("legacyWorkflowHandoffIssueId");
     await asciiState.getRunWorkspaceSettlement("settlement");
     expect(projectedSql(ascii.columns[3].error)).toBe("NULL");
     expect(ascii.execute).toHaveBeenCalledTimes(1);

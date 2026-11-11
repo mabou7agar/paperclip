@@ -1,3 +1,4 @@
+import { createHeartbeatRunState } from "../services/heartbeat/run-state.js";
 import { randomUUID } from "node:crypto";
 import { asc, eq } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -6777,6 +6778,8 @@ describeEmbeddedPostgres("issueService.assertCheckoutOwner stale checkout adopti
       actorAgentId: seeded.actorAgentId, actorRunId: seeded.actorRunId });
     const [receipt] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.actorRunId));
     expect(receipt.resultJson?.legacyWorkflowHandoffIssueId).toBe(seeded.issueId);
+    const projected = await createHeartbeatRunState(db).getRun(seeded.actorRunId, { includeExecutionEvidence: true });
+    expect(projected?.resultJson?.legacyWorkflowHandoffIssueId).toBe(seeded.issueId);
     // Simulate a request admitted against the outgoing owner's earlier snapshot.
     // The service must use its current locked row, not the route's earlier read.
     await expect(svc.update(seeded.issueId, { title: "Stale outgoing edit",

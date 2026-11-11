@@ -328,6 +328,7 @@ const heartbeatRunExecutionEvidenceColumn = sql<Record<string, unknown> | null>`
     'cancelledByActorType', ${heartbeatRuns.resultJson} -> 'cancelledByActorType',
     'cancelledByUserId', ${heartbeatRuns.resultJson} -> 'cancelledByUserId',
     'reassignmentStopRequested', ${heartbeatRuns.resultJson} -> 'reassignmentStopRequested',
+    'legacyWorkflowHandoffIssueId', ${heartbeatRuns.resultJson} -> 'legacyWorkflowHandoffIssueId',
     'conversationContinuation', ${heartbeatRuns.resultJson} -> 'conversationContinuation',
     'cancellation', ${heartbeatRuns.resultJson} -> 'cancellation',
     'acpToolInventoryComplete', ${heartbeatRuns.resultJson} -> 'acpToolInventoryComplete',
