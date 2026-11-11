@@ -12,6 +12,7 @@ import { PersistedExecutionWaitRefusal, writeDeferredExecutionWait } from "../de
 import { notifyDeferredExecutionWork } from "../deferred-execution-notifications.js";
 import type { DeferredReceiptRecoveryOptions } from "../deferred-execution-notifications.js";
 import { notifyRunDispatch } from "../run-dispatch-notifications.js";
+import { currentExecutionStageReceiptSql } from "./execution-stage-receipt.js";
 import { notifyStatusCardIssueChange } from "../status-card-notifications.js";
 import { notifyRoutineExecutionStatus } from "../routine-execution-status-notifications.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "../delivery-work-notifications.js";
@@ -1124,6 +1125,19 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       });
       if (staleness.outcome === "cancelled" || staleness.outcome === "deferred") {
         applyRunDispatchPostCommitEffects(staleness.postCommitEffects);
+        if (staleness.outcome === "cancelled" && staleness.errorCode === "issue_assignee_changed") {
+          // This run never entered the executor's cleanup/finally path. Its
+          // successor may already be parked behind it (including another
+          // review participant), so settle through normal guarded promotion.
+          await releaseIssueExecutionAndPromote(run, {
+            suppressImmediateRecovery: true,
+            deferredPostCommitEffects,
+          }).catch(err => {
+            // The cancellation transaction retained/notified the durable
+            // stage receipt. Its existing worker owns retry after failure.
+            logger.warn({ err, runId: run.id, issueId }, "superseded assignment handoff remains pending");
+          });
+        }
         logger.info(
           {
             runId: run.id,
@@ -1941,7 +1955,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     // A server restart or a message/cleanup race can leave a deferred wake
     // after its owner has released the issue lock. Revisit it through the same
     // release admission, so recovery holds and operator Stops still apply.
-    const strandedQueues = await db.select({ wake: agentWakeupRequests })
+    const strandedQueues = await db.select({ wake: agentWakeupRequests, executionStageReceipt: currentExecutionStageReceiptSql })
       .from(agentWakeupRequests)
       .innerJoin(issues, and(eq(issues.companyId, agentWakeupRequests.companyId),
         sql`${issues.id}::text = ${agentWakeupRequests.payload}->>'issueId'`,
@@ -1956,7 +1970,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           sql`jsonb_typeof(${agentWakeupRequests.payload} #> '{_paperclipWakeContext,wakeCommentIds}') = 'array'`,
           sql`${agentWakeupRequests.payload} #> '{_paperclipWakeContext,wakeCommentIds}' <> '[]'::jsonb`,
         ), sql`${agentWakeupRequests.payload}->>'mutation' = 'interaction'`,
-        dependencyResolvedWakePayloadSql),
+        dependencyResolvedWakePayloadSql, currentExecutionStageReceiptSql),
         sql`${agentWakeupRequests.payload}->'queuedCommentInterrupt' is null`,
         sql`NOT EXISTS (SELECT 1 FROM heartbeat_runs live_issue_run
           WHERE live_issue_run.company_id = ${issues.companyId}
@@ -1966,9 +1980,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         cutoff ? gte(agentWakeupRequests.requestedAt, cutoff) : undefined))
       .orderBy(asc(agentWakeupRequests.updatedAt)).limit(50);
     const releasedNativeSources = new Set<string>();
-    for (const { wake } of strandedQueues) {
+    for (const { wake, executionStageReceipt } of strandedQueues) {
       const dependencyWake = isDependencyResolvedWakePayload(wake.payload);
-      if (!dependencyWake && !queuedCommentIdsFromWakePayload(wake.payload).length &&
+      if (!executionStageReceipt && !dependencyWake && !queuedCommentIdsFromWakePayload(wake.payload).length &&
           !await readQueuedInteractionResponse(db, wake.companyId, String(wake.payload?.issueId), wake.payload)) continue;
       const [latest] = await db.select({
         id: heartbeatRuns.id,

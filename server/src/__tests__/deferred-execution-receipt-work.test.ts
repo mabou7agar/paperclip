@@ -1,3 +1,6 @@
+import * as adapterRegistry from "../adapters/index.js";
+import * as runControl from "../services/heartbeat/run-control.js";
+import { applyIssueExecutionPolicyTransition, normalizeIssueExecutionPolicy } from "../services/issue-execution-policy.js";
 import { createServer } from "node:http";
 import { conflict, HttpError } from "../errors.js";
 import { setImmediate as immediate } from "node:timers/promises";
@@ -152,6 +155,144 @@ describe("deferred receipt durable dispatch", () => {
         runs: remaining.map(run => ({ id: run.id, at: run.scheduledRetryAt, error: run.errorCode })) })).toHaveLength(0);
     });
   }
+  async function stageReceiptFixture(type: "review" | "approval") {
+    const f = await fixture(), stageId = randomUUID();
+    await db.update(heartbeatRuns).set({ status: "cancelled", startedAt: null,
+      errorCode: "issue_assignee_changed", resultJson: { stopReason: "issue_assignee_changed" },
+      contextSnapshot: { issueId: f.issue.id, wakeReason: "issue_assigned" } }).where(eq(heartbeatRuns.id, f.source.id));
+    await db.update(issues).set({ status: "in_review", executionRunId: null, checkoutRunId: null,
+      executionPolicy: { mode: "normal", stages: [{ id: stageId, type,
+        participants: [{ id: randomUUID(), type: "agent", agentId: f.agent.id, userId: null }], approvalsNeeded: 1 }], commentRequired: true },
+      executionState: { status: "pending", currentStageId: stageId, currentStageType: type,
+        currentStageIndex: 0, currentParticipant: { type: "agent", agentId: f.agent.id, userId: null },
+        returnAssignee: null, completedStageIds: [], changesRequestedCount: 0,
+        lastDecisionId: null, lastDecisionOutcome: null, monitor: null, reviewRequest: null },
+    }).where(eq(issues.id, f.issue.id));
+    const payload = (id: string) => ({ issueId: f.issue.id, executionStage: { stageId: id, stageType: type,
+      wakeRole: type === "review" ? "reviewer" : "approver", currentParticipant: { type: "agent", agentId: f.agent.id, userId: null },
+      returnAssignee: null, allowedActions: ["approve", "request_changes"], lastDecisionOutcome: null, reviewRequest: null },
+      _paperclipWakeContext: { issueId: f.issue.id, wakeSource: "assignment",
+        wakeReason: type === "review" ? "execution_review_requested" : "execution_approval_requested" } });
+    const [current, obsolete] = await db.insert(agentWakeupRequests).values([stageId, randomUUID()].map(id => ({
+      companyId: f.companyId, agentId: f.agent.id, source: "assignment", status: "deferred_issue_execution",
+      reason: "issue_execution_deferred", payload: payload(id),
+    }))).returning();
+    return { f, stageId, current, obsolete, payload };
+  }
+  function approveStageWithFakeProvider(f: Awaited<ReturnType<typeof fixture>>) {
+    const adapter = adapterRegistry.getServerAdapter("process");
+    const execute = vi.fn(async (ctx: Parameters<typeof adapter.execute>[0]) => {
+      const [issue] = await db.select().from(issues).where(eq(issues.id, f.issue.id));
+      const transition = applyIssueExecutionPolicyTransition({ issue, policy: normalizeIssueExecutionPolicy(issue.executionPolicy),
+        requestedStatus: "done", requestedAssigneePatch: {}, actor: { agentId: f.agent.id }, commentBody: "Accept frozen fixture" });
+      expect(transition.decision?.outcome).toBe("approved");
+      await issueService(db).update(issue.id, { status: "done", ...transition.patch,
+        actorAgentId: f.agent.id, actorRunId: ctx.runId, companyGuard: f.companyId });
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+        summary: "Frozen fixture accepted", provider: "test", model: "test-model" };
+    });
+    vi.spyOn(adapterRegistry, "getServerAdapter").mockReturnValue({ ...adapter, execute });
+    return execute;
+  }
+  it.each(["review", "approval"] as const)("reconstructs a current %s receipt, retries delivery failure and becomes quiet", async type => {
+    const { f, current, obsolete, payload } = await stageReceiptFixture(type);
+    const checked: string[] = [];
+    await registerDeferredReceiptWork(db, coordinator, {
+      resume: async scope => {
+        checked.push(scope.requestId!);
+        if (checked.length === 1) throw new Error("Transient fixture receipt delivery failure");
+        await db.update(agentWakeupRequests).set({ status: "coalesced" }).where(eq(agentWakeupRequests.id, scope.requestId!));
+      },
+      settleTaskChat: async () => {}, createNativeBatch: () => async () => {}, schedulingSuppressed: async () => false,
+    }, () => !drain).ready;
+    await waitForReal(() => expect(errors).toHaveLength(1));
+    expect(checked).toEqual([current.id]);
+    expect(String(errors[0])).toContain("could not settle");
+    errors.splice(0); // This injected failure was asserted; later failures remain errors.
+    await vi.advanceTimersByTimeAsync(Math.max(1, coordinator.nextWakeAt()! - Date.now()));
+    await waitForReal(async () => expect((await db.select().from(agentWakeupRequests)
+      .where(eq(agentWakeupRequests.id, current.id)))[0].status).toBe("coalesced"));
+    expect(checked).toEqual([current.id, current.id]);
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, obsolete.id)))[0])
+      .toMatchObject({ status: "deferred_issue_execution", runId: null, payload: obsolete.payload });
+    await quiet();
+    expect(checked).toEqual([current.id, current.id]);
+  });
+
+  it("does not poll or revive a stage cancelled by an operator Stop", async () => {
+    const { f, current, stageId } = await stageReceiptFixture("review"), tree = issueTreeControlService(db);
+    const actor = { actorType: "user" as const, actorId: f.actorId, userId: f.actorId };
+    const hold = await tree.createHold(f.companyId, f.issue.id, { mode: "pause", actor });
+    expect((await db.select().from(agents).where(eq(agents.id, f.agent.id)))[0].status).toBe("idle");
+    const makeControl = runControl.createHeartbeatRunControl, releases = vi.fn();
+    vi.spyOn(runControl, "createHeartbeatRunControl").mockImplementation((...args) => {
+      const owner = makeControl(...args);
+      return { ...owner, releaseIssueExecutionAndPromote: async (...callArgs: Parameters<typeof owner.releaseIssueExecutionAndPromote>) => {
+        releases(); return owner.releaseIssueExecutionAndPromote(...callArgs);
+      } };
+    });
+    heartbeat = heartbeatService(db);
+    const execute = approveStageWithFakeProvider(f);
+    await heartbeat.registerDeferredReceiptWork(coordinator, () => !drain).ready;
+    await heartbeat.registerRunDispatchWork(coordinator, () => !drain).ready;
+    const read = async () => (await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, current.id)))[0];
+    await waitForReal(() => expect(releases).toHaveBeenCalledTimes(1), { timeout: 15_000 });
+    await quiet();
+    expect(releases).toHaveBeenCalledTimes(1);
+    expect(execute).not.toHaveBeenCalled();
+    expect(await read()).toMatchObject({ status: "cancelled", runId: null });
+    expect((await db.select().from(issues).where(eq(issues.id, f.issue.id)))[0].executionState)
+      .toMatchObject({ status: "pending", currentStageId: stageId, changesRequestedCount: 0 });
+  });
+  it("keeps a current stage behind physical cleanup without recurring SQL or release attempts", async () => {
+    const { f, current } = await stageReceiptFixture("review");
+    await db.insert(environmentLeases).values({ companyId: f.companyId, heartbeatRunId: f.source.id, issueId: f.issue.id,
+      provider: "daytona", providerLeaseId: "stage-finalizing", status: "active", leasePolicy: "reuse_by_environment" });
+    const makeControl = runControl.createHeartbeatRunControl, releases = vi.fn();
+    vi.spyOn(runControl, "createHeartbeatRunControl").mockImplementation((...args) => {
+      const owner = makeControl(...args);
+      return { ...owner, releaseIssueExecutionAndPromote: async (...callArgs: Parameters<typeof owner.releaseIssueExecutionAndPromote>) => {
+        releases(); return owner.releaseIssueExecutionAndPromote(...callArgs);
+      } };
+    });
+    heartbeat = heartbeatService(db);
+    const execute = approveStageWithFakeProvider(f);
+    await heartbeat.registerDeferredReceiptWork(coordinator, () => !drain).ready;
+    await waitForReal(() => expect(releases).toHaveBeenCalledTimes(1), { timeout: 15_000 });
+    await quiet();
+    expect(releases).toHaveBeenCalledTimes(1);
+    expect(execute).not.toHaveBeenCalled();
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, current.id)))[0])
+      .toMatchObject({ status: "deferred_issue_execution", runId: null, payload: current.payload });
+    expect((await db.select().from(agents).where(eq(agents.id, f.agent.id)))[0].status).toBe("idle");
+  });
+  it("delivers a saved stage on live agent resume without a restart or manual queue sweep", async () => {
+    const { f, current, stageId } = await stageReceiptFixture("approval"), lifecycle = createAgentLifecycle(db);
+    const lifecycleWorker = configureAgentLifecycle(db, { requiredPluginIds: async () => [],
+      runHost: async () => "complete", runPlugin: async () => "complete" });
+    lifecycleWorkers.add(lifecycleWorker);
+    await lifecycle.pauseAgent(f.agent.id); await lifecycleWorker.process(f.agent.id);
+    const execute = approveStageWithFakeProvider(f);
+    await heartbeat.registerDeferredReceiptWork(coordinator, () => !drain).ready;
+    await heartbeat.registerRunDispatchWork(coordinator, () => !drain).ready;
+    const read = async () => (await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, current.id)))[0];
+    // Settle idle registration without advancing PostgreSQL controller leases
+    // ahead of wall time before the real execution below.
+    await waitForReal(async () => {
+      await Promise.allSettled([...passes]);
+      expect(coordinator.nextWakeAt()).toBeNull(); expect(idleWorkSnapshot().active).toBe(0);
+    }, { timeout: 15_000 });
+    expect(execute).not.toHaveBeenCalled();
+    expect(await read()).toMatchObject({ status: "deferred_issue_execution", runId: null, payload: current.payload });
+    await lifecycle.resumeAgent(f.agent.id); await lifecycleWorker.process(f.agent.id);
+    await waitForReal(() => expect(execute).toHaveBeenCalledTimes(1), { timeout: 40_000 });
+    await heartbeat.waitForRunExecutionDrain((await read()).runId!);
+    await quiet();
+    const result = await heartbeat.getRun((await read()).runId!);
+    expect(execute, JSON.stringify({ status: result?.status, code: result?.errorCode, error: result?.error })).toHaveBeenCalledTimes(1);
+    expect((await db.select().from(issues).where(eq(issues.id, f.issue.id)))[0].executionState)
+      .toMatchObject({ status: "completed", completedStageIds: [stageId], changesRequestedCount: 0 });
+  });
   it("is quiet after empty reconstruction and terminal receipt history", async () => {
     const f = await fixture();
     await db.insert(agentWakeupRequests).values({ companyId: f.companyId, agentId: f.agent.id,

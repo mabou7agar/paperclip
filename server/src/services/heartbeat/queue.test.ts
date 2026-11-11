@@ -480,6 +480,32 @@ describe.skipIf(!support.supported)("heartbeat queue database wiring", () => {
     return { company, agent, issue, wake, run };
   }
 
+  it.each(["execution_reconciliation_required", "issue_waiting_for_response"] as const)(
+    "does not promote a cancelled %s intent", async errorCode => {
+      const f = await fixture("queued"), deps = callbacks(db);
+      deps.getAgent.mockResolvedValue(f.agent);
+      vi.spyOn(deps.runDispatch, "cancelStaleQueuedRun").mockResolvedValue({
+        outcome: "cancelled", errorCode, reason: "Existing hold", postCommitEffects: [],
+      });
+      await expect(createHeartbeatQueue(db, deps).claimQueuedRun(f.run)).resolves.toBeNull();
+      expect(deps.releaseIssueExecutionAndPromote).not.toHaveBeenCalled();
+      expect(deps.executeRun).not.toHaveBeenCalled();
+    });
+
+  it("keeps settling unrelated queued work after a superseded handoff release fails", async () => {
+    const first = await fixture("queued");
+    await db.update(companies).set({ issuePrefix: "QF" }).where(eq(companies.id, first.company.id));
+    const second = await fixture("queued"), deps = callbacks(db);
+    deps.getAgent.mockImplementation(async id => id === first.agent.id ? first.agent : second.agent);
+    vi.spyOn(deps.runDispatch, "cancelStaleQueuedRun").mockResolvedValue({ outcome: "cancelled",
+      errorCode: "issue_assignee_changed", reason: "Assignment superseded", postCommitEffects: [] });
+    deps.releaseIssueExecutionAndPromote.mockRejectedValueOnce(new Error("Transient fixture release failure"));
+    const queue = createHeartbeatQueue(db, deps);
+    for (const run of [first.run, second.run]) await expect(queue.claimQueuedRun(run)).resolves.toBeNull();
+    expect(deps.releaseIssueExecutionAndPromote.mock.calls.map(([run]) => run.id)).toEqual([first.run.id, second.run.id]);
+    expect(deps.executeRun).not.toHaveBeenCalled();
+  });
+
   async function pendingPredecessorFixture() {
     const f = await fixture("queued");
     const [source] = await db.insert(heartbeatRuns).values({ companyId: f.company.id, agentId: f.agent.id,
