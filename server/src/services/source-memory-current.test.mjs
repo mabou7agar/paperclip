@@ -13,7 +13,7 @@ const citation = { companyId: 'company', projectId: 'project', repositoryId: 'gi
 const evidence = { schema: 1, scope: { companyId: 'company', projectId: 'project', repositoryId: citation.repositoryId }, revision,
   citations: [{ content: 'synthetic source\n', citation, standing: 'verified_source_range' }] };
 let returned = evidence, reads = 0;
-mock.module('./source-memory.ts', { namedExports: { ...actual, prepareSourceMemory: async () => { reads++; return structuredClone(returned); } } });
+mock.module('./source-memory.ts', { namedExports: { ...actual, sourceMemoryBindingEnabled: async () => true, prepareSourceMemory: async () => { reads++; return structuredClone(returned); } } });
 const { prepareHeartbeatSourceMemory } = await import('./heartbeat/source-memory.ts');
 
 test('all phase admissions and dispatch reject unauthorized or changed evidence', async t => {
@@ -23,7 +23,7 @@ test('all phase admissions and dispatch reject unauthorized or changed evidence'
     for (const phase of ['planning', 'implementation', 'review']) await t.test(phase, async () => {
       let allowed = true;
       const input = { identity: { companyId: 'company', projectId: 'project', issueId: 'task', runId: 'run', phase },
-        workspace: { cwd: '/synthetic', repoUrl: 'https://github.com/example/permitted' }, recovering: false,
+        workspace: { cwd: '/synthetic', repoUrl: 'https://github.com/example/permitted' }, persistedWorkspaceId: 'workspace', recovering: false,
         authority: null, remote: null, assertOwned: async () => {}, readAuthority: async () => null,
         recordRevision: async () => {}, frozenRevision: revision, authorize: async () => { if (!allowed) throw Error('revoked_access'); return { ...evidence.scope, frozenSha: revision }; } };
       returned = evidence;
@@ -63,7 +63,7 @@ test('all phase admissions and dispatch reject unauthorized or changed evidence'
       const before = reads;
       for (const configured of [true, false]) {
         if (!configured) delete process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG;
-        const prepared = await prepareHeartbeatSourceMemory({ recovering: true, identity: {phase:'review'} });
+        const prepared = await prepareHeartbeatSourceMemory({ recovering: true, persistedWorkspaceId: 'workspace', workspace: { repoUrl: 'https://github.com/example/permitted' }, identity: {phase:'review'} });
         const result = {resultJson:{sourceCitations:[{mode:'historical'}]}};
         await prepared.consumeResult(result);
         assert.equal(result.errorCode,'source_citation_rejected');

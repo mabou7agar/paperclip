@@ -164,7 +164,7 @@ test('isolated runtime source-memory contract', async t => {
     const { prepareHeartbeatSourceMemory } = await import(process.env.SOURCE_MEMORY_HEARTBEAT_FIXTURE);
     const saved = process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG;
     const authority = { epoch: 1, writerRunId: input.runId, location: { remoteCwd: repo, leaseId: 'lease', providerLeaseId: 'allocation' } };
-    const parameters = { recordRevision: async () => {}, authorize: async () => ({ ...scope, frozenSha: git("rev-parse", "HEAD") }), identity: input, workspace: { cwd: repo, repoUrl: input.repoUrl }, recovering: false, authority,
+    const parameters = { recordRevision: async () => {}, authorize: async () => ({ ...scope, frozenSha: git("rev-parse", "HEAD") }), identity: input, workspace: { cwd: repo, repoUrl: input.repoUrl }, persistedWorkspaceId: "workspace", recovering: false, authority,
       remote: { baseCwd: base, execute: async () => { throw Error('transport must not run'); } },
       assertOwned: async () => {}, readAuthority: async () => ({ ...authority, epoch: 2 }) };
     try {

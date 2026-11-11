@@ -3473,6 +3473,7 @@ export function heartbeatService(
             runId: run.id, phase: phaseRoute?.phase ?? null, provider: phaseRoute?.profile?.binding.provider ?? null,
             model: phaseRoute?.profile?.model ?? null, signal: executionControl.controller.signal,
             query: [issueRef?.title, issueRef?.description].filter(Boolean).join(" ").slice(0, 2000) },
+          persistedWorkspaceId: persistedExecutionWorkspace?.id ?? null,
           workspace: executionWorkspace, recovering: !issueRef || Boolean(runOptions.nativeRestartRecovery),
           // A handed-off candidate only narrows review admission; baseRef is never a snapshot.
           frozenRevision: readNonEmptyString(context.reviewCandidateSha),

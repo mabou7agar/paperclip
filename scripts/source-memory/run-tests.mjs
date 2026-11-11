@@ -7,13 +7,22 @@ import { fileURLToPath } from 'node:url';
 import { stripTypeScriptTypes } from 'node:module';
 import { spawnSync } from 'node:child_process';
 const root = fileURLToPath(new URL('../../', import.meta.url));
-const scratch = await mkdtemp(path.join(tmpdir(), 'source-memory-tests-'));
 const core = ['source-memory','source-memory-remote','source-citation-consumer','source-citation-reader','heartbeat/source-memory','heartbeat/source-memory-run-state'];
 const fixtures = ['source-citation-authorization.ts','task-workspace-access.ts','authorization.ts','access.ts',
  'native-runtime/paperclip-control-plane-port.ts','trust-preset-resolver.ts','task-repository-acquisition.ts','execution-identity.ts',
  '../errors.ts','../lib/agent-permissions.ts','test-fixtures/source-citation-authorization.mjs'];
 const tests = ['source-memory-binding','source-memory-current','source-citation-consumer','source-memory-lifetime-retention','heartbeat/source-memory-run-state'];
-if (process.env.SOURCE_MEMORY_READER_FIXTURE) tests.push('source-memory','source-memory-events','source-memory-blob-integrity','heartbeat/source-memory-admission');
+tests.push('source-memory','source-memory-events','source-memory-blob-integrity','heartbeat/source-memory-admission');
+// Local focused checks may select changed suites; CI always executes the entire roster.
+const selected = process.argv.slice(2);
+if (selected.length && process.env.CI) throw new Error('CI must run all source-memory suites');
+if (selected.some(name => !tests.includes(name))) throw new Error('Unknown source-memory suite');
+if (selected.length) tests.splice(0, tests.length, ...selected);
+const needsReader = tests.some(name => ['source-memory','source-memory-events','source-memory-blob-integrity','heartbeat/source-memory-admission'].includes(name));
+if (needsReader && !process.env.SOURCE_MEMORY_READER_FIXTURE) {
+ throw new Error('SOURCE_MEMORY_READER_FIXTURE is required: refusing to skip any of the 9 source-memory suites');
+}
+const scratch = await mkdtemp(path.join(tmpdir(), 'source-memory-tests-'));
 const service = 'server/src/services/';
 try {
  await writeFile(path.join(scratch,'package.json'),'{"type":"module"}');

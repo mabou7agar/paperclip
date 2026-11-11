@@ -385,7 +385,28 @@ surface the named failure. Pre-A6 A5 pruning workers must never overlap a retain
 ledger; a binary rollback to those workers is unsafe. The pinned reader manifest
 remains authoritative; the A1 replacement is proposed only.
 
-`node scripts/source-memory/run-tests.mjs` runs core `.mjs` contracts in CI.
-Supplying `SOURCE_MEMORY_READER_FIXTURE` adds the pinned-reader synthetic journey,
-blob-integrity and C2 tests in scratch. This emits JS by stripping types for worker
+`node scripts/source-memory/run-tests.mjs` requires all nine `.mjs` contracts in CI.
+`SOURCE_MEMORY_READER_FIXTURE` must name the manifest-verified reader; absence
+fails before any suite runs instead of silently excluding the four reader suites.
+Local focused checks may append roster names, for example `source-memory-binding`;
+CI rejects subset arguments. The pinned-reader synthetic journey, blob-integrity
+and C2 tests use new scratch state only. This emits JS by stripping types for worker
 execution and explicitly does not replace semantic TypeScript compilation.
+
+
+## A6b binding pre-filter checkpoint (source only)
+
+Heartbeat first checks that a persisted workspace exists and that its non-null
+repository URL matches the operator's company/project/repository opt-in. This
+filter grants no authority and reads no repository or ledger. Unbound scopes
+return before task authorization; bound scopes retain the full authorization,
+root, reader, revision and execution-owner checks. Claimed citations in unbound
+scopes remain rejected, while ordinary uncited work is unaffected. Bound recovery
+reviews still fail closed; the proposed operator procedure is in
+[source-memory-review-recovery-proposal.md](source-memory-review-recovery-proposal.md).
+
+Automatic handoff capture is **not implemented in this checkpoint**. Existing
+`sourceSnapshot` is an admission snapshot, not the final implementation commit.
+Default omission of `candidateSha` remains an activation blocker. No caller text,
+base ref, latest worktree HEAD at review admission, or manually changed stage
+may substitute for an authoritative handoff-time revision.

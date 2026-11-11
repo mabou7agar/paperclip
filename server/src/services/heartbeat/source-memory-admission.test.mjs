@@ -61,7 +61,7 @@ test('real HEAD admission, persisted run binding and phase policy', async t => {
       };
       const {db}=syntheticAuthorizationStore(rows);
       const actor={type:'agent',source:'agent_jwt',agentId:'agent',runId,companyId:'company',onBehalfOfUserId:null};
-      const input={identity:{companyId:'company',projectId:'project',issueId,runId,phase,provider:'openai',model:'synthetic'},workspace:{cwd:repo,repoUrl:'https://github.com/example/permitted'},recovering:false,
+      const input={identity:{companyId:'company',projectId:'project',issueId,runId,phase,provider:'openai',model:'synthetic'},workspace:{cwd:repo,repoUrl:'https://github.com/example/permitted'},persistedWorkspaceId:workspaceId,recovering:false,
         authority:null,remote:null,assertOwned:async()=>{},readAuthority:async()=>null,
         frozenRevision:phase==='review'?head:undefined,
         authorize:admission=>authorizeSourceCitation(db,actor,{companyId:'company',issueId,workspaceId,admission}),
@@ -95,7 +95,7 @@ test('real HEAD admission, persisted run binding and phase policy', async t => {
     await t.test('unbound configuration performs no source enforcement', async()=>{
       const unbound=JSON.parse(await readFile(config,'utf8')); unbound.bindings=[];
       await writeFile(config,JSON.stringify(unbound));
-      const input={identity:{companyId:'company',projectId:'project',issueId:'task',runId:'unbound',phase:'review',provider:'openai',model:'synthetic'},workspace:{cwd:repo,repoUrl:'https://github.com/example/permitted'},recovering:false,authority:null,remote:null,
+      const input={identity:{companyId:'company',projectId:'project',issueId:'task',runId:'unbound',phase:'review',provider:'openai',model:'synthetic'},workspace:{cwd:repo,repoUrl:'https://github.com/example/permitted'},persistedWorkspaceId:"workspace",recovering:false,authority:null,remote:null,
         assertOwned:async()=>{},readAuthority:async()=>null,
         recordRevision:async()=>{throw Error('unbound must not record a snapshot')},
         authorize:async admission=>{assert.equal(admission,true);return {companyId:'company',projectId:'project',repositoryId:'github.com/example/permitted',frozenSha:''}}};

@@ -27,3 +27,62 @@ test('configured source memory filters company/project bindings before parsing U
     assert.equal(await prepareSourceMemory({ ...input, repoUrl: 'https://github.com/example/unbound' }, 'phase', configFile), null);
   });
 });
+
+// Real authorization service, with synthetic persistence only. A premature call
+// fails for each unrelated scope; it is not replaced with an allow/deny mock.
+test('heartbeat filters opt-in before real task authorization', async t => {
+  const { prepareHeartbeatSourceMemory } = await import('./heartbeat/source-memory.ts');
+  const { authorizeSourceCitation, syntheticAuthorizationStore } = await import('./test-fixtures/source-citation-authorization.mjs');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'heartbeat-binding-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const config = path.join(root, 'config.json');
+  await writeFile(config, JSON.stringify({ version: 1, state: root, reader: root, manifest: path.join(root, 'unused'),
+    bindings: [{ companyId: 'company', projectId: 'project', repositoryId: 'github.com/example/permitted', roots: [root] }] }));
+  const previous = process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG;
+  const privacy = process.env.PAPERCLIP_ISSUE_PRIVACY_MODE;
+  process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG = config;
+  process.env.PAPERCLIP_ISSUE_PRIVACY_MODE = 'off';
+  try {
+    const rows = {
+      agents: [{ id: 'agent', companyId: 'company', permissions: null }],
+      heartbeatRuns: [{ id: 'run', companyId: 'company', agentId: 'agent', issueId: 'task', responsibleUserId: null, status: 'running', contextSnapshot: {} }],
+      issues: [{ id: 'task', companyId: 'company', projectId: 'project', executionWorkspaceId: 'workspace', projectWorkspaceId: 'source', workspaceSelection: null, workspacePendingSelection: null, workspaceBindingRevision: 0, executionPolicy: null }],
+      projects: [{ id: 'project', companyId: 'company', executionWorkspacePolicy: null }],
+      executionWorkspaces: [{ id: 'workspace', companyId: 'company', projectId: 'project', projectWorkspaceId: 'source', repoUrl: 'https://github.com/example/permitted' }],
+      projectWorkspaces: [{ id: 'source', companyId: 'company', projectId: 'project', repoUrl: 'https://github.com/example/permitted' }],
+    };
+    const { db, reads } = syntheticAuthorizationStore(rows);
+    const actor = { type: 'agent', source: 'agent_jwt', agentId: 'agent', runId: 'run', companyId: 'company', onBehalfOfUserId: null };
+    const input = {
+      identity: { companyId: 'company', projectId: 'project', issueId: 'task', runId: 'run', phase: 'implementation', provider: 'openai', model: 'synthetic' },
+      workspace: { cwd: root, repoUrl: 'https://github.com/example/permitted' }, persistedWorkspaceId: 'workspace', recovering: false,
+      authority: { epoch: 1, writerRunId: 'run' }, remote: null,
+      assertOwned: async () => {}, readAuthority: async () => null,
+      recordRevision: async () => { throw Error('no reader may run in this filter test'); },
+      authorize: admission => authorizeSourceCitation(db, actor, { companyId: 'company', issueId: 'task', workspaceId: 'workspace', admission }),
+    };
+    for (const [name, change] of [
+      ['unbound project in another company', { identity: { ...input.identity, companyId: 'other', projectId: 'other' }, workspace: { cwd: root, repoUrl: 'malformed URL' } }],
+      ['nonrepository directory workspace', { workspace: { cwd: root, repoUrl: null } }],
+      ['workspace has no persisted record', { persistedWorkspaceId: null }],
+    ]) await t.test(name, async () => {
+      const before = reads.length;
+      const result = await prepareHeartbeatSourceMemory({ ...input, ...change });
+      assert.equal(result.evidence, null);
+      await result.beforeDispatch(); await result.observeCommit();
+      const completion = { exitCode: 0, resultJson: {} };
+      await result.consumeResult(completion);
+      assert.equal(completion.exitCode, 0);
+      assert.equal(reads.length, before, 'real authorization must not be entered');
+    });
+    await t.test('bound scope retains real authorization before the remote reader guard', async () => {
+      await assert.rejects(prepareHeartbeatSourceMemory(input), /source_memory_remote_source_attestation_unavailable/);
+      assert.ok(reads.includes('issues') && reads.includes('agents') && reads.includes('projectWorkspaces'));
+      rows.agents.length = 0;
+      await assert.rejects(prepareHeartbeatSourceMemory(input), error => !/remote_source_attestation_unavailable/.test(error.message));
+    });
+  } finally {
+    if (previous === undefined) delete process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG; else process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG = previous;
+    if (privacy === undefined) delete process.env.PAPERCLIP_ISSUE_PRIVACY_MODE; else process.env.PAPERCLIP_ISSUE_PRIVACY_MODE = privacy;
+  }
+});

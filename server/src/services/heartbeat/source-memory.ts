@@ -1,4 +1,4 @@
-import { prepareSourceMemory, assertCurrentSourceCitation, sourceMemoryRepositoryId, type SourceMemoryInput } from "../source-memory.js";
+import { prepareSourceMemory, assertCurrentSourceCitation, sourceMemoryRepositoryId, sourceMemoryBindingEnabled, type SourceMemoryInput } from "../source-memory.js";
 import { consumeSourceCitations, type CitationBinding } from "../source-citation-consumer.js";
 import { createRemoteSourceReader } from "../source-memory-remote.js";
 
@@ -14,6 +14,7 @@ export async function prepareHeartbeatSourceMemory(input: {
   identity: Omit<SourceMemoryInput, "cwd" | "repoUrl" | "remoteAuthority">;
   workspace: { cwd: string; repoUrl: string | null };
   recovering: boolean;
+  persistedWorkspaceId: string | null;
   authorize: (admission?: boolean) => Promise<CitationBinding>;
   recordRevision: (revision: string) => Promise<void>;
   frozenRevision?: string | null;
@@ -26,7 +27,7 @@ export async function prepareHeartbeatSourceMemory(input: {
     evidence: null, beforeDispatch: async () => {}, observeCommit: async () => {},
     consumeResult: async (result: Completion) => {
       const submitted = result.resultJson?.sourceCitations;
-      const required = input.recovering && Boolean(process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG) && input.identity.phase === "review";
+      const required = reason === "recovery_snapshot_unverified" && input.identity.phase === "review";
       if (submitted === undefined && !required) return;
       if (Array.isArray(submitted) && submitted.length === 0 && !required) return;
       result.resultJson = { ...result.resultJson, sourceCurrentEvidenceSatisfied: false,
@@ -36,6 +37,11 @@ export async function prepareHeartbeatSourceMemory(input: {
     },
   });
   if (!process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG) return unavailable("source_memory_unconfigured");
+  // Filter before task authorization: an opt-in for one repository cannot affect
+  // unrelated companies, directory workspaces, or ephemeral workspace records.
+  if (!input.persistedWorkspaceId || !await sourceMemoryBindingEnabled({ ...input.identity, repoUrl: input.workspace.repoUrl })) {
+    return unavailable("source_memory_unbound");
+  }
   // Recovery never trusts the new workspace as the completed run's old snapshot.
   // Until its saved reader/authority can be verified, citations fail closed.
   if (input.recovering) return unavailable("recovery_snapshot_unverified");

@@ -51,6 +51,19 @@ async function configuration(file: string): Promise<Configuration> {
   return c;
 }
 
+/** Opt-in filter only; this grants no task, filesystem or reader authority. */
+export async function sourceMemoryBindingEnabled(input: Pick<SourceMemoryInput, "companyId" | "projectId" | "repoUrl">,
+  configFile = process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG): Promise<boolean> {
+  if (!configFile || !input.projectId || !input.repoUrl) return false;
+  const config = await configuration(configFile);
+  const projectBindings = config.bindings.filter(b => b.companyId === input.companyId && b.projectId === input.projectId);
+  if (!projectBindings.length) return false;
+  const repositoryId = sourceMemoryRepositoryId(input.repoUrl);
+  const bindings = projectBindings.filter(b => b.repositoryId === repositoryId);
+  requireValue(bindings.length <= 1, "binding_ambiguous");
+  return bindings.length === 1;
+}
+
 /** Absent configuration does no I/O. Enabled failures refuse source evidence, never use an old card. */
 export async function prepareSourceMemory(input: SourceMemoryInput, operation: "phase" | "commit" | "verify" | "citation" = "phase", configFile = process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG, remoteRead?: RemoteSourceReader, expected?: Pick<SourceMemoryEvidence, "revision" | "ref" | "dirty">, citation?: CitationRead): Promise<SourceMemoryEvidence | null> {
   if (!configFile) return null;
