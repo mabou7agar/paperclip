@@ -20,6 +20,7 @@ import {
   nativeRunFinalizations,
   heartbeatRuns,
   issueComments,
+  issueExecutionDecisions,
   issueDocuments,
   issueThreadInteractions,
   issues,
@@ -38,6 +39,8 @@ import {
   heartbeatService,
 } from "../services/heartbeat.ts";
 import { runningProcesses, type AdapterExecutionContext, type AdapterExecutionResult } from "../adapters/index.ts";
+import { issueService } from "../services/issues.js";
+import { applyIssueExecutionPolicyTransition, normalizeIssueExecutionPolicy } from "../services/issue-execution-policy.js";
 import { recoveryService } from "../services/recovery/service.ts";
 import { withQueuedCommentIdsInWakePayload } from "../services/issue-queued-comment-queue.ts";
 
@@ -243,6 +246,95 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     });
     return { companyId, agentId };
   }
+
+  it.each([false, true])("promotes a deferred stage after stale assignment cancellation, paused=%s", async paused => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const [recipient] = await db.insert(agents).values({ companyId, name: "Independent review recipient", role: "engineer",
+      status: paused ? "paused" : "idle", adapterType: "codex_local", adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } }, permissions: {},
+    }).returning();
+    const stageId = randomUUID();
+    const participant = { type: "agent" as const, agentId: recipient.id, userId: null };
+    const returnAssignee = { type: "agent" as const, agentId, userId: null };
+    const stage = { stageId, stageType: "review", wakeRole: "reviewer", currentParticipant: participant,
+      returnAssignee, allowedActions: ["approve", "request_changes"], lastDecisionOutcome: null, reviewRequest: null };
+    const [issue] = await db.insert(issues).values({ companyId, title: "Review arrived before old assignment settled",
+      status: "in_review", assigneeAgentId: recipient.id,
+      executionPolicy: { mode: "normal", stages: [{ id: stageId, type: "review",
+        participants: [{ id: randomUUID(), ...participant }], approvalsNeeded: 1 }], commentRequired: true },
+      executionState: { status: "pending", currentStageId: stageId, currentStageIndex: 0, currentStageType: "review",
+        currentParticipant: participant, returnAssignee, completedStageIds: [], changesRequestedCount: 0,
+        lastDecisionId: null, lastDecisionOutcome: null, monitor: null, reviewRequest: null },
+    }).returning();
+    const stale = await seedQueuedRun({ companyId, agentId, issueId: issue.id, wakeReason: "issue_assigned" });
+    await db.update(issues).set({ executionRunId: stale.runId }).where(eq(issues.id, issue.id));
+    const [wake] = await db.insert(agentWakeupRequests).values({ companyId, agentId: recipient.id,
+      source: "assignment", triggerDetail: "system", reason: "issue_execution_deferred",
+      status: "deferred_issue_execution", requestedByActorType: "system",
+      payload: { issueId: issue.id, mutation: "update", executionStage: stage, _paperclipWakeContext: {
+        issueId: issue.id, wakeReason: "execution_review_requested", wakeSource: "assignment", executionStage: stage,
+      } },
+    }).returning();
+
+    // The fake provider records a real policy-service decision, rather than
+    // returning without closing its stage and inviting participant recovery.
+    mockAdapterExecute.mockImplementation(async ctx => {
+      const [current] = await db.select().from(issues).where(eq(issues.id, issue.id));
+      const transition = applyIssueExecutionPolicyTransition({ issue: current,
+        policy: normalizeIssueExecutionPolicy(current.executionPolicy), requestedStatus: "done",
+        requestedAssigneePatch: {}, actor: { agentId: recipient.id }, commentBody: "Accept the frozen fixture candidate",
+      });
+      expect(transition.decision?.outcome).toBe("approved");
+      await db.transaction(async tx => {
+        await issueService(db).update(issue.id, { status: "done", ...transition.patch,
+          actorAgentId: recipient.id, actorRunId: ctx.runId, companyGuard: companyId }, tx);
+        await tx.insert(issueExecutionDecisions).values({ companyId, issueId: issue.id, stageId,
+          stageType: "review", actorAgentId: recipient.id, outcome: "approved",
+          body: "Accept the frozen fixture candidate", createdByRunId: ctx.runId });
+      });
+      return { exitCode: 0, signal: null, timedOut: false, errorMessage: null,
+        summary: "Frozen fixture candidate accepted", provider: "test", model: "test-model" };
+    });
+
+    await heartbeat.resumeQueuedRuns();
+    await heartbeat.drainActiveRunExecutions();
+    expect(await heartbeat.getRun(stale.runId)).toMatchObject({ status: "cancelled", errorCode: "issue_assignee_changed", startedAt: null });
+    expect(countExecuteCallsForRun(stale.runId)).toBe(0);
+    const readWake = () => db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake.id)).then(rows => rows[0]);
+    if (paused) {
+      expect(await readWake()).toMatchObject({ status: "deferred_issue_execution", runId: null,
+        finishedAt: null, payload: wake.payload });
+      expect(mockAdapterExecute).not.toHaveBeenCalled();
+    } else {
+      await vi.waitFor(async () => {
+        const admitted = await readWake();
+        expect(admitted.runId).toBeTruthy();
+        expect(countExecuteCallsForRun(admitted.runId!)).toBe(1);
+      }, { timeout: 15_000 });
+      const admitted = await readWake();
+      await heartbeat.waitForRunExecutionDrain(admitted.runId!, { timeoutMs: 30_000 });
+      expect((await heartbeat.getRun(admitted.runId!))?.contextSnapshot).toMatchObject({ issueId: issue.id, executionStage: { stageId } });
+    }
+    await heartbeat.resumeQueuedRuns();
+    await heartbeat.drainActiveRunExecutions();
+    expect(mockAdapterExecute.mock.calls.length).toBe(paused ? 0 : 1);
+    if (paused) {
+      // A new service reconstructs the original receipt after pause is lifted;
+      // no replacement intent, comment, counter reset, or provider retry.
+      await db.update(agents).set({ status: "idle" }).where(eq(agents.id, recipient.id));
+      const restarted = heartbeatService(db, { runtimeEnv: { ...process.env, PAPERCLIP_IN_WORKTREE: "false" } });
+      await restarted.resumeQueuedRuns();
+      await vi.waitFor(async () => expect((await readWake()).runId).toBeTruthy(), { timeout: 15_000 });
+      await restarted.waitForRunExecutionDrain((await readWake()).runId!, { timeoutMs: 30_000 });
+      await restarted.resumeQueuedRuns();
+      await restarted.drainActiveRunExecutions();
+      expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+    }
+    expect((await db.select().from(issues).where(eq(issues.id, issue.id)))[0]).toMatchObject({
+      status: "done",
+      executionState: { status: "completed", completedStageIds: [stageId], changesRequestedCount: 0 },
+    });
+  }, 60_000);
 
   it.each(["legacy", "native"])("delivers an accepted non-assignee queue after its %s owner finished", async runtimeMode => {
     const { companyId, agentId } = await seedCompanyAndAgent();

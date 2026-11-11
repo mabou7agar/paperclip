@@ -21,3 +21,23 @@ the same job and report its state; never create a new execution or reset attempt
 counters to obtain another check. Missing job identity, deadline or attempt bound
 fails validation and cannot bypass alert-only monitoring. Existing
 `external_service` monitors retain their prior behavior.
+
+## Review and approval handoffs
+
+When a queued assignment is superseded by another assignee before execution
+starts, cancellation also settles its pending handoff through the existing execution-release service.
+An already-saved review or approval request can then proceed without an extra
+comment, timer or provider retry. The cancelled assignment does not execute.
+
+Promotion rechecks current ownership, task and stage eligibility, process cleanup,
+pauses, budgets and access. Existing holds and operator Stop cancellation
+semantics remain in force. It uses the existing
+durable wake receipt and does not reset review or continuation counters, change
+sessions, accept a stage, or repeat completed tests. Reconciliation and response
+wait cancellations do not use this promotion path.
+
+The cancellation transaction notifies the existing deferred-receipt worker. It
+also reconstructs saved requests for the current review or approval participant
+at startup. Failed delivery retains the same receipt and uses the shared worker's
+retry deadline. Stale stage requests and paused participants are not selected.
+After settlement the worker becomes quiet; no additional polling is introduced.

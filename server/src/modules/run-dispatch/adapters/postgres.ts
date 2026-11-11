@@ -1145,6 +1145,11 @@ export function createPostgresRunDispatchAdapter(
       await notifyDeliveryWork(tx, DELIVERY_QUEUES.accounting, run.companyId);
       await notifyUnsafeWorkspaceExportRecovery(tx, { companyId: run.companyId, issueId });
       await notifyChatRunMilestones(tx, { companyId: run.companyId, issueId });
+      if (decision.errorCode === "issue_assignee_changed") {
+        // Register before the cancellation write in this transaction. A
+        // crash or failed immediate promotion must not lose a saved stage.
+        await notifyDeferredExecutionWork(tx, { companyId: run.companyId });
+      }
       const [row] = await tx
         .update(heartbeatRuns)
         .set({
