@@ -1,0 +1,6 @@
+{
+  "version": "1",
+  "name": "Native review candidate isolated fixture",
+  "type": "collection",
+  "ignore": ["node_modules", ".git"]
+}

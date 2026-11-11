@@ -1,0 +1,37 @@
+meta {
+  name: Reject malformed candidate
+  type: http
+  seq: 3
+}
+patch {
+  url: {{fixtureBaseUrl}}/api/issues/{{fixtureIssueId}}
+  body: json
+  auth: none
+}
+headers {
+  Content-Type: application/json
+}
+body:json {
+  {
+    "reviewRequest": {
+      "instructions": "Synthetic schema rejection only.",
+      "candidateSha": "not-a-full-sha"
+    }
+  }
+}
+script:pre-request {
+  for (const key of ["fixtureDrainedAt", "fixturePausedAt"]) {
+    const checkedAt = bru.getVar(key);
+    if (!Number.isFinite(checkedAt) || Date.now() - checkedAt > 30000 || Date.now() < checkedAt) {
+      throw new Error("Read active drain and paused company within 30 seconds before fixture mutation");
+    }
+  }
+}
+tests {
+  test("Malformed candidate receives a field-specific 400", () => {
+    expect(res.getStatus()).to.equal(400);
+    const details = res.getBody().details;
+    expect(Array.isArray(details)).to.equal(true);
+    expect(details.some(item => JSON.stringify(item.path) === JSON.stringify(["reviewRequest", "candidateSha"]))).to.equal(true);
+  });
+}

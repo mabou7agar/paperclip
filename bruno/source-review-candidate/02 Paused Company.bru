@@ -1,0 +1,19 @@
+meta {
+  name: Read paused fixture company
+  type: http
+  seq: 2
+}
+get {
+  url: {{fixtureBaseUrl}}/api/companies/{{fixtureCompanyId}}
+  body: none
+  auth: none
+}
+tests {
+  bru.deleteVar("fixturePausedAt");
+  test("Synthetic company remains paused", () => {
+    expect(res.getStatus()).to.equal(200);
+    expect(res.getBody().id).to.equal(bru.getVar("fixtureCompanyId"));
+    expect(res.getBody().status).to.equal("paused");
+    bru.setVar("fixturePausedAt", Date.now());
+  });
+}

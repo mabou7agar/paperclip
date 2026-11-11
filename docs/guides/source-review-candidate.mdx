@@ -1,0 +1,112 @@
+---
+title: Bind native review to a source candidate
+description: Optional candidate SHA on the existing native task review API, with isolated Bruno examples.
+---
+
+`PATCH /api/issues/:id` accepts an optional `reviewRequest.candidateSha`
+alongside the existing required `reviewRequest.instructions`. This adds a field
+to the native task API; it creates no new route or review workflow.
+
+```json
+{
+  "status": "in_review",
+  "comment": "Review the exact candidate and its complete diff and evidence.",
+  "reviewRequest": {
+    "instructions": "Review the full candidate against the agreed base.",
+    "candidateSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }
+}
+```
+
+The example SHA is a placeholder; use the full actual candidate commit. The
+optional field must match `^[a-f0-9]{40}$`: exactly 40 lowercase hexadecimal
+characters. Branch names, abbreviated SHAs, uppercase text and JSON null are
+invalid. Malformed values return HTTP 400 with the validation path
+`reviewRequest.candidateSha`. Normal authorization, company access, checkout,
+review-stage transition and audit rules still apply. Do not send assignee or
+execution-stage overrides.
+
+The native execution state retains the candidate in
+`executionState.reviewRequest.candidateSha`. Heartbeat derives
+`reviewCandidateSha` from the server-owned pending review stage only for its
+assigned reviewer. Missing stages, another participant, or an invalid candidate
+produce no binding. A configured, bound source-memory review without a candidate
+fails closed; a mismatched checkout also refuses admission. The field is a source
+identity constraint, never permission to execute, accept work or activate indexing.
+
+The contract owners are `packages/shared/src/validators/issue.ts`,
+`packages/shared/src/types/issue.ts`,
+`server/src/services/heartbeat/source-memory-run-state.ts` and its call in
+`server/src/services/heartbeat.ts`.
+
+## Compatibility and mixed-version order
+
+Existing requests with only `reviewRequest.instructions` remain valid at the API
+schema level. They do not silently acquire current-source evidence standing when
+source-memory review requires a bound candidate. Old saved results and sessions
+remain intact; never infer a candidate from a branch, baseRef or arbitrary context.
+
+Upgrade the server schema and native candidate producer before clients send the
+new field. A server without this strict-schema addition rejects the unknown
+property. Until then, use only the supported `reviewRequest.instructions` and
+include the full candidate SHA, whole-diff link and evidence links there. This
+text supports manual review; it does not implement the new typed source binding.
+Never resend a rejected mutation automatically.
+
+Keep indexing disabled during an approved cutover, quiesce older workers and drain
+their transactions before compatible workers touch retained provenance. Older
+pruning workers are not safe rollback targets for retained ledgers. These examples
+authorize no deployment, retention migration, deletion or real indexing.
+
+## Disposable fixture collection
+
+`bruno/source-review-candidate/` is a standalone collection with valid and invalid
+requests plus readback. Open that directory as the collection, rather than running
+all parent collections. Provision a disposable local instance and fresh synthetic
+company/task with a native review stage and a never-executed synthetic participant.
+Use no production data, credentials, remote provider access or shared state.
+
+Before creating fixture entities, an authorized fixture operator must start the
+existing task drain (`POST /api/instance/task-drain`), confirm it with GET, keep it
+active through the fixture, pause the synthetic company, and disable execution.
+The collection does not provision entities or start/extend drains. A drain's POST
+receipt is not the computed GET status. Verify zero adapter invocations/running
+runs separately, then stop the fixture server and clean up its isolated database.
+Never drain a real operator instance for this fixture.
+
+Inject these values into the Bruno process without committing an environment file:
+
+| Process variable | Purpose |
+| --- | --- |
+| `PAPERCLIP_FIXTURE_BASE_URL` | Disposable HTTP loopback origin, with its isolated port |
+| `PAPERCLIP_FIXTURE_ISOLATED` | Explicit `true` confirmation of fixture isolation |
+| `PAPERCLIP_FIXTURE_COMPANY_ID` | Fresh paused synthetic company |
+| `PAPERCLIP_FIXTURE_ISSUE_ID` | Its synthetic task with native review policy |
+| `PAPERCLIP_FIXTURE_CANDIDATE_SHA` | Full candidate commit to persist and read back |
+| `PAPERCLIP_FIXTURE_TOKEN` | Optional injected fixture credential; omit only for an isolated local-trusted fixture |
+
+Run requests 01–05 once in order. Read active drain and paused company immediately
+before mutation; in-memory checks expire after 30 seconds. Expected responses are
+GET 200, GET 200, malformed PATCH 400, valid PATCH 200, and persisted GET 200.
+The valid mutation must leave a pending review stage retaining the exact SHA.
+The guards reduce accidental use; they do not prove isolation or prevent a drain
+expiry race. Fixture isolation, a never-executed participant and operator cleanup
+remain essential. Stop on failure; no retry or polling loop is supplied.
+
+The collection injects a credential header using `bru.getProcessEnv` and keeps
+runtime state only with `bru.setVar`. It has no token environment file, credential
+logging, or persistence calls. In Bruno v4, environment/global mutation scripts
+persist changes; keep secrets in process injection or supported secret-manager
+references, never `bru.setEnvVar` or global/environment setters. See the
+[Bruno v4 release guidance](https://www.usebruno.com/v4-release) and
+[official JavaScript reference](https://github.com/usebruno/bruno-docs/blob/main/testing/script/javascript-reference.mdx).
+
+## Evidence scope
+
+Actual isolated curl evidence establishes malformed-field rejection, successful
+persistence/readback and producer binding from saved native review state, with
+zero adapter invocations and cleanup. The reusable Bruno files document those
+requests; Bruno runner execution is not claimed. Documentation additions do not
+repeat the curl fixture, semantic compiler, Postgres, synthetic or CI checks.
+Hosted CI, full Rust rebuild, full UI qualification and live provider dispatch
+are separate from this source/API fixture evidence.
