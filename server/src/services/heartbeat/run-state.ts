@@ -814,11 +814,13 @@ export function shouldResetTaskSessionForWake(
 ) {
   if (contextSnapshot?.forceFreshSession === true) return true;
 
+  // Review and approval handoffs keep the same agent's task session when
+  // configuration and workspace checks permit it. A first-time participant
+  // has no saved session; explicit freshness and recovery still reset it.
   const wakeReason = readNonEmptyString(contextSnapshot?.wakeReason);
   if (
     wakeReason === "issue_assigned" ||
     wakeReason === EXECUTION_REVIEW_PARTICIPANT_RECOVERY_WAKE_REASON ||
-    wakeReason === "execution_approval_requested" ||
     // PF-4: unscoped timer wakes are exploratory ("any new work?") and should
     // not accumulate low-value inbox scans. Issue-scoped timer wakes are
     // continuation work, so reuse their task session to avoid paying the full
@@ -841,8 +843,6 @@ export function describeSessionResetReason(
   if (wakeReason === EXECUTION_REVIEW_PARTICIPANT_RECOVERY_WAKE_REASON) {
     return `wake reason is ${EXECUTION_REVIEW_PARTICIPANT_RECOVERY_WAKE_REASON}`;
   }
-  if (wakeReason === "execution_approval_requested")
-    return "wake reason is execution_approval_requested";
   // PF-4: paired with shouldResetTaskSessionForWake — keep the reason wording
   // explicit so run logs make session reuse/reset behavior legible.
   if (
