@@ -59,23 +59,42 @@ test('all phase admissions and dispatch reject unauthorized or changed evidence'
       await assert.rejects(prepared.beforeDispatch(), /revoked_access/);
       assert.equal(reads, before, 'revocation must precede dispatch verification');
     });
-    await t.test('recovery and disabled citations fail closed without reader I/O', async () => {
-      const before = reads;
-      for (const configured of [true, false]) {
-        if (!configured) delete process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG;
-        const prepared = await prepareHeartbeatSourceMemory({ recovering: true, persistedWorkspaceId: 'workspace', workspace: { repoUrl: 'https://github.com/example/permitted' }, identity: {phase:'review'} });
-        const result = {resultJson:{sourceCitations:[{mode:'historical'}]}};
-        await prepared.consumeResult(result);
-        assert.equal(result.errorCode,'source_citation_rejected');
-        assert.equal(result.resultJson.sourceCurrentEvidenceSatisfied,false);
-      }
-      assert.equal(reads,before);
-      process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG = '/synthetic/not-read-by-fixture';
-    });
     await t.test('historical selection is explicit and cannot substitute another revision', () => {
       assert.equal(selectSourceCitations(evidence, { mode: 'historical', revision }).mode, 'historical');
       assert.throws(() => selectSourceCitations(evidence, { mode: 'current', revision: 'e'.repeat(40) }), /stale_citation/);
       assert.throws(() => selectSourceCitations(evidence, { mode: 'implicit', revision }), /retrieval_mode_invalid/);
     });
   } finally { if (saved === undefined) delete process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG; else process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG = saved; }
+});
+
+
+for (const configured of [true, false]) test(configured
+  ? 'configured recovery citations fail closed without reader or authorization IO'
+  : 'disabled citations strip evidence metadata and succeed without reader or authorization IO', async () => {
+  const saved = process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG, before = reads;
+  let authCalls = 0;
+  try {
+    if (configured) process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG = '/synthetic/not-read-by-fixture';
+    else delete process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG;
+    const forbidden = async () => { authCalls++; throw Error('unexpected authorization IO'); };
+    const prepared = await prepareHeartbeatSourceMemory({ recovering: true, persistedWorkspaceId: 'workspace',
+      workspace: { repoUrl: 'https://github.com/example/permitted' }, identity: { phase: 'review' },
+      authorize: forbidden, recordRevision: forbidden, assertOwned: forbidden, readAuthority: forbidden });
+    await prepared.beforeDispatch(); await prepared.observeCommit();
+    const result = { exitCode: 0, resultJson: { answer: 'finished', sourceCitations: [{ mode: 'historical' }],
+      sourceCitationResults: ['untrusted'], sourceCurrentEvidenceSatisfied: true } };
+    await prepared.consumeResult(result);
+    if (configured) {
+      assert.equal(result.exitCode, 1);
+      assert.equal(result.errorCode, 'source_citation_rejected');
+      assert.equal(result.resultJson.sourceCurrentEvidenceSatisfied, false);
+      assert.equal(result.resultJson.sourceCitationResults[0].reason, 'recovery_snapshot_unverified');
+    } else {
+      assert.equal(result.exitCode, 0); assert.equal(result.errorCode, undefined);
+      assert.deepEqual(result.resultJson, { answer: 'finished' });
+    }
+    assert.equal(reads, before); assert.equal(authCalls, 0);
+  } finally {
+    if (saved === undefined) delete process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG; else process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG = saved;
+  }
 });

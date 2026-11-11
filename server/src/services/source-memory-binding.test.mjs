@@ -122,3 +122,19 @@ test('unrelated companies ignore invalid configured paths and bindings', async t
   assert.equal(await prepareSourceMemory(input, 'phase', file), null);
   await assert.rejects(prepareSourceMemory({ ...input, companyId: 'bound' }, 'phase', file), /configuration_invalid/);
 });
+
+
+test('non-object configuration envelopes have a named fail-closed error', async t => {
+  const { sourceMemoryBindingEnabled, sourceMemoryProjectBindingEnabled } = await import('./source-memory.ts');
+  const root = await mkdtemp(path.join(os.tmpdir(), 'source-config-envelope-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const file = path.join(root, 'config.json');
+  const input = { companyId: 'company', projectId: 'project', repoUrl: 'https://github.com/example/repo', cwd: '/unused' };
+  for (const value of [null, [], 'text', 0, false]) {
+    await writeFile(file, JSON.stringify(value));
+    for (const operation of [() => prepareSourceMemory(input, 'phase', file),
+      () => sourceMemoryBindingEnabled(input, file), () => sourceMemoryProjectBindingEnabled(input, file)]) {
+      await assert.rejects(operation(), { message: 'source_memory_configuration_invalid' });
+    }
+  }
+});

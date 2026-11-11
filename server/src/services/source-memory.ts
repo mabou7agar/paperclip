@@ -46,7 +46,7 @@ export function sourceMemoryRepositoryId(url: string) {
 async function configuration(file: string, scope: Pick<SourceMemoryInput, "companyId" | "projectId">): Promise<Configuration | null> {
   requireValue((await stat(file)).size <= 1_048_576, "configuration_budget");
   const c = JSON.parse(await readFile(file, "utf8")) as Configuration;
-  requireValue(Array.isArray(c.bindings), "configuration_invalid");
+  requireValue(c !== null && typeof c === "object" && !Array.isArray(c) && Array.isArray(c.bindings), "configuration_invalid");
   const bindings = c.bindings.filter(b => b?.companyId === scope.companyId && b?.projectId === scope.projectId);
   if (!bindings.length) return null;
   c.bindings = bindings;

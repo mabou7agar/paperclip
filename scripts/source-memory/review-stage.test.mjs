@@ -43,6 +43,25 @@ test('two review stages preserve original writer SHA and receipt without recaptu
   assert.deepEqual(result.patch.executionState.sourceReviewCapture, { ...receipt, stageId: 'second', participantAgentId: 'reviewer2' });
   assert.equal(result.patch.executionState.reviewRequest.candidateSha, receipt.candidateSha);
   assert.equal(first.sourceReviewCapture, receipt);
+  // Same-stage reselection after removing the first participant from policy.
+  const reboundPolicy = { stages: [{ id: 'first', type: 'review', participants: [{ agentId: 'replacement' }] }, task.executionPolicy.stages[1]] };
+  const reboundState = { ...first, currentParticipant: { type: 'agent', agentId: 'replacement' } };
+  const rebound = await prepareSourceReviewHandoff(db, { ...input, task: { ...task, executionPolicy: reboundPolicy },
+    patch: { status: 'in_review', executionState: reboundState } });
+  assert.deepEqual(rebound.patch.executionState.sourceReviewCapture, { ...receipt, participantAgentId: 'replacement' });
+  assert.equal(rebound.event, null);
+  await assert.rejects(prepareSourceReviewHandoff(db, { ...input, task: { ...task, executionPolicy: reboundPolicy },
+    patch: { status: 'in_review', executionState: { ...reboundState, currentParticipant: { type: 'agent', agentId: 'intruder' } } } }), /stage_participant_mismatch/);
+  // The actual next pending review can follow multiple already-completed stages.
+  const skipped = { id: 'completed', type: 'review', participants: [{ agentId: 'skipped-reviewer' }] };
+  const skipPolicy = { stages: [task.executionPolicy.stages[0], skipped, task.executionPolicy.stages[1]] };
+  const skipState = { ...second, currentStageIndex: 2, completedStageIds: ['first', 'completed'] };
+  const advanced = await prepareSourceReviewHandoff(db, { ...input, task: { ...task, executionPolicy: skipPolicy },
+    patch: { status: 'in_review', executionState: skipState } });
+  assert.deepEqual(advanced.patch.executionState.sourceReviewCapture, { ...receipt, stageId: 'second', participantAgentId: 'reviewer2' });
+  assert.equal(advanced.event, null);
+  await assert.rejects(prepareSourceReviewHandoff(db, { ...input, task: { ...task, executionPolicy: skipPolicy },
+    patch: { status: 'in_review', executionState: { ...skipState, completedStageIds: ['first'] } } }), /frozen_review_receipt_mismatch/);
   await assert.rejects(prepareSourceReviewHandoff(db,{...input,requestedCandidate:'b'.repeat(40)}), /explicit_candidate_mismatch/);
   for (const change of [{ workspaceBindingRevision: 2 }, { executionState: {...first, sourceReviewCapture:null} }]) {
     await assert.rejects(prepareSourceReviewHandoff(db,{...input,task:{...task,...change}}), /frozen_review_receipt_mismatch/);

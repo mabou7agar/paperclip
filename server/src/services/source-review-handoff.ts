@@ -51,11 +51,18 @@ export async function prepareSourceReviewHandoff(db: Db, input: {
   const previous = parseIssueExecutionState(task.executionState);
   const receipt = previous?.sourceReviewCapture;
   // Only the persisted receipt may deduplicate. An input receipt is never authority.
-  const sameReview = receipt?.stageId === stage.id && receipt.participantAgentId === participant.agentId;
-  const advancingReview = previous?.currentStageType === "review" && previous.currentStageId === receipt?.stageId &&
-    previous.currentParticipant?.agentId === receipt?.participantAgentId &&
-    typeof previous.currentStageIndex === "number" && state.currentStageIndex === previous.currentStageIndex + 1 &&
-    state.completedStageIds.includes(previous.currentStageId!) && state.lastDecisionOutcome === "approved";
+  const priorReviewBound = previous?.currentStageType === "review" && previous.currentStageId === receipt?.stageId &&
+    previous.currentParticipant?.agentId === receipt?.participantAgentId;
+  // A participant change does not return the task to a writer. Keep the saved
+  // candidate even if the old reviewer has been removed from the same stage.
+  const sameReview = priorReviewBound && stage.id === receipt?.stageId;
+  // Match the policy owner's nextPendingStageAfter rule, including completed
+  // stages that a prior decision has already satisfied. Never infer +1.
+  const previousIndex = policy!.stages.findIndex(candidate => candidate.id === previous?.currentStageId);
+  const nextPending = previousIndex < 0 ? null : policy!.stages.find((candidate, index) =>
+    index > previousIndex && !state.completedStageIds.includes(candidate.id));
+  const advancingReview = priorReviewBound && nextPending?.id === stage.id &&
+    state.completedStageIds.includes(previous!.currentStageId!) && state.lastDecisionOutcome === "approved";
   if (previous?.status === "pending" && receipt && (sameReview || advancingReview) && receipt.companyId === task.companyId && receipt.issueId === task.id &&
       receipt.workspaceId === task.executionWorkspaceId && receipt.bindingRevision === task.workspaceBindingRevision &&
       receipt.projectId === task.projectId && receipt.repositoryId === sourceMemoryRepositoryId(workspace!.repoUrl!)) {

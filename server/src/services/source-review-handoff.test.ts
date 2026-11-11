@@ -123,6 +123,41 @@ describe('source review handoff transaction (synthetic only)', () => {
     expect(advanced!.executionState!.reviewRequest!.candidateSha).toBe(f.sha);
     expect(await db.select().from(activityLog).where(and(eq(activityLog.entityId, f.issueId), eq(activityLog.action, 'issue.source_review_candidate_captured')))).toHaveLength(1);
   });
+  it.each(['participant-rebind', 'completed-stage-skip'] as const)('E2 %s preserves the persisted writer candidate through the real policy transaction', async mode => {
+    const f = await seed(), replacementId = randomUUID(), skippedId = randomUUID(), nextId = randomUUID();
+    await db.insert(agents).values({ id: replacementId, companyId: f.companyId, name: 'Replacement reviewer', adapterType: 'paperclip_runner' });
+    const entered = await f.enter();
+    const oldState = entered!.executionState!;
+    const completedStageIds = mode === 'completed-stage-skip' ? [skippedId] : [];
+    const policy = normalizeIssueExecutionPolicy({ stages: mode === 'participant-rebind' ? [
+      { id: f.stageId, type: 'review', participants: [{ type: 'agent', agentId: replacementId, userId: null }] },
+    ] : [
+      { id: f.stageId, type: 'review', participants: [{ type: 'agent', agentId: f.reviewerId, userId: null }] },
+      { id: skippedId, type: 'review', participants: [{ type: 'agent', agentId: replacementId, userId: null }] },
+      { id: nextId, type: 'review', participants: [{ type: 'agent', agentId: replacementId, userId: null }] },
+    ] })!;
+    await db.update(issues).set({ executionPolicy: policy, executionState: { ...oldState, completedStageIds } }).where(eq(issues.id, f.issueId));
+    const [task] = await db.select().from(issues).where(eq(issues.id, f.issueId));
+    // No reviewer owns the writer lease and HEAD has advanced: a recapture must fail.
+    await writeFile(join(f.repo, 'example.ts'), 'reviewer-time HEAD\n'); f.git('add', '.');
+    f.git('-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.invalid', 'commit', '-qm', 'later HEAD');
+    const transition = applyIssueExecutionPolicyTransition({ issue: task!, policy,
+      requestedStatus: mode === 'participant-rebind' ? 'in_review' : 'done', requestedAssigneePatch: {},
+      actor: { agentId: f.reviewerId, userId: null }, commentBody: 'Approve the original frozen candidate.' });
+    const updated = await issueService(db).update(f.issueId, { ...transition.patch, actorAgentId: f.reviewerId });
+    expect(updated!.executionState!.sourceReviewCapture).toEqual({ ...oldState.sourceReviewCapture,
+      stageId: mode === 'participant-rebind' ? f.stageId : nextId, participantAgentId: replacementId });
+    expect(updated!.executionState!.reviewRequest!.candidateSha).toBe(f.sha);
+    expect(updated!.assigneeAgentId).toBe(replacementId);
+    expect(await db.select().from(activityLog).where(and(eq(activityLog.entityId, f.issueId), eq(activityLog.action, 'issue.source_review_candidate_captured')))).toHaveLength(1);
+  });
+  it.each([null, [], 'text', false, 0].map(envelope => ({ envelope })))('E2 invalid envelope $envelope refuses the core handoff without changing state', async ({ envelope }) => {
+    const f = await seed(); await writeFile(f.config, JSON.stringify(envelope));
+    await expect(f.enter()).rejects.toMatchObject({ details: { code: 'review_candidate_capture_unavailable', reason: 'configuration_unverifiable' } });
+    const [task] = await db.select().from(issues).where(eq(issues.id, f.issueId));
+    expect(task!.status).toBe('in_progress'); expect(task!.executionState).toBeNull();
+    expect(await db.select().from(activityLog).where(and(eq(activityLog.entityId, f.issueId), eq(activityLog.action, 'issue.source_review_candidate_captured')))).toHaveLength(0);
+  });
   it('explicit mismatch rolls back stage and event', async () => {
     const f = await seed(); await expect(f.enter('b'.repeat(40))).rejects.toMatchObject({ details: { code: 'review_candidate_capture_unavailable', reason: 'explicit_candidate_mismatch' } });
     const [task] = await db.select().from(issues).where(eq(issues.id, f.issueId)); expect(task!.status).toBe('in_progress'); expect(task!.executionState).toBeNull();

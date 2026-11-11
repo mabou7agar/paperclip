@@ -516,3 +516,21 @@ Previous-release rollback restrictions are recorded in
 `rules/upgrade-safe-run-state.mdc`. Actual-bundle parent-kill qualification at the
 final candidate remains an operator activation gate; no earlier bundle receipt
 is promoted to this candidate. Recovery policy remains a separate CTO decision.
+
+
+### E2 review liveness and enablement preparation
+
+A same-stage participant replacement carries the persisted receipt to the new
+eligible participant; it never captures that participant's checkout HEAD. Review
+advancement selects the next policy stage not already in completedStageIds, so
+completed intervening stages do not force an index-plus-one refusal. Existing
+company/task/workspace/binding/repository and candidate constraints still apply.
+
+Before any separately approved enablement, identify reviews already pending
+without a server capture. Do not synthesize a receipt from their reviewer's HEAD,
+clear state or replay completion. Through the existing authorized changes-request
+transition, return such work to its writer for a fresh leased handoff and capture.
+Reviews whose saved capture no longer matches scope also remain held for that
+same governed writer path. Enablement and recovery are not authorized here.
+JSON null, arrays and primitive configuration envelopes refuse with
+`source_memory_configuration_invalid` before any reader or authorization work.

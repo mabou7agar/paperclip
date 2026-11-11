@@ -5,7 +5,9 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it, vi } from "vitest";
-import type { agents } from "@paperclipai/db";
+import { agentTaskSessions, type agents, type Db } from "@paperclipai/db";
+import type { SQL } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
 import { sessionCodec as codexSessionCodec } from "@paperclipai/adapter-codex-local/server";
 import { resolveDefaultAgentWorkspaceDir } from "../home-paths.js";
 import {
@@ -49,6 +51,7 @@ import {
   type ResolvedWorkspaceForRun,
 } from "../services/heartbeat.ts";
 import { stripHostWorkspaceProvision } from "../services/heartbeat/workspaces.js";
+import { createHeartbeatRunState } from "../services/heartbeat/run-state.js";
 import type { TrustPresetResolution } from "../services/trust-preset-resolver.ts";
 
 const execFile = promisify(execFileCallback);
@@ -2045,6 +2048,42 @@ describe("stripWorkspaceRuntimeFromExecutionRunConfig", () => {
 });
 
 describe("shouldResetTaskSessionForWake", () => {
+  it("resolves the saved approval workspace through the scoped session query without crossing task or agent boundaries", async () => {
+    const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "approval-session-workspace-"));
+    const agent = buildAgent("codex_local");
+    const scope = [agent.companyId, agent.id, agent.adapterType, "task-1"];
+    const saved = { sessionParamsJson: { sessionId: "saved-thread", cwd } };
+    const queries: unknown[][] = [];
+    const db = { select: () => ({ from: (table: unknown) => {
+      expect(table).toBe(agentTaskSessions);
+      return { where: (condition: SQL) => {
+        const { params } = new PgDialect().sqlToQuery(condition);
+        queries.push(params);
+        // Storage-only fixture: evaluate the real query's four bound scope keys.
+        return Promise.resolve(params.length === scope.length && params.every((value, index) => value === scope[index]) ? [saved] : []);
+      } };
+    } }) } as unknown as Db;
+    const state = createHeartbeatRunState(db);
+    const input = { agent, contextSnapshot: { wakeReason: "execution_approval_requested" },
+      taskKey: "task-1", explicitResumeSession: null };
+    try {
+      expect(await state.hasResolvablePriorSessionWorkspaceForWake(input)).toBe(true);
+      expect(queries).toEqual([scope]);
+      expect(saved.sessionParamsJson).toEqual({ sessionId: "saved-thread", cwd });
+      expect(await state.hasResolvablePriorSessionWorkspaceForWake({ ...input, taskKey: "other-task" })).toBe(false);
+      expect(await state.hasResolvablePriorSessionWorkspaceForWake({ ...input,
+        agent: { ...agent, id: "other-agent" } })).toBe(false);
+      expect(await state.hasResolvablePriorSessionWorkspaceForWake({ ...input,
+        agent: { ...agent, companyId: "other-company" } })).toBe(false);
+      const beforeForced = queries.length;
+      expect(await state.hasResolvablePriorSessionWorkspaceForWake({ ...input,
+        contextSnapshot: { ...input.contextSnapshot, forceFreshSession: true } })).toBe(false);
+      expect(queries).toHaveLength(beforeForced);
+      await fs.rm(cwd, { recursive: true });
+      expect(await state.hasResolvablePriorSessionWorkspaceForWake(input)).toBe(false);
+    } finally { await fs.rm(cwd, { recursive: true, force: true }); }
+  });
+
   it("resets session context on assignment wake", () => {
     expect(shouldResetTaskSessionForWake({ wakeReason: "issue_assigned" })).toBe(true);
   });
@@ -2053,8 +2092,8 @@ describe("shouldResetTaskSessionForWake", () => {
     expect(shouldResetTaskSessionForWake({ wakeReason: "execution_review_requested" })).toBe(false);
   });
 
-  it("resets session context on execution approval wakes", () => {
-    expect(shouldResetTaskSessionForWake({ wakeReason: "execution_approval_requested" })).toBe(true);
+  it("preserves session context on execution approval handoff wakes", () => {
+    expect(shouldResetTaskSessionForWake({ wakeReason: "execution_approval_requested" })).toBe(false);
   });
 
   it("preserves session context on execution changes-requested handoff wakes", () => {
