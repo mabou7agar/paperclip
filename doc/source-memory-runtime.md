@@ -590,3 +590,18 @@ no stored result or fingerprint is migrated. A replay against a pre-F2 accepted
 result containing those extra fields can encounter the existing named
 `structured_result_replay_conflict`; it must preserve that record/session and
 must not trigger a provider rerun or erase the accepted receipt.
+
+
+### Pilot retention monitoring
+
+At every post-deploy check, record each private `runtime.sqlite` file size and
+its `facts` / `observations` row counts. Until retention is enabled in a separately
+reviewed change, the first single-binding pilot retains provenance without
+pruning. Disable the feature by unsetting `PAPERCLIP_SOURCE_MEMORY_CONFIG` and
+restarting if rows exceed 10,000 facts or 2,000 observations, known retained age
+exceeds 30 days, or the state file grows beyond 1 GiB. Do not delete records by
+hand. Unknown-age legacy provenance is not evidence of a known age. Broadening
+beyond that pilot requires the separately tested retention implementation.
+
+Fixture-free native standing-field, worker-refusal and operator guard tests run
+in the ordinary policy lane even when the reader-dependent job is disabled.
