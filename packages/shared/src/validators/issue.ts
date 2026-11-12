@@ -527,6 +527,7 @@ export const issueExecutionMonitorStateSchema = z.object({
 export const issueReviewRequestSchema = z
   .object({
     instructions: z.string().trim().min(1).max(20000),
+    candidateSha: z.string().regex(/^[a-f0-9]{40}$/).optional(),
   })
   .strict();
 
@@ -538,6 +539,13 @@ export const issueExecutionStateSchema = z.object({
   currentParticipant: issueExecutionStagePrincipalSchema.nullable(),
   returnAssignee: issueExecutionStagePrincipalSchema.nullable(),
   reviewRequest: issueReviewRequestSchema.nullable().optional().default(null),
+  sourceReviewCapture: z.object({
+    schema: z.literal(1), companyId: z.string().guid(), issueId: z.string().guid(),
+    projectId: z.string().guid(), repositoryId: z.string().min(1).max(512),
+    workspaceId: z.string().guid(), bindingRevision: z.number().int().nonnegative(),
+    writerRunId: z.string().guid(), stageId: z.string().guid(), participantAgentId: z.string().guid(),
+    candidateSha: z.string().regex(/^[a-f0-9]{40}$/), eventKey: z.string().regex(/^[a-f0-9]{64}$/),
+  }).strict().nullable().optional(),
   completedStageIds: z.array(z.string().guid()).default([]),
   lastDecisionId: z.string().guid().nullable(),
   lastDecisionOutcome: z.enum(ISSUE_EXECUTION_DECISION_OUTCOMES).nullable(),

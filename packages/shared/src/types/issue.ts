@@ -825,6 +825,15 @@ export interface IssueExecutionMonitorState {
 
 export interface IssueReviewRequest {
   instructions: string;
+  candidateSha?: string;
+}
+
+/** Server-owned handoff receipt. Not an issue-mutation input. */
+export interface IssueSourceReviewCapture {
+  schema: 1;
+  companyId: string; issueId: string; projectId: string; repositoryId: string;
+  workspaceId: string; bindingRevision: number; writerRunId: string;
+  stageId: string; participantAgentId: string; candidateSha: string; eventKey: string;
 }
 
 export interface IssueExecutionState {
@@ -835,6 +844,7 @@ export interface IssueExecutionState {
   currentParticipant: IssueExecutionStagePrincipal | null;
   returnAssignee: IssueExecutionStagePrincipal | null;
   reviewRequest: IssueReviewRequest | null;
+  sourceReviewCapture?: IssueSourceReviewCapture | null;
   completedStageIds: string[];
   lastDecisionId: string | null;
   lastDecisionOutcome: IssueExecutionDecisionOutcome | null;

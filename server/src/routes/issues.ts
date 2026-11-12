@@ -15337,6 +15337,7 @@ export function issueRoutes(
         expectedExecutionPolicy,
         expectedStatusVersion,
         expectedReviewSnapshot: transition.expectedReviewSnapshot,
+        sourceReviewRequestedCandidate: reviewRequest?.candidateSha ?? null,
         actorAgentId: actor.agentId ?? null,
         actorRunId: actor.agentId ? actor.runId : null,
         actorRunStopId: actor.agentId && interruptedRunId === actor.runId ? issueMutationStopId : null,

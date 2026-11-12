@@ -1,3 +1,4 @@
+import { hasConfiguredSourceReviewGate } from "../source-review-handoff.js";
 import { and, eq, inArray, notInArray } from "drizzle-orm";
 import { approvals, issueApprovals, issueComments, issueThreadInteractions, issues, type Db } from "@paperclipai/db";
 import { activeIssueInteractionCondition } from "../issue-question-context.js";
@@ -63,6 +64,7 @@ export async function pendingNativeGovernance(input: {
   if (record(input.executionState).status === "pending") {
     return { kind: "execution_stage", id: input.runId };
   }
+  if (await hasConfiguredSourceReviewGate(input.db, input)) return { kind: "execution_stage", id: input.runId };
   const [pendingInteraction, pendingApproval] = await Promise.all([
     pendingNativeInteraction(input),
     input.db

@@ -1,0 +1,16 @@
+meta {
+  name: Read persisted review candidate
+  type: http
+  seq: 5
+}
+get {
+  url: {{fixtureBaseUrl}}/api/issues/{{fixtureIssueId}}
+  body: none
+  auth: none
+}
+tests {
+  test("GET retains the exact full SHA", () => {
+    expect(res.getStatus()).to.equal(200);
+    expect(res.getBody().executionState.reviewRequest.candidateSha).to.equal(bru.getProcessEnv("PAPERCLIP_FIXTURE_CANDIDATE_SHA"));
+  });
+}

@@ -1,3 +1,4 @@
+import { NativeCompletionValidation, stripNativeSourceStanding } from "./completion-validation.js";
 import { notifyNativeResultCommit } from "../native-result-commit-notifications.js";
 import { notifyNativeWorkspaceFinalization } from "../native-workspace-finalization-notifications.js";
 import { createAgentIdentityRedactor } from "../agent-identity-redaction.js";
@@ -92,6 +93,8 @@ export class PaperclipControlPlanePort implements ControlPlanePort {
   #sessionId: string | null = null;
   readonly #assertControllerActive?: () => void;
   readonly #assertRunAdmissionActive?: () => void;
+  readonly #completionValidation = new NativeCompletionValidation();
+  readonly #beforeCompleteRun?: (result: Record<string, unknown>) => Promise<void>;
   readonly #onResultCommitted?: () => Promise<void>;
   readonly #onEventPersistence?: (event: PrpEvent, startedAtMs: number, endedAtMs: number) => Promise<void>;
   readonly #onCommittedEvent?: (event: PrpEvent, cursor: number) => Promise<void>;
@@ -112,6 +115,7 @@ export class PaperclipControlPlanePort implements ControlPlanePort {
       assertControllerActive?: () => void;
       /** Read-only admission may finish an existing startup solely for restart detachment. */
       assertRunAdmissionActive?: () => void;
+      beforeCompleteRun?: (result: Record<string, unknown>) => Promise<void>;
       onResultCommitted?: () => Promise<void>;
       onEventPersistence?: (event: PrpEvent, startedAtMs: number, endedAtMs: number) => Promise<void>;
       onCommittedEvent?: (event: PrpEvent, cursor: number) => Promise<void>;
@@ -129,6 +133,7 @@ export class PaperclipControlPlanePort implements ControlPlanePort {
     this.#onCommittedEvent = options.onCommittedEvent;
     this.#onEventPersistence = options.onEventPersistence;
     this.#onResultCommitted = options.onResultCommitted;
+    this.#beforeCompleteRun = options.beforeCompleteRun;
     this.#onDuplicateEvent = options.onDuplicateEvent;
     this.#nativeRecovery = options.nativeRecovery;
     this.#taskSessionPublication = options.taskSessionPublication ? structuredClone(options.taskSessionPublication) : undefined;
@@ -527,9 +532,15 @@ export class PaperclipControlPlanePort implements ControlPlanePort {
     if (validated.result.reportedWorkDisposition !== value.terminal.reportedWorkDisposition) {
       throw new Error("native_result_terminal_disposition_mismatch");
     }
+    let acceptedResult = stripNativeSourceStanding(validated.result);
+    // Source validation performs bounded reads outside the acceptance transaction.
+    // A rejection must precede accepted-result insertion and native finalization.
+    if (this.#beforeCompleteRun) await this.#completionValidation.validate(acceptedResult as unknown as Record<string, unknown>, this.#beforeCompleteRun);
+    acceptedResult = stripNativeSourceStanding(acceptedResult);
+    this.#assertActive(options);
     const canonical = {
       binding: this.#binding,
-      result: validated.result,
+      result: acceptedResult,
       terminal: value.terminal,
       turnId: value.turnId ?? null,
     };
@@ -575,7 +586,7 @@ export class PaperclipControlPlanePort implements ControlPlanePort {
       }
       if (owner?.resultId) throw new Error("structured_result_replay_conflict");
       const resultJson = {
-        result: validated.result,
+        result: acceptedResult,
         terminal: value.terminal,
         normalizationDiagnostics: {
           ignoredAttentionRequests: normalizationDiagnostics.ignoredAttentionRequests,

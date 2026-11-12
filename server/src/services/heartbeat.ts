@@ -1,3 +1,4 @@
+import { NativeCompletionValidationError } from "./native-runtime/completion-validation.js";
 import { taskCompletionReceiptInstruction } from "./task-completion-receipts.js";
 import { isAddressedInteractionWakeContext } from "./addressed-interaction-wake.js";
 import { ConnectionUsageCapReached } from "./connection-usage-caps.js";
@@ -56,6 +57,12 @@ import { reconcileMuseNativeTerminalRun } from "./native-runtime/muse-terminal-r
 import { prepareHeartbeatWorkspace } from "./heartbeat/workspace-preparation.js";
 import { nativeRecoveryClaimRelinquished } from "./native-runtime/native-execution-lease.js";
 import { executeHeartbeatRuntime, NativeSessionResumeScheduledError, NativeWorkspaceFinalizeScheduledError } from "./heartbeat/runtime-execution.js";
+import { sourceReviewCandidateSha } from "./heartbeat/source-memory-run-state.js";
+import { attachSourceMemoryContext } from "./source-memory.js";
+import { readRemoteWorkspaceAuthority } from "./remote-workspaces.js";
+import { authorizeSourceCitation } from "./source-citation-authorization.js";
+import { prepareHeartbeatSourceMemory } from "./heartbeat/source-memory.js";
+import { assertNativeSessionPreparationAuthority } from "./native-runtime/native-execution-lease.js";
 import { preserveNativeFailedWorkspace } from "./native-runtime/native-failed-workspace-recovery.js";
 import { nativeRunHasNoWorkspaceAccess } from "./workspace-restore-recovery-state.js";
 import { prepareAndSelectHeartbeatRuntime } from "./heartbeat/runtime-selection.js";
@@ -3458,6 +3465,50 @@ export function heartbeatService(
         const hasInstructionFilesystem = nativeRuntimeResolution.kind !== "native"
           ? adapter.supportsInstructionsBundle === true
           : nativeRuntimeHasInstructionFilesystem(nativeRuntimeResolution.profile.backend);
+        // Candidate comes only from the server-owned pending review stage. Never
+        // inherit a caller-supplied context candidate or infer one from baseRef.
+        context.reviewCandidateSha = sourceReviewCandidateSha(
+          parseIssueExecutionState(issueContext?.executionState), agent.id, {
+            companyId: run.companyId, issueId: issueRef?.id ?? "", workspaceId: persistedExecutionWorkspace?.id ?? null,
+            bindingRevision: issueContext?.workspaceBindingRevision ?? -1,
+          });
+        const sourceMemory = await timePreparation("source_memory", () => prepareHeartbeatSourceMemory({
+          identity: { companyId: run.companyId, projectId: executionWorkspace.projectId, issueId: issueRef?.id ?? "",
+            runId: run.id, phase: phaseRoute?.phase ?? null, provider: phaseRoute?.profile?.binding.provider ?? null,
+            model: phaseRoute?.profile?.model ?? null, signal: executionControl.controller.signal,
+            query: [issueRef?.title, issueRef?.description].filter(Boolean).join(" ").slice(0, 2000) },
+          persistedWorkspaceId: persistedExecutionWorkspace?.id ?? null,
+          workspace: executionWorkspace, recovering: !issueRef || Boolean(runOptions.nativeRestartRecovery),
+          // A handed-off candidate only narrows review admission; baseRef is never a snapshot.
+          frozenRevision: readNonEmptyString(context.reviewCandidateSha),
+          frozenScope: parseIssueExecutionState(issueContext?.executionState)?.sourceReviewCapture ?? null,
+          recordRevision: async revision => {
+            if (!persistedExecutionWorkspace) throw new Error("source_memory_task_binding_missing");
+            const sourceSnapshot = { workspaceId: persistedExecutionWorkspace.id, revision };
+            const [saved] = await db.update(heartbeatRuns).set({
+              contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || ${JSON.stringify({ sourceSnapshot })}::jsonb`,
+            }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+              sql`${heartbeatRuns.contextSnapshot}->'sourceSnapshot' IS NULL`)).returning({ id: heartbeatRuns.id });
+            if (!saved) throw new Error("source_memory_snapshot_already_recorded");
+            context.sourceSnapshot = sourceSnapshot;
+          },
+          authorize: async admission => {
+            if (!issueRef || !persistedExecutionWorkspace) throw new Error("source_memory_task_binding_missing");
+            return authorizeSourceCitation(db, {
+              type: "agent", source: "agent_jwt", companyId: run.companyId, agentId: agent.id, runId: run.id,
+              onBehalfOfUserId: responsibleUserId === "local-board" ? null : responsibleUserId,
+            }, { companyId: run.companyId, issueId: issueRef.id, workspaceId: persistedExecutionWorkspace.id, admission });
+          },
+          authority: readRemoteWorkspaceAuthority(persistedExecutionWorkspace?.metadata),
+          remote: executionTarget?.kind === "remote" && executionTarget.transport === "sandbox" && !executionTarget.runnerTask && executionTarget.runner
+            ? { baseCwd: executionTarget.remoteCwd, execute: request => executionTarget.runner!.execute(request) } : null,
+          assertOwned: () => run.runtimeMode === "native"
+            ? assertNativeSessionPreparationAuthority({ db, companyId: run.companyId, runId: run.id, leaseOwner: runOptions.nativeLeaseOwner })
+            : controllerLease.assertOwned(),
+          readAuthority: async () => readRemoteWorkspaceAuthority(persistedExecutionWorkspace
+            ? (await executionWorkspacesSvc.getStoredById(run.companyId, persistedExecutionWorkspace.id))?.metadata : null),
+        }));
+        attachSourceMemoryContext(context, sourceMemory.evidence);
         const runtimeSelection = await prepareAndSelectHeartbeatRuntime(db, {
           run,
           agent,
@@ -3538,6 +3589,19 @@ export function heartbeatService(
         nativeWorkspaceSync = runtimeSelection.nativeWorkspaceSync;
         const execution = await measureRunPhase("execution.runtime", () => executeHeartbeatRuntime(db, {
           run, agent, options,
+          beforeProviderDispatch: sourceMemory.beforeDispatch,
+          afterProviderResult: sourceMemory.consumeResult,
+          beforeNativeCompletion: async (completion) => {
+            const result: { resultJson: Record<string, unknown>; errorCode?: string | null } = { resultJson: completion };
+            await sourceMemory.consumeResult(result);
+            if (result.resultJson.sourceCitationResults !== undefined) {
+              await db.update(heartbeatRuns).set({ resultJson: sql`coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb) || ${JSON.stringify({
+                sourceCitationResults: result.resultJson.sourceCitationResults,
+                sourceCurrentEvidenceSatisfied: result.resultJson.sourceCurrentEvidenceSatisfied,
+              })}::jsonb` }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.status, "running")));
+            }
+            if (result.errorCode === "source_citation_rejected") throw new NativeCompletionValidationError("source_citation_rejected");
+          },
           task: {
             issueRef,
             issueContext,
@@ -3657,6 +3721,12 @@ export function heartbeatService(
         }));
         if (!execution.dispatched) return;
         const { adapterResult } = execution;
+        // An accepted provider result must still settle if optional source refresh fails.
+        // Next ordinary phase admission reconstructs the event from the authenticated workspace.
+        try { await sourceMemory.observeCommit(); }
+        catch { try { await appendRunEvent(run, { eventType: "lifecycle", stream: "system", level: "warn",
+          message: "Source memory commit refresh pending; the next phase must revalidate source." }); }
+          catch { logger.warn({ runId: run.id }, "Source memory refresh pending; result settlement retained"); } }
         // Reconcile the referenced-project set against the real remote staging outcome. A referenced
         // project can pass authorization and clone locally at run prep, then fail to stage into the
         // sandbox during execution. The run-prep observability above counts such a project as synced,

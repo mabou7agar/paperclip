@@ -1,0 +1,43 @@
+meta {
+  name: Persist full review candidate
+  type: http
+  seq: 4
+}
+patch {
+  url: {{fixtureBaseUrl}}/api/issues/{{fixtureIssueId}}
+  body: json
+  auth: none
+}
+headers {
+  Content-Type: application/json
+}
+body:json {
+  {
+    "status": "in_review",
+    "comment": "Synthetic binding only: fixture drained, company paused, no provider execution.",
+    "reviewRequest": {
+      "instructions": "Read-only synthetic candidate fixture; no acceptance or execution.",
+      "candidateSha": "{{fixtureCandidateSha}}"
+    }
+  }
+}
+script:pre-request {
+  for (const key of ["fixtureDrainedAt", "fixturePausedAt"]) {
+    const checkedAt = bru.getVar(key);
+    if (!Number.isFinite(checkedAt) || Date.now() - checkedAt > 30000 || Date.now() < checkedAt) {
+      throw new Error("Read active drain and paused company within 30 seconds before fixture mutation");
+    }
+  }
+  const sha = bru.getProcessEnv("PAPERCLIP_FIXTURE_CANDIDATE_SHA");
+  if (!/^[a-f0-9]{40}$/.test(sha || "")) throw new Error("Supply a full lowercase candidate SHA");
+  bru.setVar("fixtureCandidateSha", sha);
+}
+tests {
+  test("Valid candidate persists in the native pending review stage", () => {
+    expect(res.getStatus()).to.equal(200);
+    const state = res.getBody().executionState;
+    expect(state.status).to.equal("pending");
+    expect(state.currentStageType).to.equal("review");
+    expect(state.reviewRequest.candidateSha).to.equal(bru.getVar("fixtureCandidateSha"));
+  });
+}

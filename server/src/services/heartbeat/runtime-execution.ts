@@ -116,6 +116,9 @@ type Lifecycle = ReturnType<typeof createHeartbeatLifecycle>;
 
 /** Dispatches a prepared run; admission and terminal run status remain owned by the executor. */
 export interface HeartbeatRuntimeExecutionInput {
+  beforeProviderDispatch?: () => Promise<void>;
+  afterProviderResult?: (result: AdapterExecutionResult) => Promise<void>;
+  beforeNativeCompletion?: (result: Record<string, unknown>) => Promise<void>;
   run: typeof heartbeatRuns.$inferSelect;
   agent: typeof agents.$inferSelect;
   options: {
@@ -251,7 +254,10 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
   const { nativeInstructionWorkingCopy, collectStoppedInstructions, nativeInstructionReservation, releaseInstructionCopy } = input.instructions;
   const { providerTraceCapture, nativeRunnerPreparationSpans, attestedQuestionResponseAtMs, attemptStartedAtMs, environmentAcquireStartedAtMs, environmentRealizeEndedAtMs } = input.trace;
   const { executionControl, executionPhaseContext, dispatchResolvedInteractionContinuationWithAtomicGate } = input.control;
-  const dispatchWithTiming: HeartbeatRuntimeExecutionInput["control"]["dispatchResolvedInteractionContinuationWithAtomicGate"] = dispatch => {
+  const dispatchWithTiming: HeartbeatRuntimeExecutionInput["control"]["dispatchResolvedInteractionContinuationWithAtomicGate"] = async dispatch => {
+    // Outside the admission transaction: source/transport I/O must not hold its locks.
+    // Current execution authority is then checked by the existing atomic dispatch gate.
+    await input.beforeProviderDispatch?.();
     const providerDispatch = AsyncLocalStorage.bind(dispatch);
     return measureRunPhase("execution.dispatch_admission", () => dispatchResolvedInteractionContinuationWithAtomicGate(providerDispatch));
   };
@@ -625,6 +631,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
           (markDispatchStarted) => {
             return executePaperclipNativeSession({
               casesEnabled: context.paperclipCasesEnabled === true,
+              beforeCompleteRun: input.beforeNativeCompletion,
               db,
               execution: nativeExecution,
               observability,
@@ -963,6 +970,7 @@ export async function executeHeartbeatRuntime(db: Db, input: HeartbeatRuntimeExe
     }
     const instructionSave = input.instructions.getInstructionSave();
     if (instructionSave) adapterResult.resultJson = { ...adapterResult.resultJson, instructionSave };
+    if (nativeRuntimeResolution.kind !== "native") await input.afterProviderResult?.(adapterResult);
 
     if (parseObject(adapterResult.executionRecovery).providerWorkStarted !== false) {
       if (usageRecorder) {

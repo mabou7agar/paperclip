@@ -1,3 +1,5 @@
+import { parseIssueExecutionState } from "../issue-execution-policy.js";
+import { hasConfiguredSourceReviewGate } from "../source-review-handoff.js";
 import { notifyNativeStatusWakeWork } from "../deferred-execution-notifications.js";
 import { notifyExternalAgentSettlement } from "../../modules/external-agents/index.js";
 import { lockCurrentNativeWorkAssessmentEvidence } from "./work-assessments.js";
@@ -706,11 +708,16 @@ async function materializeDecisionEffect(input: {
     };
   }
   if (effect.kind === "notify_owner") {
+    const review = parseIssueExecutionState(input.issue.executionState);
+    const capture = review?.sourceReviewCapture;
+    const reviewAgentId = capture?.writerRunId === input.runId && review?.status === "pending" &&
+      review.currentStageId === capture.stageId && review.currentParticipant?.agentId === capture.participantAgentId
+      ? capture.participantAgentId : null;
     const wakeId = await enqueueWake({
       tx: input.tx,
       companyId: input.companyId,
       issueId: input.issue.id,
-      agentId: effect.agentId,
+      agentId: reviewAgentId ?? effect.agentId,
       reason: "issue_status_changed",
       idempotencyKey: `native-status:${input.decisionId}:notify-owner`,
       payload: {
@@ -2241,6 +2248,22 @@ export async function commitNativeStatusDecision(input: {
       await supersedeExternalReviewRequestsInTransaction(tx as unknown as Db, binding, candidates, publications);
     }
 
+    // Resolve a configured source review before effects release the writer's
+    // checkout. Capture, assignment, stage, audit and status share this transaction.
+    let handoffIssue = issue;
+    if (input.decision.statusAction === "in_review" &&
+        ["governed_gate_pending", "governed_response_waiting"].includes(reasonCode) &&
+        await hasConfiguredSourceReviewGate(tx as unknown as Db, input)) {
+      const [writer] = await tx.select({ agentId: heartbeatRuns.agentId }).from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.companyId, input.companyId), eq(heartbeatRuns.id, input.runId)));
+      if (!writer || !coordinator.leaseOwner) throw new NativeStatusRaceError();
+      const entered = await issueService(tx as unknown as Db).update(input.issueId, {
+        status: "in_review", actorAgentId: null, actorUserId: null,
+        sourceReviewHandoffOwner: { runId: input.runId, agentId: writer.agentId, leaseOwner: coordinator.leaseOwner },
+      }, tx, publications);
+      if (!entered) throw new NativeStatusRaceError();
+      handoffIssue = entered;
+    }
     const materialized: NativeMaterializedStatusEffect[] = [];
     const preMaterializedEffects = new Map(
       (input.preMaterializedEffects ?? []).map((effect) => [
@@ -2253,7 +2276,7 @@ export async function commitNativeStatusDecision(input: {
         await materializeDecisionEffect({
           tx: tx as unknown as Db,
           companyId: input.companyId,
-          issue,
+          issue: handoffIssue,
           runId: input.runId,
           decisionId: decisionRow.id,
           effect,

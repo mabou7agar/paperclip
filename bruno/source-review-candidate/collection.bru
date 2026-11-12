@@ -1,0 +1,28 @@
+script:pre-request {
+  const base = bru.getProcessEnv("PAPERCLIP_FIXTURE_BASE_URL");
+  const parsed = new URL(base);
+  if (parsed.protocol !== "http:" || !["127.0.0.1", "localhost"].includes(parsed.hostname) || parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash) {
+    throw new Error("Use only an isolated loopback fixture URL");
+  }
+  if (bru.getProcessEnv("PAPERCLIP_FIXTURE_ISOLATED") !== "true") {
+    throw new Error("Confirm a disposable fixture with no production data or provider access");
+  }
+  bru.setVar("fixtureBaseUrl", parsed.origin);
+  for (const [name, source] of [["fixtureCompanyId", "PAPERCLIP_FIXTURE_COMPANY_ID"], ["fixtureIssueId", "PAPERCLIP_FIXTURE_ISSUE_ID"]]) {
+    const value = bru.getProcessEnv(source);
+    if (!/^[a-f0-9-]{36}$/.test(value || "")) throw new Error("Supply synthetic fixture entity IDs");
+    bru.setVar(name, value);
+  }
+  const token = bru.getProcessEnv("PAPERCLIP_FIXTURE_TOKEN");
+  if (token) req.setHeader("Authorization", "Bearer " + token);
+  req.setHeader("Origin", parsed.origin);
+  req.setTimeout(15000);
+  req.setMaxRedirects(0);
+}
+
+docs {
+  See docs/guides/source-review-candidate.mdx. This collection changes only a disposable, drained, paused fixture.
+  Provision native review policy and a never-executed synthetic reviewer before running.
+  No environment files or token-persistence scripts are supplied. Inject secrets from the process environment only.
+  The current old server may reject candidateSha. Do not run against a live operator instance.
+}

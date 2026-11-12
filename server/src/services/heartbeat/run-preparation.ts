@@ -2940,6 +2940,7 @@ export function createHeartbeatRunPreparation(db: Db) {
         projectId: issues.projectId,
         projectWorkspaceId: issues.projectWorkspaceId,
         executionWorkspaceId: issues.executionWorkspaceId,
+        workspaceBindingRevision: issues.workspaceBindingRevision,
         executionWorkspacePreference: issues.executionWorkspacePreference,
         assigneeAgentId: issues.assigneeAgentId,
         assigneeAdapterOverrides: issues.assigneeAdapterOverrides,

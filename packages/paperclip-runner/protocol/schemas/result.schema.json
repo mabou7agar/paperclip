@@ -54,6 +54,62 @@
       },
       "additionalProperties": true
     },
+    "sourceCitations": {
+      "type": "array",
+      "maxItems": 20,
+      "description": "Optional committed-source citations. Review requires current evidence when source memory is enabled; all submitted citations are verified.",
+      "items": {
+        "type": "object",
+        "required": [
+          "repo",
+          "fullSha",
+          "path",
+          "startLine",
+          "endLine",
+          "sha256",
+          "mode"
+        ],
+        "properties": {
+          "repo": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          },
+          "fullSha": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{40}$"
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "startLine": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "endLine": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "mode": {
+            "enum": [
+              "current",
+              "historical"
+            ]
+          },
+          "receiptId": {
+            "type": "string",
+            "maxLength": 128
+          }
+        },
+        "additionalProperties": false
+      }
+    },
     "evidence": { "type": "array", "items": { "type": "object" } },
     "verification": {
       "type": "array",

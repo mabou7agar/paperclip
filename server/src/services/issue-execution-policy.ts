@@ -608,6 +608,7 @@ function buildPendingState(input: {
     currentParticipant: input.participant,
     returnAssignee: input.returnAssignee,
     reviewRequest: input.reviewRequest ?? null,
+    sourceReviewCapture: input.previous?.sourceReviewCapture ?? null,
     completedStageIds: input.previous?.completedStageIds ?? [],
     lastDecisionId: input.previous?.lastDecisionId ?? null,
     lastDecisionOutcome: input.previous?.lastDecisionOutcome ?? null,

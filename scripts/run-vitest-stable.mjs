@@ -658,6 +658,8 @@ const generalServerTestFiles = [
   // Only exclude suites actually assigned to the serialized lane. A name
   // such as services/openrouter-models.test.ts is not a serialized route.
   .filter((repoPath) => !serializedRepoPaths.has(repoPath))
+  // Fixture-only suite belongs to the explicit source_memory CI lane.
+  .filter((repoPath) => repoPath !== "server/src/services/source-review-handoff.test.ts")
   .sort((a, b) => a.localeCompare(b));
 
 const options = parseCliOptions(process.argv.slice(2));

@@ -1,3 +1,4 @@
+import { NativeCompletionValidationError } from "./completion-validation.js";
 import { remoteRecoveryLeaseMismatch } from "./remote-recovery-lease-mismatch.js";
 import { isGovernancePauseStop } from "../governance-pause-stop.js";
 import { nativeLeaseHolder, notifyNativeTokenLeaseClaimed } from "./native-token-lease-settlement.js";
@@ -7892,6 +7893,7 @@ export function nativeSessionFailureDisposition(
   sourceFailureCode?: ReturnType<typeof nativeSessionFailureSourceCode>,
 ) {
   const permanentFailure =
+    sourceFailureCode === "native_completion_validation_rejected" ||
     sourceFailureCode === "runner_ingress_access_rejected" ||
     sourceFailureCode === "native_provider_runtime_missing" ||
     sourceFailureCode === "native_provider_model_rejected" ||
@@ -7950,6 +7952,7 @@ export function nativeSessionRecoveryProjection(input: {
 export function nativeSessionFailureSourceCode(
   error: unknown,
 ):
+  | "native_completion_validation_rejected"
   | "native_permission_declined"
   | "native_provider_terminal_failed"
   | typeof NATIVE_PROVIDER_STATE_INCOMPATIBLE
@@ -7983,6 +7986,9 @@ export function nativeSessionFailureSourceCode(
   | "runner_ingress_acquisition_failed"
   | "local_runtime_api_listener_unavailable"
   | "native_session_interrupted" {
+  for (let cause = error, depth = 0; cause && depth < 4; cause = (cause as { cause?: unknown }).cause, depth++) {
+    if (cause instanceof NativeCompletionValidationError) return cause.code;
+  }
   if (error instanceof NativePermissionDeclinedError) return "native_permission_declined";
   if (error instanceof NativeProviderStateIncompatibleError) return NATIVE_PROVIDER_STATE_INCOMPATIBLE;
   if (error instanceof NativeProviderSideEffectPendingError) return NATIVE_PROVIDER_SIDE_EFFECT_PENDING;
@@ -9205,6 +9211,7 @@ export async function executePaperclipNativeSession(input: {
   restartRecovery?: NativeRestartRecoveryClaim;
   /** Release recovery preparation's renewal after execution owns its reference. */
   onExecutionLeaseAcquired?: () => Promise<void>;
+  beforeCompleteRun?: (result: Record<string, unknown>) => Promise<void>;
   onSpawn?: (meta: {
     pid: number;
     processGroupId: number | null;
@@ -10352,6 +10359,7 @@ async function executePaperclipNativeSessionAttempt(
         owner: { ...input.execution.binding, authorityRunId: input.execution.binding.runId,
           bootId: controller.bootId, leaseOwner, generation: controllerGeneration },
       } : undefined,
+      beforeCompleteRun: input.beforeCompleteRun,
       onResultCommitted: async () => {
         const at=Date.now();
         await trace.record({name:"completion.result_committed",parentName:"native.session.execute",startedAtMs:at,endedAtMs:at});

@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { executionWorkspaceRuntimeLeases, heartbeatRuns, issues } from "@paperclipai/db";
 import { conflict } from "../errors.js";
@@ -336,3 +336,19 @@ export function workspaceRuntimeLeaseService(db: Db) {
 }
 
 export type WorkspaceRuntimeLeaseService = ReturnType<typeof workspaceRuntimeLeaseService>;
+
+/** Read-only proof for a server-owned source handoff. Does not claim, renew,
+ * reclaim or release a lease. Keep the row locked until the handoff commits. */
+export async function workspaceRuntimeLeaseHeldByRun(tx: Pick<Db, "select">, input: {
+  companyId: string; workspaceId: string; issueId: string; runId: string; agentId: string;
+}): Promise<boolean> {
+  const [lease] = await tx.select({
+    ownerIssueId: executionWorkspaceRuntimeLeases.ownerIssueId, ownerRunId: executionWorkspaceRuntimeLeases.ownerRunId,
+    ownerAgentId: executionWorkspaceRuntimeLeases.ownerAgentId, ownerKey: executionWorkspaceRuntimeLeases.ownerKey,
+    live: sql<boolean>`${executionWorkspaceRuntimeLeases.expiresAt} > clock_timestamp()`,
+  }).from(executionWorkspaceRuntimeLeases).where(and(eq(executionWorkspaceRuntimeLeases.companyId, input.companyId),
+    eq(executionWorkspaceRuntimeLeases.executionWorkspaceId, input.workspaceId))).for("update");
+  return Boolean(lease?.live && lease.ownerIssueId === input.issueId && lease.ownerRunId === input.runId &&
+    lease.ownerAgentId === input.agentId && [buildWorkspaceRuntimeLeaseOwnerKey({ actorType: "agent", issueId: input.issueId }),
+      buildWorkspaceRuntimeLeaseOwnerKey({ actorType: "agent", runId: input.runId })].includes(lease.ownerKey));
+}

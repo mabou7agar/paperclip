@@ -1,0 +1,19 @@
+{
+  "sourceDocuments": {
+    "controller": "e3-operator-code-final64",
+    "observer": "e3-lifecycle-code-final64"
+  },
+  "files": [
+    {
+      "file": "qualify-final-source-candidate.py",
+      "baseSha256": "1098701186242830595e5aa41b38fb116f65a76df3c162d174756cb6ecc14578",
+      "patchedSha256": "1f35caf2a1361e59b575c277bc5774e66cebd4b07a713807ce1a93d884299d3e"
+    },
+    {
+      "file": "qualify-source-bundle-lifecycle.mjs",
+      "baseSha256": "cfde15a9cdd9f714cf3e7256d8be1ff2d8050109d857bcf43bb10aa0b1223f76",
+      "patchedSha256": "e14a20396101b40bb53f5dc20bb4d57c732916594a07f50991b12b467f87ccd5"
+    }
+  ],
+  "patchSha256": "f3aaaa4e74e3b19d02098c2d7d15964a94ad6008a692d1bb8ba817a86aa4339d"
+}

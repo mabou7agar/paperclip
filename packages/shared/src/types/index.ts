@@ -741,6 +741,7 @@ export type {
   IssueExecutionPolicy,
   RequiredQualityReview,
   QualityReviewBinding,
+  IssueSourceReviewCapture,
   IssueExecutionState,
   IssueExecutionStage,
   IssueExecutionStageParticipant,

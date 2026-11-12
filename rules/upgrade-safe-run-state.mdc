@@ -68,3 +68,30 @@ Persisted run identity includes:
 
 The release-compatibility contract is stated in
 [`doc/execution-semantics.md`](../doc/execution-semantics.md#94-release-compatibility-of-saved-run-state).
+
+
+## Source-review candidate rollback (A6c)
+
+The new server reads prior-release execution state without a source capture, but
+that state cannot acquire verified source standing without a fresh authorized
+writer handoff. It preserves the session, stage and workspace on refusal.
+
+The reverse direction is unsafe: prior releases strictly parse `reviewRequest`
+and do not understand `candidateSha` or `sourceReviewCapture`. They may decode the
+entire execution state as null and rebuild over saved decisions. Disabling source
+memory does not remove already-persisted fields and does not make rollback safe.
+
+Before any approved enablement, retain a compatible server artifact. The owner
+explicitly chose no backup for this rollout; do not create one or assume a
+pre-cutover restore is available. Quiesce writers and drain transactions for cutover.
+If a rollback is needed after a new receipt/typed candidate was saved, keep tasks
+and workers quiesced and use a compatible server that understands these fields.
+Never start the strict prior-release server against that database, strip fields,
+clear stages/sessions, or replay completion to make it decode. Restoring a
+pre-cutover backup loses later writes and requires a separate explicit CTO/data
+recovery decision and reconciliation plan; it is not an automatic rollback.
+The historical 987e3e0e / 67dfdeeb binary is unsafe from the first persisted bound
+source handoff: it cannot parse the new capture. After that point rollback means
+a compatible binary, never that strict older image. Pre-A6 pruning workers must
+also never touch retained source ledgers. No migration,
+rollback execution, state rewrite or activation is authorized by this document.
