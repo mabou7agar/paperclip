@@ -14370,6 +14370,40 @@ describe("native session bounded recovery", () => {
 });
 
 describe("native process ownership", () => {
+  it("strips provider source standing from both published completion envelopes without mutating citations", async () => {
+    const providerResult = {
+      summary: "Source standing belongs to the control plane",
+      sourceCitations: [{ repo: "synthetic/repository", fullSha: "a".repeat(40),
+        path: "fixture.ts", startLine: 1, endLine: 2, sha256: "b".repeat(64), mode: "current" }],
+      artifacts: [{ kind: "report", text: "Keep ordinary report fields" }],
+      sourceCitationResults: [{ standing: "provider-claimed" }],
+      sourceCurrentEvidenceSatisfied: "provider-claimed",
+    };
+    const original = structuredClone(providerResult);
+    state.execute.mockReset().mockResolvedValueOnce({
+      result: providerResult, terminal: { runTerminalState: "succeeded" },
+      turnId: "source-standing-turn", normalizedSessionId: execution.session.normalizedSessionId,
+      providerSessionId: "retained-provider-session", driverKind: "test", driverVersion: "1",
+      nativeEventCount: 1, highestContiguousSourceSeq: 1, usage: null,
+    });
+    const result = await executePaperclipNativeSession({
+      db: leaseDb(), execution, runnerInstanceId: "source-standing-publication",
+    });
+    const expected = { summary: original.summary, sourceCitations: original.sourceCitations, artifacts: original.artifacts };
+    expect(result.nativeFinalization?.result).toEqual(expected);
+    expect(result.resultJson?.nativeResult).toEqual(expected);
+    for (const published of [result.nativeFinalization?.result, result.resultJson?.nativeResult]) {
+      expect(published).not.toHaveProperty("sourceCitationResults");
+      expect(published).not.toHaveProperty("sourceCurrentEvidenceSatisfied");
+      expect(published).not.toBe(providerResult);
+    }
+    expect(providerResult).toEqual(original);
+    expect(result.summary).toBe(original.summary);
+    expect(result.sessionId).toBe(execution.session.normalizedSessionId);
+    expect(result.sessionDisplayId).toBe("retained-provider-session");
+    expect(state.execute).toHaveBeenCalledOnce();
+  });
+
   it("checks the complete wake-comment receipt before finalizing a successful provider turn", async () => {
     const expectedBinding = {
       schema: "paperclip.current-wake-comments-binding.v1",

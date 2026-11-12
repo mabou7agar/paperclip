@@ -127,6 +127,69 @@ describe.skipIf(!support.supported)("heartbeat runtime selection boundary", () =
     expect(await coordinators(f.run.id)).toHaveLength(1);
   });
 
+  it("native task context receives the final overridden model before the fresh prompt and input are frozen", async () => {
+    const { input, run } = await fixture();
+    input.config.issueAssigneeOverrides = { adapterConfig: { model: "gpt-6.1-sol" } };
+    input.prepareNativeTaskContext = vi.fn(async identity => {
+      expect(identity).toEqual({ provider: "codex", model: "gpt-6.1-sol", reviewAssigned: false });
+      expect(input.task.context.paperclipTaskMarkdown).toContain("prepared instruction guidance");
+      expect((await read(run.id)).runnerProfileJson ?? {}).not.toHaveProperty("nativeExecutionInput");
+      expect(await coordinators(run.id)).toEqual([]);
+      input.task.context.paperclipTaskMarkdown = String(input.task.context.paperclipTaskMarkdown ?? "") + "\nsource context from selected runtime";
+    });
+    const selected = await prepareAndSelectHeartbeatRuntime(db, input, {
+      measure: async (_phase, work) => work(),
+      prepareInstructions: async () => {
+        input.task.context.paperclipTaskMarkdown = String(input.task.context.paperclipTaskMarkdown ?? "") + "\nprepared instruction guidance";
+        return { runtimeConfig: {}, instructionCopy: null };
+      },
+    });
+    expect(input.prepareNativeTaskContext).toHaveBeenCalledOnce();
+    if (!selected.selected || !selected.nativeExecution) throw new Error("Expected native selection");
+    expect(selected.nativeExecution.provider).toMatchObject({ kind: "codex", model: "gpt-6.1-sol" });
+    expect(selected.nativeExecution.task.prompt).toContain("source context from selected runtime");
+    expect(selected.nativeExecution.task.prompt).toContain("prepared instruction guidance");
+  });
+
+  it("native task context uses saved attribution once without changing the admitted input on same-run resume", async () => {
+    const f = await fixture();
+    const selected = await selectHeartbeatRuntime(db, f.input);
+    if (!selected.selected || !selected.nativeExecution) throw new Error("Expected native selection");
+    const saved = await read(f.run.id);
+    f.input.run = saved;
+    f.input.session.persistedRunnerProfile = saved.runnerProfileJson ?? {};
+    f.input.session.persistedNativeExecutionInput = selected.nativeExecution;
+    f.input.agent.adapterConfig = { ...f.input.agent.adapterConfig, model: "gpt-6.1-astra" };
+    f.input.prepareNativeTaskContext = vi.fn(async identity => {
+      expect(identity).toEqual({ provider: "codex", model: "gpt-5.6-luna", reviewAssigned: false });
+    });
+    const resumed = await selectHeartbeatRuntime(db, f.input);
+    expect(f.input.prepareNativeTaskContext).toHaveBeenCalledOnce();
+    expect(resumed).toMatchObject({ selected: true, nativeExecution: selected.nativeExecution });
+    expect((await read(f.run.id)).runnerProfileJson).toEqual(saved.runnerProfileJson);
+  });
+
+  it("native task context refusal publishes no execution and retains one idempotent completion contract", async () => {
+    const f = await fixture();
+    const contracts = await import("../native-runtime/completion-contracts.js");
+    const ensure = vi.spyOn(contracts, "ensureNativeCompletionContract");
+    try {
+      f.input.prepareNativeTaskContext = vi.fn(async () => { throw new Error("source_memory_review_candidate_missing"); });
+      await expect(selectHeartbeatRuntime(db, f.input)).rejects.toThrow("source_memory_review_candidate_missing");
+      expect(f.input.prepareNativeTaskContext).toHaveBeenCalledOnce();
+      expect((await read(f.run.id)).runnerProfileJson ?? {}).not.toHaveProperty("nativeExecutionInput");
+      expect(await coordinators(f.run.id)).toEqual([]);
+      const before = await db.select().from(completionContracts).where(eq(completionContracts.issueId, f.issue.id));
+      expect(before).toHaveLength(1);
+      expect(ensure).toHaveBeenCalledOnce();
+      const contractInput = ensure.mock.calls[0]![0];
+      const same = await ensure(contractInput);
+      expect(same.row.revision).toBe(before[0]!.revision);
+      expect(await db.select().from(completionContracts).where(eq(completionContracts.issueId, f.issue.id))).toEqual(before);
+    } finally { ensure.mockRestore(); }
+
+  });
+
   it("preserves immutable native recovery when current local Runner configuration is invalid", async () => {
     const f = await fixture();
     const selected = await selectHeartbeatRuntime(db, f.input);

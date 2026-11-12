@@ -57,7 +57,7 @@ import { reconcileMuseNativeTerminalRun } from "./native-runtime/muse-terminal-r
 import { prepareHeartbeatWorkspace } from "./heartbeat/workspace-preparation.js";
 import { nativeRecoveryClaimRelinquished } from "./native-runtime/native-execution-lease.js";
 import { executeHeartbeatRuntime, NativeSessionResumeScheduledError, NativeWorkspaceFinalizeScheduledError } from "./heartbeat/runtime-execution.js";
-import { sourceReviewCandidateSha } from "./heartbeat/source-memory-run-state.js";
+import { sourceMemoryRunIdentity, sourceReviewCandidateSha, sourceReviewAssignedTo } from "./heartbeat/source-memory-run-state.js";
 import { attachSourceMemoryContext } from "./source-memory.js";
 import { readRemoteWorkspaceAuthority } from "./remote-workspaces.js";
 import { authorizeSourceCitation } from "./source-citation-authorization.js";
@@ -3472,43 +3472,59 @@ export function heartbeatService(
             companyId: run.companyId, issueId: issueRef?.id ?? "", workspaceId: persistedExecutionWorkspace?.id ?? null,
             bindingRevision: issueContext?.workspaceBindingRevision ?? -1,
           });
-        const sourceMemory = await timePreparation("source_memory", () => prepareHeartbeatSourceMemory({
-          identity: { companyId: run.companyId, projectId: executionWorkspace.projectId, issueId: issueRef?.id ?? "",
-            runId: run.id, phase: phaseRoute?.phase ?? null, provider: phaseRoute?.profile?.binding.provider ?? null,
-            model: phaseRoute?.profile?.model ?? null, signal: executionControl.controller.signal,
-            query: [issueRef?.title, issueRef?.description].filter(Boolean).join(" ").slice(0, 2000) },
-          persistedWorkspaceId: persistedExecutionWorkspace?.id ?? null,
-          workspace: executionWorkspace, recovering: !issueRef || Boolean(runOptions.nativeRestartRecovery),
-          // A handed-off candidate only narrows review admission; baseRef is never a snapshot.
-          frozenRevision: readNonEmptyString(context.reviewCandidateSha),
-          frozenScope: parseIssueExecutionState(issueContext?.executionState)?.sourceReviewCapture ?? null,
-          recordRevision: async revision => {
-            if (!persistedExecutionWorkspace) throw new Error("source_memory_task_binding_missing");
-            const sourceSnapshot = { workspaceId: persistedExecutionWorkspace.id, revision };
-            const [saved] = await db.update(heartbeatRuns).set({
-              contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || ${JSON.stringify({ sourceSnapshot })}::jsonb`,
-            }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
-              sql`${heartbeatRuns.contextSnapshot}->'sourceSnapshot' IS NULL`)).returning({ id: heartbeatRuns.id });
-            if (!saved) throw new Error("source_memory_snapshot_already_recorded");
-            context.sourceSnapshot = sourceSnapshot;
-          },
-          authorize: async admission => {
-            if (!issueRef || !persistedExecutionWorkspace) throw new Error("source_memory_task_binding_missing");
-            return authorizeSourceCitation(db, {
-              type: "agent", source: "agent_jwt", companyId: run.companyId, agentId: agent.id, runId: run.id,
-              onBehalfOfUserId: responsibleUserId === "local-board" ? null : responsibleUserId,
-            }, { companyId: run.companyId, issueId: issueRef.id, workspaceId: persistedExecutionWorkspace.id, admission });
-          },
-          authority: readRemoteWorkspaceAuthority(persistedExecutionWorkspace?.metadata),
-          remote: executionTarget?.kind === "remote" && executionTarget.transport === "sandbox" && !executionTarget.runnerTask && executionTarget.runner
-            ? { baseCwd: executionTarget.remoteCwd, execute: request => executionTarget.runner!.execute(request) } : null,
-          assertOwned: () => run.runtimeMode === "native"
-            ? assertNativeSessionPreparationAuthority({ db, companyId: run.companyId, runId: run.id, leaseOwner: runOptions.nativeLeaseOwner })
-            : controllerLease.assertOwned(),
-          readAuthority: async () => readRemoteWorkspaceAuthority(persistedExecutionWorkspace
-            ? (await executionWorkspacesSvc.getStoredById(run.companyId, persistedExecutionWorkspace.id))?.metadata : null),
-        }));
-        attachSourceMemoryContext(context, sourceMemory.evidence);
+        const recoveringSource = !issueRef || Boolean(runOptions.nativeRestartRecovery) || Boolean(persistedNativeExecutionInput);
+        const sourceMemoryState: { current: Awaited<ReturnType<typeof prepareHeartbeatSourceMemory>> | null } = { current: null };
+        const prepareRunSourceMemory = async (attribution: { provider: string | null; model: string | null; reviewAssigned?: boolean }) => {
+          if (sourceMemoryState.current) throw new Error("source_memory_prepared_twice");
+          const sourceRunIdentity = sourceMemoryRunIdentity({
+            route: phaseRoute?.profile ? { phase: phaseRoute.phase, provider: phaseRoute.profile.binding.provider, model: phaseRoute.profile.model } : null,
+            workMode: issueRef?.workMode ?? null,
+            ...attribution,
+            reviewAssigned: sourceReviewAssignedTo(parseIssueExecutionState(issueContext?.executionState), agent.id) || attribution.reviewAssigned === true,
+            recovering: recoveringSource,
+          });
+          sourceMemoryState.current = await timePreparation("source_memory", () => prepareHeartbeatSourceMemory({
+            identity: { companyId: run.companyId, projectId: executionWorkspace.projectId, issueId: issueRef?.id ?? "",
+              runId: run.id, ...sourceRunIdentity, signal: executionControl.controller.signal,
+              query: [issueRef?.title, issueRef?.description].filter(Boolean).join(" ").slice(0, 2000) },
+            persistedWorkspaceId: persistedExecutionWorkspace?.id ?? null,
+            workspace: executionWorkspace, recovering: recoveringSource,
+            // A handed-off candidate only narrows review admission; baseRef is never a snapshot.
+            frozenRevision: readNonEmptyString(context.reviewCandidateSha),
+            frozenScope: parseIssueExecutionState(issueContext?.executionState)?.sourceReviewCapture ?? null,
+            recordRevision: async revision => {
+              if (!persistedExecutionWorkspace) throw new Error("source_memory_task_binding_missing");
+              const sourceSnapshot = { workspaceId: persistedExecutionWorkspace.id, revision };
+              const [saved] = await db.update(heartbeatRuns).set({
+                contextSnapshot: sql`coalesce(${heartbeatRuns.contextSnapshot}, '{}'::jsonb) || ${JSON.stringify({ sourceSnapshot })}::jsonb`,
+              }).where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId),
+                sql`${heartbeatRuns.contextSnapshot}->'sourceSnapshot' IS NULL`)).returning({ id: heartbeatRuns.id });
+              if (!saved) throw new Error("source_memory_snapshot_already_recorded");
+              context.sourceSnapshot = sourceSnapshot;
+            },
+            authorize: async admission => {
+              if (!issueRef || !persistedExecutionWorkspace) throw new Error("source_memory_task_binding_missing");
+              return authorizeSourceCitation(db, {
+                type: "agent", source: "agent_jwt", companyId: run.companyId, agentId: agent.id, runId: run.id,
+                onBehalfOfUserId: responsibleUserId === "local-board" ? null : responsibleUserId,
+              }, { companyId: run.companyId, issueId: issueRef.id, workspaceId: persistedExecutionWorkspace.id, admission });
+            },
+            authority: readRemoteWorkspaceAuthority(persistedExecutionWorkspace?.metadata),
+            remote: executionTarget?.kind === "remote" && executionTarget.transport === "sandbox" && !executionTarget.runnerTask && executionTarget.runner
+              ? { baseCwd: executionTarget.remoteCwd, execute: request => executionTarget.runner!.execute(request) } : null,
+            assertOwned: () => run.runtimeMode === "native"
+              ? assertNativeSessionPreparationAuthority({ db, companyId: run.companyId, runId: run.id, leaseOwner: runOptions.nativeLeaseOwner })
+              : controllerLease.assertOwned(),
+            readAuthority: async () => readRemoteWorkspaceAuthority(persistedExecutionWorkspace
+              ? (await executionWorkspacesSvc.getStoredById(run.companyId, persistedExecutionWorkspace.id))?.metadata : null),
+          }));
+          attachSourceMemoryContext(context, sourceMemoryState.current.evidence);
+        };
+        // Fresh native attribution arrives after overrides/defaults/compatibility
+        // selection, before its prompt is built. Recovery never reindexes HEAD.
+        if (nativeRuntimeResolution.kind !== "native") {
+          await prepareRunSourceMemory({ provider: aiBinding?.provider ?? null, model: configuredModel });
+        }
         const runtimeSelection = await prepareAndSelectHeartbeatRuntime(db, {
           run,
           agent,
@@ -3566,6 +3582,9 @@ export function heartbeatService(
           issuesSvc,
           runtimeEnv,
           beforeNativeRuntimeSelection: options.beforeNativeRuntimeSelection,
+          prepareNativeTaskContext: nativeIdentity => prepareRunSourceMemory({
+            provider: aiBinding?.provider ?? nativeIdentity.provider, model: nativeIdentity.model, reviewAssigned: nativeIdentity.reviewAssigned,
+          }),
           onAdapterEvent,
           onNativeLifecycleSelected: (telemetry) => {
             nativeLifecycleTelemetryForRun = telemetry;
@@ -3585,6 +3604,8 @@ export function heartbeatService(
           },
         });
         if (!runtimeSelection.selected) return;
+        const sourceMemory = sourceMemoryState.current;
+        if (!sourceMemory) throw new Error("source_memory_not_prepared");
         const { nativeExecution, nativeRunnerInstanceId, getNativeFreshSessionHandoff } = runtimeSelection;
         nativeWorkspaceSync = runtimeSelection.nativeWorkspaceSync;
         const execution = await measureRunPhase("execution.runtime", () => executeHeartbeatRuntime(db, {
