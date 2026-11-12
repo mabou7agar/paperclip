@@ -29,3 +29,13 @@ export class NativeCompletionValidation {
     }
   }
 }
+
+
+/** These values are server-owned run evidence, never provider result claims.
+ * Copy before removing them so validation cannot mutate the caller's result. */
+export function stripNativeSourceStanding<T extends object>(result: T): T {
+  const accepted = { ...result };
+  delete (accepted as Record<string, unknown>).sourceCitationResults;
+  delete (accepted as Record<string, unknown>).sourceCurrentEvidenceSatisfied;
+  return accepted;
+}

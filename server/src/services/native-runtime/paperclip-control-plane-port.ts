@@ -1,4 +1,4 @@
-import { NativeCompletionValidation } from "./completion-validation.js";
+import { NativeCompletionValidation, stripNativeSourceStanding } from "./completion-validation.js";
 import { notifyNativeResultCommit } from "../native-result-commit-notifications.js";
 import { notifyNativeWorkspaceFinalization } from "../native-workspace-finalization-notifications.js";
 import { createAgentIdentityRedactor } from "../agent-identity-redaction.js";
@@ -532,13 +532,15 @@ export class PaperclipControlPlanePort implements ControlPlanePort {
     if (validated.result.reportedWorkDisposition !== value.terminal.reportedWorkDisposition) {
       throw new Error("native_result_terminal_disposition_mismatch");
     }
+    let acceptedResult = stripNativeSourceStanding(validated.result);
     // Source validation performs bounded reads outside the acceptance transaction.
     // A rejection must precede accepted-result insertion and native finalization.
-    if (this.#beforeCompleteRun) await this.#completionValidation.validate(validated.result as unknown as Record<string, unknown>, this.#beforeCompleteRun);
+    if (this.#beforeCompleteRun) await this.#completionValidation.validate(acceptedResult as unknown as Record<string, unknown>, this.#beforeCompleteRun);
+    acceptedResult = stripNativeSourceStanding(acceptedResult);
     this.#assertActive(options);
     const canonical = {
       binding: this.#binding,
-      result: validated.result,
+      result: acceptedResult,
       terminal: value.terminal,
       turnId: value.turnId ?? null,
     };
@@ -584,7 +586,7 @@ export class PaperclipControlPlanePort implements ControlPlanePort {
       }
       if (owner?.resultId) throw new Error("structured_result_replay_conflict");
       const resultJson = {
-        result: validated.result,
+        result: acceptedResult,
         terminal: value.terminal,
         normalizationDiagnostics: {
           ignoredAttentionRequests: normalizationDiagnostics.ignoredAttentionRequests,

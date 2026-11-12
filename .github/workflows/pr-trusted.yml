@@ -144,6 +144,15 @@ jobs:
           test -f "$SOURCE_MEMORY_BUILT_SERVICE"
       - name: Source memory Node contract tests (.mjs)
         run: node scripts/source-memory/run-tests.mjs
+      - name: Native reserved standing fields and digit-bearing worker refusal
+        run: >-
+          node --experimental-vm-modules --experimental-test-module-mocks --test
+          server/src/services/native-runtime/native-standing-fields.test.mjs
+          server/src/services/source-memory-worker-refusal.test.mjs
+      - name: F2 offline operator safety guards
+        run: |
+          python3 scripts/source-memory/operator-f2/test_safety.py
+          node --test scripts/source-memory/operator-f2/observer.test.mjs
       - name: Source review stage advancement
         run: node --experimental-vm-modules --test scripts/source-memory/review-stage.test.mjs
       - name: Setup pnpm

@@ -276,9 +276,11 @@ not PRP-schema or full native-provider acceptance.
 The second fixture checks prepared evidence, structured consumption and
 historical-only rejection in planning, implementation and review, plus disabled
 and previous recovery behavior. It mocks source preparation, independently of
-the real authorization/Git fixture. Full server semantic typecheck was not run:
-no local TypeScript compiler or repository dependencies are installed, and
-installation is prohibited. Syntax checks are not semantic typechecking.
+the real authorization/Git fixture. These historical local fixtures establish
+only their stated scope; syntax checks are not semantic typechecking. The later
+E3 operator receipt on `64e4fa75` records the 2,035-file production semantic pass
+and separate emit/assets/bundle checks; it does not retroactively broaden these
+local fixtures or claim a test-layer semantic pass.
 Assembled server, remote provider confinement, live journeys, scale checks and
 activation remain outside this candidate. No production/previous ledger/cache,
 indexing, DB connection, installation, activation, merge or deployment occurred.
@@ -534,3 +536,57 @@ Reviews whose saved capture no longer matches scope also remain held for that
 same governed writer path. Enablement and recovery are not authorized here.
 JSON null, arrays and primitive configuration envelopes refuse with
 `source_memory_configuration_invalid` before any reader or authorization work.
+
+
+## F2 activation recovery runbook (documentation; enablement remains gated)
+
+Before any enablement, complete the F2 independent review and CTO acceptance,
+apply the reviewed operator tooling patch before reusing that controller for
+post-deploy or A3 evidence, and verify the reserved native result fields cannot
+be provider-supplied. Source acceptance is not permission to enable indexing.
+Capture can hold issue/workspace/run row locks for up to the worker's 180-second
+bound while reading clean final HEAD; allow that bounded settlement during
+quiescence and never clear locks, stages or sessions to accelerate cutover.
+
+- **Disable:** unset `PAPERCLIP_SOURCE_MEMORY_CONFIG` in the approved deployment
+  configuration and restart. This returns new work to default-off; it does not
+  remove saved captures, accepted results or retained provenance. Do not rewrite
+  those records as part of disablement.
+- **Runaway worker/cancel:** the bounded-lifetime watchdog/reaper owns termination
+  of its worker group. The accepted E3 A3 proof records actual SIGKILL 9 and zero
+  running group members. An authorized operator checks the recorded group and
+  start identity, confirms no running group members and no worker execution after
+  cancel, and retains the terminal reaper/cleanup receipt. Do not signal a reused
+  PID or extend/restart a failed qualification without a new bounded decision.
+- **Retention:** the named compatibility entry points are
+  `initializeSourceMemoryRetention` and `cleanupSourceMemoryRetention` in
+  `server/src/services/source-memory.ts`. On accepted `64e4fa75`, both are inert:
+  legacy/new `facts` and `observations` are retained, without expiry or pruning.
+  `SOURCE_MEMORY_RETENTION` (30 days / 10,000 facts / 2,000 observations) is a
+  proposal only. Verify against the accepted source and the focused synthetic
+  `legacy provenance is retained without migration or pruning` receipt; do not
+  claim an expiry run or perform ad-hoc production deletes. The F2 CTO brief
+  calls expiry cleanup accepted, which conflicts with this actual source and
+  the earlier retained-provenance contract. That discrepancy is recorded for
+  lead/CTO disposition before enablement; this documentation enables no cleanup.
+- **Full binary rollback target:** the CTO specifies release `987e3e0e`, image
+  `67dfdeeb`. Keep config unset, quiesce/drain writers and preserve evidence before
+  any authorized rollback. No migration is introduced by F2. This target is safe
+  only while its strict parser can decode all persisted review state: disabling
+  configuration alone cannot erase new `candidateSha`/`sourceReviewCapture` fields.
+  If those fields have been saved, follow `rules/upgrade-safe-run-state.mdc`:
+  keep work quiesced, preserve state, and use a compatible binary or a separate
+  explicit CTO data-recovery disposition. Do not strip fields, restore a backup,
+  clear stages/sessions or replay completion as an automatic rollback workaround.
+
+Reviews already pending without a capture follow the E2 runbook above: an
+existing authorized changes-request returns work to its writer for a fresh
+leased handoff. A reviewer never manufactures capture authority from its HEAD.
+
+F2 strips the two reserved standing fields before native validation guards and
+again before canonical hashing/persistence. Server-computed evidence remains on
+its existing company/run-scoped path. Existing accepted records are preserved;
+no stored result or fingerprint is migrated. A replay against a pre-F2 accepted
+result containing those extra fields can encounter the existing named
+`structured_result_replay_conflict`; it must preserve that record/session and
+must not trigger a provider rerun or erase the accepted receipt.

@@ -73,6 +73,7 @@ function load(id) {
       else if (name === 'normalizePrpResultSignals') exports[name] = () => ({ ignoredAttentionRequests: [] });
       else if (name === 'validatePrpStructuredRunResult') exports[name] = result => ({ ok: true, result });
       else if (name === 'nativeSha256') exports[name] = () => 'synthetic-fingerprint';
+      else if (['notifyNativeResultCommit', 'notifyNativeWorkspaceFinalization', 'crashPoint'].includes(name)) exports[name] = () => {}; // fixture-only side effects, not delivery/notification proof
       else if (name === 'logger') exports[name] = { warn() {}, info() {} };
       else exports[name] = unexpected(name);
     }

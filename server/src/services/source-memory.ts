@@ -178,7 +178,7 @@ function runWorker(payload: WorkerInput, signal?: AbortSignal, remoteRead?: Remo
     child.on("error", error => { failure = error; });
     child.on("close", code => {
       clearTimeout(timer); signal?.removeEventListener("abort", abort);
-      if (failure || code !== 0) { reject(failure ?? new Error(/^source_memory_[a-z_]+$/.test(output.trim()) ? output.trim() : "source_memory_worker_failed")); return; }
+      if (failure || code !== 0) { reject(failure ?? new Error(/^source_memory_[a-z0-9_]+$/.test(output.trim()) ? output.trim() : "source_memory_worker_failed")); return; }
       try { resolve(JSON.parse(output)); } catch { reject(new Error("source_memory_invalid_receipt")); }
     });
     child.on("message", async (message: any) => {
@@ -443,7 +443,7 @@ if (process.argv[2] === "--source-memory-worker") {
   let input = "";
   for await (const chunk of process.stdin) { input += chunk; requireValue(Buffer.byteLength(input) <= 1_048_576, "input_budget"); }
   try { process.stdout.write(JSON.stringify(await worker(JSON.parse(input)))); }
-  catch (error) { const known = error as { code?: string }; const message = known.code === "STALE_SOURCE" ? "source_memory_stale_source" : error instanceof Error ? error.message : ""; process.stdout.write(/^source_memory_[a-z_]+$/.test(message) ? message : "source_memory_worker_failed"); process.exitCode = 1; }
+  catch (error) { const known = error as { code?: string }; const message = known.code === "STALE_SOURCE" ? "source_memory_stale_source" : error instanceof Error ? error.message : ""; process.stdout.write(/^source_memory_[a-z0-9_]+$/.test(message) ? message : "source_memory_worker_failed"); process.exitCode = 1; }
   releaseGuard();
   if (process.connected) process.disconnect();
 }
