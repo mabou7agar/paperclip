@@ -148,6 +148,8 @@ export interface HeartbeatRuntimeSelectionInput {
   issuesSvc: Pick<ReturnType<typeof issueService>, "addComment">;
   runtimeEnv: Record<string, string | undefined>;
   beforeNativeRuntimeSelection?: (runId: string) => Promise<void>;
+  /** Prepare optional task context using the final native provider/model before prompt construction. */
+  prepareNativeTaskContext?: (identity: { provider: string; model: string | null; reviewAssigned: boolean }) => Promise<void>;
   onAdapterEvent: (event: AdapterRuntimeEvent) => Promise<void>;
   // Teardown must observe these updates even when a later preparation step throws.
   onNativeLifecycleSelected: (telemetry: NativeLifecycleTelemetry) => void;
@@ -567,6 +569,11 @@ export async function selectHeartbeatRuntime(db: Db, input: HeartbeatRuntimeSele
         throw new Error(
           "native_execution_input_persisted_binding_mismatch",
         );
+      await input.prepareNativeTaskContext?.({
+        provider: nativeExecution.provider.kind,
+        model: "model" in nativeExecution.provider && typeof nativeExecution.provider.model === "string" ? nativeExecution.provider.model : null,
+        reviewAssigned: nativeReview !== null,
+      });
       if ("runtimeContext" in nativeExecution) {
         const savedVersions = parseObject(run.contextSnapshot?.skillVersions);
         const accessibleKeys = new Set(runtimeSkillEntries.filter(entry => entry.sourceStatus !== "missing").map(entry => entry.key));
@@ -773,6 +780,7 @@ export async function selectHeartbeatRuntime(db: Db, input: HeartbeatRuntimeSele
             backend: nativeRuntimeResolution.profile.backend,
             adapterConfig: nativeProviderConfig, codexCliVersion, managedProfile, agentCoreProfile, dotBinding, museBinding,
           }) : requestedNativeProvider;
+      await input.prepareNativeTaskContext?.({ provider: nativeProvider.provider, model: nativeProvider.model, reviewAssigned: nativeReview !== null });
       if (nativeProvider.model !== requestedNativeProvider.model) {
         await postNativeModelFallbackWarning({
           issuesSvc, onEvent: onAdapterEvent, issueId: issueRef.id, runId: run.id,

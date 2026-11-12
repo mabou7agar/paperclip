@@ -121,3 +121,21 @@ requests; Bruno runner execution is not claimed. Documentation additions do not
 repeat the curl fixture, semantic compiler, Postgres, synthetic or CI checks.
 Hosted CI, full Rust rebuild, full UI qualification and live provider dispatch
 are separate from this source/API fixture evidence.
+
+### Native Runner attribution
+
+Fresh native Runner tasks use the final selected provider and model after task
+overrides, defaults and compatibility selection
+when no legacy phase-routing profile exists. The task work mode determines
+planning or implementation; a pending review assigned to the current participant determines review, even
+when its capture is missing or invalid (which holds the review). Phase-routed tasks retain their selected profile.
+This attribution grants no task or repository access. Restart recovery retains
+its existing refusal for an unverified old source snapshot, preserves the saved
+session and context, and never substitutes a newly edited live model for it.
+
+An interaction-only native review does not itself produce a writer capture. On a
+bound source workspace it therefore refuses with `source_memory_review_candidate_missing`
+before any source read; artifact-only review workspaces should stay unbound.
+Native preparation may ensure an idempotent completion contract and materialize
+response inputs before source validation. Neither starts a provider or accepts
+work. Model-fallback warnings are published only after source validation succeeds.
