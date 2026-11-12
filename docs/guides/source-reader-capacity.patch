@@ -1,0 +1,181 @@
+diff --git a/CAPACITY.md b/CAPACITY.md
+new file mode 100644
+index 0000000..2eafad6
+--- /dev/null
++++ b/CAPACITY.md
+@@ -0,0 +1,7 @@
++# Aggregate content capacity
++
++`Memory({ maxContentBytes })` optionally configures the aggregate content budget. Omission preserves the existing `limits.maxBytes` default. Only a positive safe integer is accepted. The effective budget is enforced before continuing a partial manifest and on unchanged complete manifests as well as each new batch. Explicitly configured budgets are recorded on subsequent manifests.
++
++This budget does not change file eligibility, per-file size, ordering, Git revision or the immutable saved source plan. Changing it therefore resumes the existing cursor and blob cache; it does not rewrite the plan, delete state or reread completed blobs. The original `limits` object and identity remain unchanged. Changing filtering limits still rejects the plan. Budget changes are operator configuration and never derived from repository content.
++
++This isolated vendored repository imports exactly the 38 code files from approved reader archive c55edff7ab8b991fee2ce4a1a5fd6bd20d16ec113e50834d94322e5cb1f0df13 (original reader revision 9c477cebfff7383d1b8c2b7064fcc5462a02f039). Its Git baseline is a new import commit, not a claim of original Git ancestry. Runtime manifests include only the original 38 code paths; tests and this document are not loaded in production.
+diff --git a/capacity.test.mjs b/capacity.test.mjs
+new file mode 100644
+index 0000000..af577eb
+--- /dev/null
++++ b/capacity.test.mjs
+@@ -0,0 +1,84 @@
++import { test } from 'node:test';
++import assert from 'node:assert/strict';
++import { mkdtemp, writeFile, rm, mkdir } from 'node:fs/promises';
++import { existsSync } from 'node:fs';
++import { execFileSync } from 'node:child_process';
++import { tmpdir } from 'node:os';
++import path from 'node:path';
++import { Memory } from './memory.mjs';
++
++const scope = {companyId:'capacity-company',projectId:'capacity-project',repositoryId:'capacity-repository'};
++const limits = {maxFiles:20,maxFileBytes:256000,maxBytes:10};
++const env = {...process.env,GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:'/dev/null',GIT_TERMINAL_PROMPT:'0'};
++async function fixture(run) {
++  const root = await mkdtemp(path.join(tmpdir(),'source-capacity-'));
++  const repo = path.join(root,'repo'), state = path.join(root,'state'); await mkdir(repo);
++  const git = (...args) => execFileSync('git',['-c','core.hooksPath=/dev/null','-c','core.fsmonitor=false','-C',repo,...args],{env,encoding:'utf8'}).trim();
++  try {
++    git('init','--quiet'); git('config','user.name','Capacity fixture'); git('config','user.email','fixture@example.invalid');
++    for (const [file,content] of [['a.ts','alpha\n'],['b.ts','beta\n'],['c.ts','gamma\n']]) await writeFile(path.join(repo,file),content);
++    git('add','.'); git('commit','--quiet','-m','Immutable capacity fixture');
++    const revision = git('rev-parse','HEAD');
++    const open = options => new Memory({state,bindings:[{scope,root:repo}],limits,...options});
++    await run({root,state,revision,open});
++  } finally { await rm(root,{recursive:true,force:true}); }
++}
++
++test('aggregate budget resumes a committed cursor without changing its file plan or rereading completed blobs', () => fixture(async ({revision,open}) => {
++  let memory = open(); let before;
++  try {
++    const partial = await memory.refresh(scope,{oneBatch:true,batchSize:1});
++    assert.equal(partial.cursor,1); assert.equal(partial.status,'indexing'); assert.equal(memory.reads,1);
++    before = memory.repository.sourcePlan(scope,revision);
++  } finally { memory.close(); }
++  memory = open({maxContentBytes:32});
++  try {
++    const result = await memory.refresh(scope,{batchSize:1});
++    assert.equal(result.status,'complete'); assert.equal(result.cursor,3); assert.equal(result.blobReads,2);
++    assert.deepEqual(memory.repository.sourcePlan(scope,revision),before);
++    const manifest=memory.repository.manifest(scope,revision);
++    assert.equal(manifest.maxContentBytes,32); assert.equal(manifest.bytes,17);
++    const duplicate=await memory.refresh(scope);
++    assert.equal(duplicate.status,'unchanged'); assert.equal(duplicate.blobReads,0);
++  } finally { memory.close(); }
++}));
++
++test('omitted budget retains the default hard stop and committed partial manifest', () => fixture(async ({revision,open}) => {
++  const memory=open();
++  try {
++    await memory.refresh(scope,{oneBatch:true,batchSize:1});
++    await assert.rejects(memory.refresh(scope,{batchSize:1}),e=>e.code==='INDEX_BUDGET');
++    const manifest=memory.repository.manifest(scope,revision);
++    assert.equal(manifest.cursor,1); assert.equal(manifest.status,'indexing');
++    assert.equal(Object.hasOwn(manifest,'maxContentBytes'),false);
++  } finally {memory.close();}
++}));
++
++test('a reduced aggregate budget rejects an unchanged complete index without deleting it', () => fixture(async ({revision,open}) => {
++  let memory=open({maxContentBytes:32});
++  try {await memory.refresh(scope,{batchSize:1});} finally {memory.close();}
++  memory=open({maxContentBytes:8});
++  try {
++    await assert.rejects(memory.refresh(scope),e=>e.code==='INDEX_BUDGET');
++    assert.equal(memory.reads,0);assert.equal(memory.repository.manifest(scope,revision).status,'complete');
++    assert.equal(memory.repository.documents(scope,revision).length,3);
++  } finally {memory.close();}
++}));
++
++test('aggregate capacity cannot disguise a changed filtering limit', () => fixture(async ({revision,open}) => {
++  let memory=open();let before;
++  try {await memory.refresh(scope,{oneBatch:true,batchSize:1});before=memory.repository.sourcePlan(scope,revision);} finally {memory.close();}
++  memory=open({maxContentBytes:32,limits:{...limits,maxFileBytes:128000}});
++  try {
++    await assert.rejects(memory.refresh(scope,{batchSize:1}),e=>e.code==='MANIFEST_CHANGED');
++    assert.deepEqual(memory.repository.sourcePlan(scope,revision),before);
++    assert.equal(memory.reads,0);assert.equal(memory.repository.manifest(scope,revision).cursor,1);
++  } finally {memory.close();}
++}));
++
++test('invalid aggregate capacity refuses before creating a state directory', () => fixture(async ({state,open}) => {
++  for (const value of [0,-1,1.5,'32',Number.MAX_SAFE_INTEGER+1]) {
++    assert.throws(()=>open({maxContentBytes:value}),e=>e.code==='INVALID_REQUEST');
++    assert.equal(existsSync(state),false);
++  }
++}));
+diff --git a/memory.mjs b/memory.mjs
+index 79cd290..7b5f866 100644
+--- a/memory.mjs
++++ b/memory.mjs
+@@ -9,7 +9,8 @@ import {ScopeDTO} from './reference/paperclip-knowledge/src/dtos/ScopeDTO.mjs';
+ const identity = value => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+ /** Approved bindings are operator configuration, never query input. Single writer per ledger. */
+ export class Memory {
+- constructor({state, bindings, limits={maxFiles:50000,maxFileBytes:256000,maxBytes:134217728}}) {
++ constructor({state, bindings, maxContentBytes, limits={maxFiles:50000,maxFileBytes:256000,maxBytes:134217728}}) {
++  KnowledgeService.validateMaxContentBytes(maxContentBytes);
+   mkdirSync(state,{recursive:true,mode:0o700});
+   this.repository=new KnowledgeRepository(`${state}/knowledge-v3.sqlite`);
+   this.bindings=bindings; this.reads=0; this.context=new AsyncLocalStorage();
+@@ -27,7 +28,7 @@ export class Memory {
+    missing.forEach((f,i)=>insert.run(key,f.blob,JSON.stringify(read[i])));
+    return files.map((f,i)=>({...JSON.parse(cache[i]?.payload??JSON.stringify(read[missing.indexOf(f)])),path:f.path}));
+   };
+-  this.knowledge=new KnowledgeService({repository:this.repository,sources:this.sources,projects:{repository:async scope=>this.binding(scope)}});
++  this.knowledge=new KnowledgeService({repository:this.repository,sources:this.sources,maxContentBytes,projects:{repository:async scope=>this.binding(scope)}});
+  }
+  binding(scope) {
+   const dto=new ScopeDTO(scope);
+@@ -39,6 +40,7 @@ export class Memory {
+   const revision=(await this.sources.command(binding.root,['rev-parse','HEAD'])).trim();
+   this.reads=0;
+   const previous=this.repository.manifest(dto,revision);
++  this.knowledge.assertContentBudget(previous);
+   // An unchanged event performs only HEAD resolution: no tree scan and no provider/wake.
+   // Phase consumers must additionally verify tracked checkout freshness.
+   if(previous?.status==='complete') {
+diff --git a/reference/paperclip-knowledge/src/services/KnowledgeService.mjs b/reference/paperclip-knowledge/src/services/KnowledgeService.mjs
+index 640aba7..9775f66 100644
+--- a/reference/paperclip-knowledge/src/services/KnowledgeService.mjs
++++ b/reference/paperclip-knowledge/src/services/KnowledgeService.mjs
+@@ -6,7 +6,20 @@ const digest = value => createHash('sha256').update(JSON.stringify(value)).diges
+ const termsFor = query => [...new Set(query.toLocaleLowerCase().match(/[\p{L}\p{N}_]{2,}/gu) ?? [])].slice(0, 16);
+ 
+ export class KnowledgeService {
+-    constructor({repository, sources, projects}) { this.repository = repository; this.sources = sources; this.projects = projects; }
++    static validateMaxContentBytes(maxContentBytes) {
++        requireCondition(maxContentBytes === undefined || Number.isSafeInteger(maxContentBytes) && maxContentBytes > 0,
++            'INVALID_REQUEST', 'maxContentBytes must be a positive safe integer');
++    }
++    constructor({repository, sources, projects, maxContentBytes}) {
++        KnowledgeService.validateMaxContentBytes(maxContentBytes);
++        this.repository = repository; this.sources = sources; this.projects = projects;
++        this.maxContentBytes = maxContentBytes;
++    }
++    assertContentBudget(manifest) {
++        const maximum = this.maxContentBytes ?? this.sources.limits.maxBytes;
++        requireCondition((manifest?.bytes ?? 0) <= maximum, 'INDEX_BUDGET', 'Repository exceeds the content budget');
++        return maximum;
++    }
+     async root(scope) {
+         // The gateway must resolve an approved company/project/repository association.
+         const approved = await this.projects.repository(scope);
+@@ -27,6 +40,7 @@ export class KnowledgeService {
+         }
+         const {identity, totalFiles} = plan;
+         const previous = this.repository.manifest(request.scope, request.revision);
++        const maximum = this.assertContentBudget(previous);
+         requireCondition(!previous || previous.identity === identity, 'MANIFEST_CHANGED', 'Index parameters changed; a new ledger is required');
+         requireCondition(previous?.status !== 'stale', 'STALE_SOURCE', 'A stale manifest cannot be reactivated; reindex a new revision');
+         if (previous?.status === 'complete') return previous;
+@@ -38,10 +52,11 @@ export class KnowledgeService {
+         let bytes = previous?.bytes ?? 0;
+         for (const document of await this.sources.readBatch(root, files)) {
+             if (document.excluded) excluded.push({path: document.path, reason: document.excluded});
+-            else { bytes += document.size; requireCondition(bytes <= this.sources.limits.maxBytes, 'INDEX_BUDGET', 'Repository exceeds the content budget'); documents.push(document); }
++            else { bytes += document.size; requireCondition(bytes <= maximum, 'INDEX_BUDGET', 'Repository exceeds the content budget'); documents.push(document); }
+         }
+         requireCondition(await this.sources.freshness(root, request.revision) === null, 'STALE_SOURCE', 'Source changed during indexing');
+         return this.repository.saveBatch(request.scope, request.revision, {identity, schema: 1, revision: request.revision,
++            ...(this.maxContentBytes === undefined ? {} : {maxContentBytes: maximum}),
+             status: end === totalFiles ? 'complete' : 'indexing', cursor: end, totalFiles, bytes, excluded}, documents);
+     }
+     async verifiedDocuments(scope, revision) {
