@@ -144,8 +144,6 @@ jobs:
           test -f "$SOURCE_MEMORY_BUILT_SERVICE"
       - name: Source memory Node contract tests (.mjs)
         run: node scripts/source-memory/run-tests.mjs
-      - name: Source review stage advancement
-        run: node --experimental-vm-modules --test scripts/source-memory/review-stage.test.mjs
       - name: Setup pnpm
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
@@ -236,6 +234,10 @@ jobs:
           node-version: 24
           package-manager-cache: false
 
+      - name: Source memory fixture-free contracts
+        run: node scripts/source-memory/run-tests.mjs --fixture-free
+      - name: Source review stage advancement
+        run: node --experimental-vm-modules --test scripts/source-memory/review-stage.test.mjs
       - name: Native reserved standing fields and digit-bearing worker refusal
         run: >-
           node --experimental-vm-modules --experimental-test-module-mocks --test

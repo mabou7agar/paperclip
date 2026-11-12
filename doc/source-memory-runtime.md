@@ -508,7 +508,7 @@ reader (`SOURCE_MEMORY_READER_FIXTURE`) and the qualified emitted service for th
 exact checked-out source (`SOURCE_MEMORY_BUILT_SERVICE`) on that runner before
 enabling it. Missing files fail loudly. This source patch provisions neither,
 activates no repository variable and claims no hosted Actions execution.
-The lane runs all nine Node suites and the review-stage and transaction suites.
+The lane runs all ten Node suites and the review-stage and transaction suites.
 Only that lane sets `PAPERCLIP_SOURCE_MEMORY_TESTS=1` to include the transaction
 suite; later normal policy checks are independent of its fixture result.
 
@@ -564,17 +564,10 @@ quiescence and never clear locks, stages or sessions to accelerate cutover.
   start identity, confirms no running group members and no worker execution after
   cancel, and retains the terminal reaper/cleanup receipt. Do not signal a reused
   PID or extend/restart a failed qualification without a new bounded decision.
-- **Retention:** the named compatibility entry points are
-  `initializeSourceMemoryRetention` and `cleanupSourceMemoryRetention` in
-  `server/src/services/source-memory.ts`. On accepted `64e4fa75`, both are inert:
-  legacy/new `facts` and `observations` are retained, without expiry or pruning.
-  `SOURCE_MEMORY_RETENTION` (30 days / 10,000 facts / 2,000 observations) is a
-  proposal only. Verify against the accepted source and the focused synthetic
-  `legacy provenance is retained without migration or pruning` receipt; do not
-  claim an expiry run or perform ad-hoc production deletes. The F2 CTO brief
-  calls expiry cleanup accepted, which conflicts with this actual source and
-  the earlier retained-provenance contract. That discrepancy is recorded for
-  lead/CTO disposition before enablement; this documentation enables no cleanup.
+- **Retention:** the compatibility exports in `source-memory.ts` now call the
+  bounded `source-memory-retention.ts` implementation, superseding the no-op
+  behavior accepted at historical `64e4fa75` / F2. The current bounds and exact
+  legacy/rollback behavior are documented above and below; no ad-hoc deletes.
 - **Full binary rollback target:** the CTO specifies release `987e3e0e`, image
   `67dfdeeb`. Keep config unset, quiesce/drain writers and preserve evidence before
   any authorized rollback. No migration is introduced by F2. This target is safe
@@ -598,16 +591,22 @@ result containing those extra fields can encounter the existing named
 must not trigger a provider rerun or erase the accepted receipt.
 
 
-### Pilot retention monitoring
+### Retention monitoring and rollback
 
-At every post-deploy check, record each private `runtime.sqlite` file size and
-its `facts` / `observations` row counts. Until retention is enabled in a separately
-reviewed change, the first single-binding pilot retains provenance without
-pruning. Disable the feature by unsetting `PAPERCLIP_SOURCE_MEMORY_CONFIG` and
-restarting if rows exceed 10,000 facts or 2,000 observations, known retained age
-exceeds 30 days, or the state file grows beyond 1 GiB. Do not delete records by
-hand. Unknown-age legacy provenance is not evidence of a known age. Broadening
-beyond that pilot requires the separately tested retention implementation.
+The bounded runtime retention implementation above is active from this release,
+including the first binding. At every post-deploy check, record each private
+`runtime.sqlite` file size and `facts` / `observations` row counts. Disable by
+unsetting `PAPERCLIP_SOURCE_MEMORY_CONFIG` and restarting if either count exceeds
+10,000 / 2,000 or the state file exceeds 1 GiB. Do not delete by hand. Known-age
+runtime rows expire after 30 days; source and reader history and event/ref keys
+remain intact. Unknown-age legacy rows are retained. If legacy rows reach either
+limit, new work refuses with `source_memory_retention_legacy_budget`; disable
+and escalate for an explicitly reviewed archive/migration policy. A binary
+rollback must disable the feature first. Older binaries write NULL timestamps;
+a later upgrade treats these as legacy, never inventing an age or silently
+retaining zero new provenance at the limit. Mixed workers are unsupported.
 
-Fixture-free native standing-field, worker-refusal and operator guard tests run
-in the ordinary policy lane even when the reader-dependent job is disabled.
+Fixture-free binding, current-evidence, citation-consumer, lifetime/retention,
+run-state, standing-field, worker-refusal and operator guard tests run in the
+ordinary policy lane even when the reader-dependent job is disabled. The separate
+PostgreSQL standing persistence test runs in the ordinary server test shards.

@@ -14,8 +14,11 @@ const fixtures = ['source-citation-authorization.ts','task-workspace-access.ts',
 const tests = ['source-memory-binding','source-memory-current','source-citation-consumer','source-memory-lifetime-retention','source-memory-retention','heartbeat/source-memory-run-state'];
 tests.push('source-memory','source-memory-events','source-memory-blob-integrity','heartbeat/source-memory-admission');
 // Local focused checks may select changed suites; CI always executes the entire roster.
-const selected = process.argv.slice(2);
-if (selected.length && process.env.CI) throw new Error('CI must run all source-memory suites');
+const requested = process.argv.slice(2);
+const fixtureFree = requested.length === 1 && requested[0] === '--fixture-free';
+const readerSuites = ['source-memory','source-memory-events','source-memory-blob-integrity','heartbeat/source-memory-admission'];
+const selected = fixtureFree ? tests.filter(name => !readerSuites.includes(name)) : requested;
+if (requested.length && process.env.CI && !fixtureFree) throw new Error('CI must run all source-memory suites');
 if (selected.some(name => !tests.includes(name))) throw new Error('Unknown source-memory suite');
 if (selected.length) tests.splice(0, tests.length, ...selected);
 const needsReader = tests.some(name => ['source-memory','source-memory-events','source-memory-blob-integrity','heartbeat/source-memory-admission'].includes(name));

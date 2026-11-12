@@ -40,7 +40,7 @@ test('rollback restores provenance and migration; unknown-age overflow refuses b
   db.exec('BEGIN');cleanup(db,now);assert.equal(db.prepare('SELECT count(*) n FROM facts').get().n,0);
   db.exec('ROLLBACK');assert.equal(db.prepare('SELECT count(*) n FROM facts').get().n,1);
   db.exec('BEGIN');const row=db.prepare('INSERT INTO observations VALUES (?,?,?,?,?)');
-  for(let n=0;n<=policy.observations;n++)row.run(String(n),'run','phase','unknown',null);
+  for(let n=0;n<policy.observations;n++)row.run(String(n),'run','phase','unknown',null);
   assert.throws(()=>cleanup(db,now),/source_memory_retention_legacy_budget/);
   assert.equal(db.prepare('SELECT count(*) n FROM facts').get().n,1);
   db.exec('ROLLBACK');

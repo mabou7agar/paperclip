@@ -6,13 +6,12 @@ import { tmpdir } from "node:os";
 import { and, eq } from "drizzle-orm";
 import { beforeAll, afterAll, afterEach, describe, it, expect, vi } from "vitest";
 import { createDb, companies, agents, projects, projectWorkspaces, executionWorkspaces,
-  executionWorkspaceRuntimeLeases, heartbeatRuns, nativeRunResults, nativeRunFinalizations, issues, activityLog, completionContracts, agentWakeupRequests, type Db } from "@paperclipai/db";
+  executionWorkspaceRuntimeLeases, heartbeatRuns, nativeRunFinalizations, issues, activityLog, completionContracts, agentWakeupRequests, type Db } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
 import { applyIssueExecutionPolicyTransition, normalizeIssueExecutionPolicy } from "./issue-execution-policy.js";
 import { issueService } from "./issues.js";
 import { prepareSourceReviewHandoff, hasConfiguredSourceReviewGate } from "./source-review-handoff.js";
 import { sourceReviewCandidateSha } from "./heartbeat/source-memory-run-state.js";
-import { nativeSha256 } from "./native-runtime/canonical.js";
 import { PaperclipControlPlanePort } from "./native-runtime/paperclip-control-plane-port.js";
 import { CONTROL_PLANE_CONFORMANCE_RESULT, CONTROL_PLANE_CONFORMANCE_TERMINAL } from "../vendor/paperclip-runner/testing.js";
 import { SourceReviewCaptureUnavailable } from "./source-review-capture-error.js";
@@ -213,38 +212,6 @@ describe('source review handoff transaction (synthetic only)', () => {
     expect(task!.executionState?.reviewRequest?.candidateSha).toBe(f.sha);
     expect(await db.select().from(activityLog).where(and(eq(activityLog.entityId, f.issueId), eq(activityLog.action, 'issue.source_review_candidate_captured')))).toHaveLength(1);
     expect(await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, f.companyId), eq(agentWakeupRequests.agentId, f.reviewerId)))).toHaveLength(1);
-  });
-  it('native standing is stripped before PostgreSQL persistence and replay hashing', async () => {
-    const f = await seed(), contractId = randomUUID(), sessionId = randomUUID(), sourceInstanceId = randomUUID();
-    await db.insert(completionContracts).values({ id: contractId, companyId: f.companyId, issueId: f.issueId, revision: 1,
-      schemaVersion: 'paperclip.completion-contract.v1', policyVersion: 'source-review-fixture', risk: 'standard',
-      completionAuthority: 'server_arbiter', incompleteCriteriaPolicy: 'preserve_non_terminal',
-      contractJson: { revision: 'standalone-v1', objective: 'Finish', criteria: [{ id: 'objective', requirement: 'Complete the task' }] },
-      canonicalSha256: contractId, createdByActorType: 'system', createdByActorId: 'synthetic' });
-    await db.update(heartbeatRuns).set({ nativeSessionId: sessionId, runnerInstanceId: sourceInstanceId,
-      completionContractId: contractId, completionContractSha256: contractId }).where(eq(heartbeatRuns.id, f.runId));
-    await db.update(nativeRunFinalizations).set({ leaseOwner: null, leaseExpiresAt: null }).where(eq(nativeRunFinalizations.runId, f.runId));
-    const port = new PaperclipControlPlanePort(db, { companyId: f.companyId, issueId: f.issueId,
-      runId: f.runId, agentId: f.agentId, sessionId, completionContractId: contractId,
-      completionContractSha256: contractId, sourceInstanceId, controlPlaneSourceInstanceId: 'synthetic-controller' });
-    const submitted = { ...CONTROL_PLANE_CONFORMANCE_RESULT,
-      sourceCurrentEvidenceSatisfied: true, sourceCitationResults: [{ standing: 'forged' }] };
-    const value = { result: submitted, terminal: CONTROL_PLANE_CONFORMANCE_TERMINAL, callerResultId: f.runId+':standing' };
-    await port.completeRun(value);
-    await port.completeRun({ ...value, result: { ...submitted, sourceCurrentEvidenceSatisfied: false, sourceCitationResults: [] } });
-    const accepted = await db.select().from(nativeRunResults).where(eq(nativeRunResults.runId, f.runId));
-    expect(accepted).toHaveLength(1);
-    const stored = accepted[0]!.resultJson as { result: Record<string, unknown> };
-    expect(stored.result).not.toHaveProperty('sourceCurrentEvidenceSatisfied');
-    expect(stored.result).not.toHaveProperty('sourceCitationResults');
-    expect(accepted[0]!.canonicalSha256).toBe(nativeSha256({
-      binding: { companyId: f.companyId, issueId: f.issueId, runId: f.runId, agentId: f.agentId, sessionId,
-        completionContractId: contractId, completionContractSha256: contractId, sourceInstanceId,
-        controlPlaneSourceInstanceId: 'synthetic-controller' },
-      result: stored.result, terminal: value.terminal, turnId: null,
-    }));
-    expect(submitted.sourceCurrentEvidenceSatisfied).toBe(true);
-    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, f.companyId))).toHaveLength(0);
   });
   it('typed unsupported capture is terminal with no scheduled retry and preserves source context', async () => {
     const f = await seed();

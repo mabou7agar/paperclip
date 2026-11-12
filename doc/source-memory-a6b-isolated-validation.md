@@ -298,3 +298,15 @@ all docs/tests/config/Bruno/MDX, the complete external API harness, original and
 updated bundle wrappers, actual 331/0040 derived drivers, the full diagnostic and
 raw lifetime receipts and final actual operator qualification. No acceptance or
 activation follows from the diagnostic. All holds and TL2/CTO2/story caps remain.
+
+
+## Later final-release supersession
+
+Earlier roster counts and no-op retention statements above describe their frozen
+revisions, not the current binary. The final roster has ten suites. Ordinary CI
+runs the fixed fixture-free subset with `--fixture-free`, the stage test and F2
+guards. The reader job still requires all ten suites and refuses missing inputs.
+The standalone PostgreSQL standing-field persistence contract runs without a
+reader or emitted-service fixture in normal server shards. See the current
+retention and rollback contract in `source-memory-runtime.md`; historical test
+receipts above are not claims of current pruning qualification.

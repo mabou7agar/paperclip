@@ -28,7 +28,7 @@ export function cleanupSourceMemoryRetention(db: DatabaseSync, now: number) {
     Number((db.prepare(`SELECT count(*) AS n FROM ${table} WHERE ${timestamp} IS NULL`).get() as { n: number }).n),
   ])) as Record<typeof tables[number], number>;
   for (const table of tables) {
-    if (legacy[table] > SOURCE_MEMORY_RETENTION[table]) throw new Error("source_memory_retention_legacy_budget");
+    if (legacy[table] >= SOURCE_MEMORY_RETENTION[table]) throw new Error("source_memory_retention_legacy_budget");
   }
   for (const table of tables) {
     db.prepare(`DELETE FROM ${table} WHERE ${timestamp} IS NOT NULL AND ${timestamp} < ?`)
