@@ -13,14 +13,15 @@ function ledger() {
   return db;
 }
 
-test('legacy provenance is retained without migration or pruning', () => {
+test('legacy provenance retains unknown age through an idempotent additive migration', () => {
   const db = ledger();
   try {
     db.exec("INSERT INTO facts VALUES ('legacy','source'); INSERT INTO observations VALUES ('legacy','run','phase','source')");
-    const before = JSON.stringify(db.prepare("SELECT sql FROM sqlite_master ORDER BY name").all());
+
     initializeSourceMemoryRetention(db);
     cleanupSourceMemoryRetention(db, 2 * policy.maxAgeMs);
-    assert.equal(JSON.stringify(db.prepare("SELECT sql FROM sqlite_master ORDER BY name").all()), before);
+    initializeSourceMemoryRetention(db);
+    assert.equal(db.prepare("SELECT runtime_created_at_ms FROM facts").get().runtime_created_at_ms, null);
     assert.deepEqual(db.prepare('SELECT key,provenance FROM facts').get(), Object.assign(Object.create(null), {key:'legacy',provenance:'source'}));
     assert.equal(db.prepare('SELECT count(*) n FROM observations').get().n, 1);
   } finally { db.close(); }

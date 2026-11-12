@@ -1,3 +1,5 @@
+import { initializeSourceMemoryRetention, cleanupSourceMemoryRetention } from "./source-memory-retention.js";
+export { SOURCE_MEMORY_RETENTION, initializeSourceMemoryRetention, cleanupSourceMemoryRetention } from "./source-memory-retention.js";
 import { readSourceCitationFromGit } from "./source-citation-reader.js";
 /** Optional source evidence preparation. Operator configuration is never taken from a task prompt. */
 import { createHash } from "node:crypto";
@@ -283,14 +285,6 @@ export function verifyBlobBatch(output: Buffer, blobs: string[]) {
   requireValue(offset === output.length, "blob_response_invalid");
 }
 
-/** Per-private-scope provenance policy; invoked only inside the worker transaction. */
-export const SOURCE_MEMORY_RETENTION = { maxAgeMs: 30 * 24 * 60 * 60 * 1000, facts: 10_000, observations: 2_000 };
-
-// Retention is a proposal only. These compatibility entry points intentionally
-// perform no DDL or DML, including for legacy rows of unknown age.
-export function initializeSourceMemoryRetention(_db: DatabaseSync) {}
-export function cleanupSourceMemoryRetention(_db: DatabaseSync, _now: number) {}
-
 /** Only installed in the dedicated worker, before reading input or opening state. */
 export function guardSourceMemoryWorker(lifetimeMs = 180_000) {
   const terminate = () => {
@@ -391,12 +385,13 @@ async function worker(payload: WorkerInput) {
     const citations = operation === "phase" && queries
       ? (await memory.retrieve(scope, before.revision, queries, 20)).filter((hit: { citation: { path: string } }) => affectedPaths.has(hit.citation.path)) : [];
     for (const hit of citations) {
-      db.prepare("INSERT INTO facts (key,provenance) VALUES (?,?) ON CONFLICT(key) DO NOTHING").run(identity(hit.citation), JSON.stringify({ ...hit.citation, standing: "verified_source_range", semanticStanding: "unreviewed", readerRevision: READER_REVISION }));
+      db.prepare("INSERT INTO facts (key,provenance,runtime_created_at_ms) VALUES (?,?,?) ON CONFLICT(key) DO NOTHING").run(identity(hit.citation), JSON.stringify({ ...hit.citation, standing: "verified_source_range", semanticStanding: "unreviewed", readerRevision: READER_REVISION }), Date.now());
     }
     requireValue(JSON.stringify(await sourceIdentity(input.cwd)) === JSON.stringify(before), "source_changed_during_preparation");
     db.prepare("INSERT OR REPLACE INTO refs VALUES (?,?)").run(taskRef, before.revision);
-    db.prepare("INSERT INTO observations (key,run,operation,provenance) VALUES (?,?,?,?) ON CONFLICT(key,run,operation) DO NOTHING").run(key, input.runId, operation, JSON.stringify({ scope, ...before,
-      phase: input.phase, routedProvider: input.provider, routedModel: input.model, issueId: input.issueId }));
+    db.prepare("INSERT INTO observations (key,run,operation,provenance,runtime_created_at_ms) VALUES (?,?,?,?,?) ON CONFLICT(key,run,operation) DO NOTHING").run(key, input.runId, operation, JSON.stringify({ scope, ...before,
+      phase: input.phase, routedProvider: input.provider, routedModel: input.model, issueId: input.issueId }), Date.now());
+    cleanupSourceMemoryRetention(db, Date.now());
     db.exec("COMMIT");
     return { schema: 1, scope, ...before, taskRef, event: previous ? "duplicate" : "changed", phase: input.phase, provider: input.provider, model: input.model, runId: input.runId, affectedFiles: queue.length, affectedQueue: queue.slice(0, 50), queueTruncated: queue.length > 50, blobReads: refresh.blobReads, citations };
   } finally { memory?.close(); db.close(); }

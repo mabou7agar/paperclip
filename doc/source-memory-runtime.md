@@ -348,19 +348,25 @@ own runner lifecycle; this does not cancel an already-dispatched remote command.
 Normal completion retires only supplemental core guards; the independent
 watchdog is never retired by `release()`.
 
-### Retention proposal only (supersedes accepted A5 pruning)
+### Bounded runtime provenance retention
 
-Legacy and new facts/observations are retained. A6 performs no retention DDL,
-backfill, deletion, truncation or overwrite of existing provenance. Compatibility
-initialization/cleanup functions are inert; inserts name the original columns and
-ignore duplicate provenance keys. Existing A5 timestamp columns may remain with
-their defaults. The external pinned reader has no code reading these runtime
-`facts`/`observations` tables (audited all `.mjs` sources, not data stores).
+The separately reviewed retention change adds nullable `runtime_created_at_ms`
+columns inside the existing worker transaction. New facts and observations keep
+creation times; duplicate keys do not refresh their age. Unknown-age legacy rows
+are never assigned an invented timestamp or deleted. Known rows expire after
+30 days; deterministic primary-key ordering retains at most 10,000 facts and
+2,000 observations per private company/project/repository ledger, with legacy
+rows reserving capacity. Legacy rows alone exceeding a bound refuse with
+`source_memory_retention_legacy_budget`, without a partial cleanup. Transaction
+rollback preserves provenance. No shared production database is modified.
 
-Proposal for a separate approval: add nullable verified timestamps, retain
-unknown-age legacy rows, measure downstream use in an isolated copy, then agree
-an explicit archive/export policy before any deletion. The former 30-day and
-10,000/2,000 row figures are proposed bounds only, never active policy.
+This bounds runtime facts and observations only. Events, refs, Git objects and
+the pinned reader's history remain intact for replay deduplication and historical
+citations. Measure all private state file sizes at every post-deploy check; the
+1 GiB disable-and-escalate threshold still applies to the complete ledger. No
+ad-hoc deletes, vacuum, timer or model wake is added. Feature rollback disables
+the configuration before changing binaries; additive columns remain compatible
+with earlier explicit-column inserts.
 
 Focused synthetic verification (no accepted reader bundle needed):
 
@@ -412,7 +418,7 @@ surface the named failure. Pre-A6 A5 pruning workers must never overlap a retain
 ledger; a binary rollback to those workers is unsafe. The pinned reader manifest
 remains authoritative; the A1 replacement is proposed only.
 
-`node scripts/source-memory/run-tests.mjs` requires all nine `.mjs` contracts in CI.
+`node scripts/source-memory/run-tests.mjs` requires all ten `.mjs` contracts in CI.
 `SOURCE_MEMORY_READER_FIXTURE` must name the manifest-verified reader; absence
 fails before any suite runs instead of silently excluding the four reader suites.
 Local focused checks may append roster names, for example `source-memory-binding`;
