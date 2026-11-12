@@ -573,7 +573,9 @@ quiescence and never clear locks, stages or sessions to accelerate cutover.
   any authorized rollback. No migration is introduced by F2. This target is safe
   only while its strict parser can decode all persisted review state: disabling
   configuration alone cannot erase new `candidateSha`/`sourceReviewCapture` fields.
-  If those fields have been saved, follow `rules/upgrade-safe-run-state.mdc`:
+  The owner explicitly chose no backup for this rollout. From the first bound
+  handoff that saves either field, image 67dfdeeb is unsafe; retain a compatible
+  binary instead. If those fields have been saved, follow `rules/upgrade-safe-run-state.mdc`:
   keep work quiesced, preserve state, and use a compatible binary or a separate
   explicit CTO data-recovery disposition. Do not strip fields, restore a backup,
   clear stages/sessions or replay completion as an automatic rollback workaround.

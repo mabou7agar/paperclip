@@ -81,13 +81,17 @@ and do not understand `candidateSha` or `sourceReviewCapture`. They may decode t
 entire execution state as null and rebuild over saved decisions. Disabling source
 memory does not remove already-persisted fields and does not make rollback safe.
 
-Before any approved enablement, retain a compatible server artifact and an
-isolated pre-cutover backup. Quiesce writers and drain transactions for cutover.
+Before any approved enablement, retain a compatible server artifact. The owner
+explicitly chose no backup for this rollout; do not create one or assume a
+pre-cutover restore is available. Quiesce writers and drain transactions for cutover.
 If a rollback is needed after a new receipt/typed candidate was saved, keep tasks
 and workers quiesced and use a compatible server that understands these fields.
 Never start the strict prior-release server against that database, strip fields,
 clear stages/sessions, or replay completion to make it decode. Restoring a
 pre-cutover backup loses later writes and requires a separate explicit CTO/data
 recovery decision and reconciliation plan; it is not an automatic rollback.
-Pre-A6 pruning workers must also never touch retained source ledgers. No migration,
+The historical 987e3e0e / 67dfdeeb binary is unsafe from the first persisted bound
+source handoff: it cannot parse the new capture. After that point rollback means
+a compatible binary, never that strict older image. Pre-A6 pruning workers must
+also never touch retained source ledgers. No migration,
 rollback execution, state rewrite or activation is authorized by this document.
