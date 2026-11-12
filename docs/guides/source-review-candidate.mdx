@@ -145,3 +145,11 @@ Source verification flags are owned by the control plane. Provider-supplied
 native finalization envelopes and diagnostic result snapshots as well as
 canonical completion results. Verified run evidence remains separate from the
 provider's report; ordinary result fields and submitted citations are preserved.
+
+
+The adapter envelope is diagnostic, not a replay key. Native completion replay
+uses the canonical result and hash persisted by the control-plane port, which
+strips these two keys before computing that hash. Restart settlement and the
+native finalizer read the accepted canonical row; they do not compare the
+adapter envelope with an older raw snapshot. Stripping the diagnostic clone
+therefore preserves canonical replay identity and saved provider sessions.
