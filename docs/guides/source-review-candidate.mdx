@@ -139,3 +139,9 @@ before any source read; artifact-only review workspaces should stay unbound.
 Native preparation may ensure an idempotent completion contract and materialize
 response inputs before source validation. Neither starts a provider or accepts
 work. Model-fallback warnings are published only after source validation succeeds.
+
+Source verification flags are owned by the control plane. Provider-supplied
+`sourceCitationResults` and `sourceCurrentEvidenceSatisfied` are removed from
+native finalization envelopes and diagnostic result snapshots as well as
+canonical completion results. Verified run evidence remains separate from the
+provider's report; ordinary result fields and submitted citations are preserved.

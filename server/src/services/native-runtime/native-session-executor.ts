@@ -1,4 +1,4 @@
-import { NativeCompletionValidationError } from "./completion-validation.js";
+import { NativeCompletionValidationError, stripNativeSourceStanding } from "./completion-validation.js";
 import { remoteRecoveryLeaseMismatch } from "./remote-recovery-lease-mismatch.js";
 import { isGovernancePauseStop } from "../governance-pause-stop.js";
 import { nativeLeaseHolder, notifyNativeTokenLeaseClaimed } from "./native-token-lease-settlement.js";
@@ -12398,13 +12398,16 @@ async function executePaperclipNativeSessionAttempt(
       logger.warn({ runId: input.execution.binding.runId }, "Native finalization claim release failed after an earlier error");
     }
   }
+  // Provider reports may not publish the control plane's source-verification
+  // fields through either the finalization envelope or the run snapshot.
+  const publishedNativeResult = stripNativeSourceStanding(native.result);
   const finalization: NativeFinalizationResult = {
     schema: "paperclip.native-finalization.v1",
     runtimeMode: "native",
     runId: input.execution.binding.runId,
     issueId: input.execution.binding.issueId,
     companyId: input.execution.binding.companyId,
-    result: native.result as unknown as Record<string, unknown>,
+    result: publishedNativeResult as unknown as Record<string, unknown>,
     terminal: native.terminal,
     turnId: native.turnId,
     sourceInstanceId: effectiveRunnerInstanceId,
@@ -12430,7 +12433,7 @@ async function executePaperclipNativeSessionAttempt(
         : providerFailure?.errorMessage ?? `Native session ${native.terminal.runTerminalState}`,
     ...(providerFailure ? { errorCode: providerFailure.errorCode } : {}),
     resultJson: {
-      nativeResult: native.result as unknown as Record<string, unknown>,
+      nativeResult: publishedNativeResult as unknown as Record<string, unknown>,
       nativeTerminal: native.terminal as unknown as Record<string, unknown>,
       ...((input.execution.schema === "paperclip.native-execution-input.v6" || input.execution.schema === "paperclip.native-execution-input.v8") ? { providerAccounting: { usage: null, cost: null, externallyBilled: true }, externalStopConfirmed: false } : {}),
       ...(input.execution.provider.kind === "cursor_cloud" ? { providerAccounting: { usage: null, cost: null, externallyBilled: true } } : {}),
