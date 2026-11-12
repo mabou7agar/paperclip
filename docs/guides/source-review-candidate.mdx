@@ -136,6 +136,14 @@ session and context, and never substitutes a newly edited live model for it.
 An interaction-only native review does not itself produce a writer capture. On a
 bound source workspace it therefore refuses with `source_memory_review_candidate_missing`
 before any source read; artifact-only review workspaces should stay unbound.
+Setting the source-memory config does not opt every project in. Projects without
+a matching company/project binding, including projectless artifact reports,
+keep the feature-off completion behavior: optional submitted source citations
+and claimed verification fields are discarded without failing ordinary work.
+An opted-in project still refuses submitted evidence when its persisted workspace
+is missing or its repository does not match. A recovering bound review still
+requires a verified saved source snapshot. None of these checks creates a wake,
+changes a session, or overrides a task dependency.
 Native preparation may ensure an idempotent completion contract and materialize
 response inputs before source validation. Neither starts a provider or accepts
 work. Model-fallback warnings are published only after source validation succeeds.

@@ -1,4 +1,4 @@
-import { prepareSourceMemory, assertCurrentSourceCitation, sourceMemoryRepositoryId, sourceMemoryBindingEnabled, type SourceMemoryInput } from "../source-memory.js";
+import { prepareSourceMemory, assertCurrentSourceCitation, sourceMemoryRepositoryId, sourceMemoryBindingEnabled, sourceMemoryProjectBindingEnabled, type SourceMemoryInput } from "../source-memory.js";
 import { consumeSourceCitations, type CitationBinding } from "../source-citation-consumer.js";
 import { createRemoteSourceReader } from "../source-memory-remote.js";
 
@@ -37,7 +37,7 @@ export async function prepareHeartbeatSourceMemory(input: {
       result.errorMessage = "Required current source citations were not verified.";
     },
   });
-  if (!process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG) return {
+  const disabled = {
     evidence: null, beforeDispatch: async () => {}, observeCommit: async () => {},
     // The protocol advertises this optional field even when the feature is off.
     // Discard volunteered citations without assigning them evidence standing.
@@ -49,8 +49,10 @@ export async function prepareHeartbeatSourceMemory(input: {
       }
     },
   };
+  if (!process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG || !await sourceMemoryProjectBindingEnabled(input.identity)) return disabled;
   // Filter before task authorization: an opt-in for one repository cannot affect
-  // unrelated companies, directory workspaces, or ephemeral workspace records.
+  // unrelated companies or projects. Once a project opts in, a missing workspace
+  // or a mismatched repository must still refuse submitted evidence.
   if (!input.persistedWorkspaceId || !await sourceMemoryBindingEnabled({ ...input.identity, repoUrl: input.workspace.repoUrl })) {
     return unavailable("source_memory_unbound");
   }
