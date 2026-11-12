@@ -21,7 +21,7 @@ const { readFile, mkdir } = await import('node:fs/promises');
 const compiled = await mkdtemp(path.join(tmpdir(),'osa457-compiled-'));
 await mkdir(path.join(compiled,'heartbeat'));
 await writeFile(path.join(compiled,'package.json'),' {"type":"module"}');
-for (const file of ['source-memory','source-memory-remote','source-citation-consumer','source-citation-reader','heartbeat/source-memory']) {
+for (const file of ['source-memory','source-memory-retention','source-memory-remote','source-citation-consumer','source-citation-reader','heartbeat/source-memory']) {
   const source = await readFile(new URL('../'+file+'.ts',import.meta.url),'utf8');
   await writeFile(path.join(compiled,file+'.js'),stripTypeScriptTypes(source));
 }
@@ -105,8 +105,9 @@ test('real HEAD admission, persisted run binding and phase policy', async t => {
       assert.equal(result.exitCode,0); assert.equal(prepared.evidence,null);
       const unboundCitation={exitCode:0,resultJson:{sourceCitations:[{mode:'historical'}]}};
       await prepared.consumeResult(unboundCitation);
-      assert.equal(unboundCitation.exitCode,1);
-      assert.equal(unboundCitation.resultJson.sourceCitationResults[0].reason,'source_memory_unbound');
+      assert.equal(unboundCitation.exitCode,0);
+      assert.equal(unboundCitation.resultJson.sourceCitations,undefined);
+      assert.equal(unboundCitation.resultJson.sourceCitationResults,undefined);
     });
   } finally {
     if(saved===undefined)delete process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG;else process.env.PAPERCLIP_SOURCE_MEMORY_CONFIG=saved;
