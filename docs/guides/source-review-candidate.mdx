@@ -161,3 +161,21 @@ strips these two keys before computing that hash. Restart settlement and the
 native finalizer read the accepted canonical row; they do not compare the
 adapter envelope with an older raw snapshot. Stripping the diagnostic clone
 therefore preserves canonical replay identity and saved provider sessions.
+
+
+## Aggregate capacity and cursor continuation
+
+A binding can optionally set `maxContentBytes` to a positive safe integer. Omission retains the existing 128 MiB reader default. This setting requires the capacity-capable manifest pinned by the server; the original accepted reader remains supported for configurations without this option. Manifest hashes, reader revisions and all 38 code-file hashes are verified before execution. Capacity is operator configuration, never source-code instructions.
+
+Aggregate content capacity is separate from file eligibility, per-file limits, ledger disk usage and RAM. Adjusting aggregate capacity preserves the saved immutable revision, file plan, committed cursor and cached blobs. Subsequent manifests record the effective configured content budget. Changed filtering limits still reject an existing plan, and reducing capacity below already indexed bytes rejects even an unchanged index. No state is deleted or silently restarted.
+
+A worker deadline bounds one operation, not repository size. Operators must retain the task, scope, frozen revision and plan and verify cursor progress before admitting another continuation; the runtime does not implement a progress-based continuation scheduler. Completed blobs stay cached. The operator must stop on a non-advancing cursor, changed identity, cleanup failure, unsupported reader, exhausted configured resource capacity or missing authority, and must not wake a provider merely to poll indexing. Native dependency/review handoffs wait for an actual complete report.
+
+The additional real-worker capacity release test requires `PAPERCLIP_SOURCE_CAPACITY_FIXTURES` to name a JSON file with `legacy` and `capacity` reader entries containing `root`, `manifest`, `manifestSha256` and `revision`. Both code-only readers must match the server pins; missing fixtures fail the test. This gate exercises manifest selection, old-reader refusal with a configured budget, constructor budget forwarding and actual facts provenance without providers or production data.
+
+
+Ledger disk capacity is an independent operator gate: measure the entire scoped state directory, including SQLite WAL/SHM files, before admitting a continuation and after each operation. Enforce the configured per-repository and total state limits and check available disk and process memory; an aggregate content limit alone does not bound SQLite storage. A ledger-capacity failure stops further continuation and handoff. The reader itself does not enforce a filesystem quota. `source_memory_index_budget` and `source_memory_manifest_changed` distinguish reader capacity and saved-plan failures from a generic worker failure.
+
+These Node release gates are excluded from ordinary Vitest discovery: `server/vitest.config.ts` includes only `src/**/*.test.ts` and `scripts/**/*.test.mjs`, while the gates live in `src/services/*.test.mjs`. The root config delegates server discovery to that project configuration. Run the config gate explicitly with `node --test server/src/services/source-memory-capacity-config.test.mjs`, and the worker gate with `PAPERCLIP_SOURCE_CAPACITY_FIXTURES=/absolute/fixtures.json node --test server/src/services/source-memory-capacity-worker.test.mjs`.
+
+The exact reusable reader delta is retained in `docs/guides/source-reader-capacity.patch`, including the five real Git/SQLite regression tests and source provenance. Apply it to the exact accepted code-only reader baseline described there; runtime code remains covered by the new 38-file manifest pin.

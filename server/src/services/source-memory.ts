@@ -12,13 +12,15 @@ import { DatabaseSync } from "node:sqlite";
 
 const execute = promisify(execFile);
 const READER_REVISION = "9c477cebfff7383d1b8c2b7064fcc5462a02f039";
+const CAPACITY_READER_REVISION = "d09c6d2da901d5201b58deebd040725ba926737c";
+const CAPACITY_MANIFEST_HASH = "4c77ee4e03fb8096a5891e584f8caa10f2dd70b932bb6bb9e57960786bc093f4";
 const MANIFEST_HASH = "0024f01f17032a78c99cd2b14c8c58ddf5501025c24e9528e9c448679514b71a";
 const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
 const identity = (value: unknown) => hash(JSON.stringify(value));
 function requireValue(value: unknown, code: string): asserts value { if (!value) throw new Error(`source_memory_${code}`); }
 
 type Scope = { companyId: string; projectId: string; repositoryId: string };
-type Binding = Scope & { roots: string[]; remoteRoots?: string[] };
+type Binding = Scope & { roots: string[]; remoteRoots?: string[]; maxContentBytes?: number };
 export type RemoteSourceRequest = { args: string[]; stdin?: string; maxBytes: number; guards?: { safe: string; storage: string } };
 export type RemoteSourceReader = (request: RemoteSourceRequest) => Promise<string>;
 type Configuration = { version: 1; state: string; reader: string; manifest: string; bindings: Binding[] };
@@ -54,6 +56,7 @@ async function configuration(file: string, scope: Pick<SourceMemoryInput, "compa
   c.bindings = bindings;
   requireValue(c.version === 1 && path.isAbsolute(c.state) && path.isAbsolute(c.reader) && path.isAbsolute(c.manifest) && Array.isArray(c.bindings), "configuration_invalid");
   for (const b of c.bindings) requireValue(b.companyId && b.projectId && b.repositoryId && Array.isArray(b.roots) && b.roots.every(r => path.isAbsolute(r)) && (!b.remoteRoots || Array.isArray(b.remoteRoots) && b.remoteRoots.every(r => path.posix.isAbsolute(r))), "configuration_invalid");
+  for (const b of c.bindings) requireValue(b.maxContentBytes === undefined || Number.isSafeInteger(b.maxContentBytes) && b.maxContentBytes > 0, "capacity_invalid");
   return c;
 }
 
@@ -227,9 +230,12 @@ async function sourceIdentity(root: string) {
 
 async function verifiedReader(config: Configuration) {
   const manifest = await readFile(config.manifest);
-  requireValue(hash(manifest) === MANIFEST_HASH, "reader_manifest_changed");
+  const manifestHash = hash(manifest);
+  requireValue(manifestHash === MANIFEST_HASH || manifestHash === CAPACITY_MANIFEST_HASH, "reader_manifest_changed");
   const m = JSON.parse(manifest.toString());
-  requireValue(m.revision === READER_REVISION && m.files.length === 38, "reader_revision_changed");
+  const expectedRevision = manifestHash === MANIFEST_HASH ? READER_REVISION : CAPACITY_READER_REVISION;
+  requireValue(m.revision === expectedRevision && m.files.length === 38, "reader_revision_changed");
+  requireValue(!config.bindings.some(b => b.maxContentBytes !== undefined) || m.revision === CAPACITY_READER_REVISION, "reader_capacity_unsupported");
   const root = await realpath(config.reader);
   for (const f of m.files) {
     const file = await realpath(path.resolve(root, f.path));
@@ -239,7 +245,7 @@ async function verifiedReader(config: Configuration) {
   guardSources = { safe: await readFile(path.join(folder, "SafeGitRepository.mjs"), "utf8"), storage: await readFile(path.join(folder, "GitStorageRepository.mjs"), "utf8") };
   const { SafeGitRepository } = await import(pathToFileURL(path.join(folder, "SafeGitRepository.mjs")).href);
   sourceSafe = new SafeGitRepository();
-  return import(pathToFileURL(path.join(root, "memory.mjs")).href);
+  return { ...await import(pathToFileURL(path.join(root, "memory.mjs")).href), readerRevision: m.revision as string };
 }
 
 /** Deterministic lexical/inferred triage, not a resolved call graph or semantic verification. */
@@ -308,7 +314,7 @@ export function guardSourceMemoryWorker(lifetimeMs = 180_000) {
 
 async function worker(payload: WorkerInput) {
   const { config, scope, input, operation } = payload;
-  const { Memory } = await verifiedReader(config);
+  const { Memory, readerRevision } = await verifiedReader(config);
   remoteMode = input.remoteAuthority;
   requireValue(sourceMemoryRepositoryId((await git(input.cwd, ["remote", "get-url", "origin"])).trim()) === scope.repositoryId, "repository_mismatch");
   if (operation === "citation") {
@@ -350,7 +356,10 @@ async function worker(payload: WorkerInput) {
     const key = identity([scope.companyId, scope.repositoryId, taskRef, before.revision]);
     const old = db.prepare("SELECT revision FROM refs WHERE ref=?").get(taskRef) as { revision: string } | undefined;
     const previous = db.prepare("SELECT queue FROM events WHERE key=?").get(key) as { queue: string } | undefined;
-    memory = new Memory({ state: path.join(state, "reader"), bindings: [{ scope, root: input.cwd }] });
+    const binding = config.bindings.find(b => b.companyId === scope.companyId && b.projectId === scope.projectId && b.repositoryId === scope.repositoryId);
+    requireValue(binding, "binding_missing");
+    memory = new Memory({ state: path.join(state, "reader"), bindings: [{ scope, root: input.cwd }],
+      ...(binding.maxContentBytes === undefined ? {} : { maxContentBytes: binding.maxContentBytes }) });
     if (remoteMode) {
       memory.sources.resolveRoot = async (root: string) => { requireValue(root === input.cwd, "root_denied"); return root; };
       memory.sources.command = git;
@@ -385,7 +394,7 @@ async function worker(payload: WorkerInput) {
     const citations = operation === "phase" && queries
       ? (await memory.retrieve(scope, before.revision, queries, 20)).filter((hit: { citation: { path: string } }) => affectedPaths.has(hit.citation.path)) : [];
     for (const hit of citations) {
-      db.prepare("INSERT INTO facts (key,provenance,runtime_created_at_ms) VALUES (?,?,?) ON CONFLICT(key) DO NOTHING").run(identity(hit.citation), JSON.stringify({ ...hit.citation, standing: "verified_source_range", semanticStanding: "unreviewed", readerRevision: READER_REVISION }), Date.now());
+      db.prepare("INSERT INTO facts (key,provenance,runtime_created_at_ms) VALUES (?,?,?) ON CONFLICT(key) DO NOTHING").run(identity(hit.citation), JSON.stringify({ ...hit.citation, standing: "verified_source_range", semanticStanding: "unreviewed", readerRevision }), Date.now());
     }
     requireValue(JSON.stringify(await sourceIdentity(input.cwd)) === JSON.stringify(before), "source_changed_during_preparation");
     db.prepare("INSERT OR REPLACE INTO refs VALUES (?,?)").run(taskRef, before.revision);
@@ -438,7 +447,7 @@ if (process.argv[2] === "--source-memory-worker") {
   let input = "";
   for await (const chunk of process.stdin) { input += chunk; requireValue(Buffer.byteLength(input) <= 1_048_576, "input_budget"); }
   try { process.stdout.write(JSON.stringify(await worker(JSON.parse(input)))); }
-  catch (error) { const known = error as { code?: string }; const message = known.code === "STALE_SOURCE" ? "source_memory_stale_source" : error instanceof Error ? error.message : ""; process.stdout.write(/^source_memory_[a-z0-9_]+$/.test(message) ? message : "source_memory_worker_failed"); process.exitCode = 1; }
+  catch (error) { const known = error as { code?: string }; const codes: Record<string, string> = { STALE_SOURCE: "source_memory_stale_source", INDEX_BUDGET: "source_memory_index_budget", MANIFEST_CHANGED: "source_memory_manifest_changed" }; const message = (typeof known?.code === "string" ? codes[known.code] : undefined) ?? (error instanceof Error ? error.message : ""); process.stdout.write(/^source_memory_[a-z0-9_]+$/.test(message) ? message : "source_memory_worker_failed"); process.exitCode = 1; }
   releaseGuard();
   if (process.connected) process.disconnect();
 }
