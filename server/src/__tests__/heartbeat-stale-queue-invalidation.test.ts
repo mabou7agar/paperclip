@@ -22,6 +22,7 @@ import {
   issueComments,
   issueExecutionDecisions,
   issueDocuments,
+  issueRelations,
   issueThreadInteractions,
   issues,
 } from "@paperclipai/db";
@@ -793,11 +794,15 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(issue).toMatchObject({ status, assigneeAgentId: reassigned ? null : agentId });
   });
 
-  it("delivers an addressed CTO question once without taking worker ownership or losing context", async () => {
+  it.each(["in_review", "blocked"])("delivers an addressed CTO question once without taking worker ownership or losing context (%s)", async status => {
     const { companyId, agentId } = await seedCompanyAndAgent({ agentName: "CTO", heartbeatConfig: { enabled: false } });
     const workerId = randomUUID();
     await db.insert(agents).values({ id: workerId, companyId, name: "Worker", role: "engineer", status: "idle", adapterType: "codex_local" });
-    const [issue] = await db.insert(issues).values({ companyId, title: "Worker needs a bounded planning answer", status: "in_review", assigneeAgentId: workerId }).returning();
+    const [issue] = await db.insert(issues).values({ companyId, title: "Worker needs a bounded planning answer", status, assigneeAgentId: workerId }).returning();
+    if (status === "blocked") {
+      const [blocker] = await db.insert(issues).values({ companyId, title: "Unfinished QA", status: "blocked" }).returning();
+      await db.insert(issueRelations).values({ companyId, issueId: blocker.id, relatedIssueId: issue.id, type: "blocks" });
+    }
     const [interaction] = await db.insert(issueThreadInteractions).values({ companyId, issueId: issue.id,
       kind: "ask_user_questions", createdByAgentId: workerId, addresseeAgentId: agentId,
       effectiveResolverPolicy: "anyone", payload: { version: 1, questions: [] } }).returning();
@@ -813,8 +818,82 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     const run = await heartbeat.getRun(runId);
     expect(run).toMatchObject({ status: "succeeded", contextSnapshot: { ...context, issueId: issue.id, wakeReason: "interaction_pending" } });
     expect(countExecuteCallsForRun(runId)).toBe(1);
-    expect((await db.select().from(issues).where(eq(issues.id, issue.id)))[0]).toMatchObject({ status: "in_review", assigneeAgentId: workerId });
+    expect((await db.select().from(issues).where(eq(issues.id, issue.id)))[0]).toMatchObject({ status, assigneeAgentId: workerId });
     expect((await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, interaction.id)))[0].status).toBe("pending");
+    if (status === "blocked") expect((await issueService(db).listDependencyReadiness(companyId, [issue.id])).get(issue.id)?.isDependencyReady).toBe(false);
+  });
+
+  it.each(["pending", "answered", "wrong_recipient", "human_only", "self_addressed", "owner_not_creator", "creator_not_owner"] as const)("admits only a current authorized addressed card on a dependency-blocked task (%s)", async kind => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const [worker] = await db.insert(agents).values({ companyId, name: "Worker", role: "engineer", status: "idle", adapterType: "codex_local" }).returning();
+    const ownerId = kind === "self_addressed" || kind === "owner_not_creator" ? agentId : worker.id;
+    const creatorId = kind === "self_addressed" || kind === "creator_not_owner" ? agentId : worker.id;
+    const [issue] = await db.insert(issues).values({ companyId, title: "Blocked worker needs lead disposition", status: "blocked", assigneeAgentId: ownerId }).returning();
+    const [blocker] = await db.insert(issues).values({ companyId, title: "QA cannot proceed", status: "blocked" }).returning();
+    await db.insert(issueRelations).values({ companyId, issueId: blocker.id, relatedIssueId: issue.id, type: "blocks" });
+    const [interaction] = await db.insert(issueThreadInteractions).values({ companyId, issueId: issue.id,
+      kind: "ask_user_questions", createdByAgentId: creatorId,
+      addresseeAgentId: kind === "wrong_recipient" ? worker.id : agentId,
+      status: kind === "answered" ? "answered" : "pending",
+      effectiveResolverPolicy: kind === "human_only" ? "human_only" : "anyone",
+      payload: { version: 1, questions: [] } }).returning();
+    await heartbeat.wakeup(agentId, { source: "automation", triggerDetail: "system", reason: "interaction_pending",
+      requestedByActorType: "agent", requestedByActorId: creatorId,
+      payload: { issueId: issue.id, interactionId: interaction.id, interactionKind: interaction.kind, mutation: "interaction" },
+      idempotencyKey: `interaction-pending:${interaction.id}`,
+      contextSnapshot: { issueId: issue.id, source: "issue.interaction.created",
+        interactionId: interaction.id, interactionKind: interaction.kind, wakeReason: "interaction_pending",
+        ...(kind !== "pending" ? { dependencyBlockedInteraction: true } : {}) } });
+    await heartbeat.resumeQueuedRuns();
+    if (kind === "pending") {
+      expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.issueId, issue.id)),
+        JSON.stringify(await db.select({ status: agentWakeupRequests.status, reason: agentWakeupRequests.reason }).from(agentWakeupRequests)))
+        .toHaveLength(1);
+      expect(await waitForCondition(async () => mockAdapterExecute.mock.calls.length === 1)).toBe(true);
+      const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.issueId, issue.id));
+      await heartbeat.waitForRunExecutionDrain(run.id);
+      expect(await heartbeat.getRun(run.id)).toMatchObject({ status: "succeeded", contextSnapshot: { dependencyBlockedInteraction: true } });
+    }
+    if (kind !== "pending") expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.issueId, issue.id))).toEqual([]);
+    await heartbeat.resumeQueuedRuns();
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(kind === "pending" ? 1 : 0);
+    expect((await db.select().from(issues).where(eq(issues.id, issue.id)))[0]).toMatchObject({ status: "blocked", assigneeAgentId: ownerId });
+    expect((await issueService(db).listDependencyReadiness(companyId, [issue.id])).get(issue.id)?.isDependencyReady).toBe(false);
+  });
+
+  it.each(["answered", "recipient_became_owner"] as const)("refuses a blocked addressed card changed while waiting for recipient capacity (%s)", async change => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const [worker] = await db.insert(agents).values({ companyId, name: "Worker", role: "engineer", status: "idle", adapterType: "codex_local" }).returning();
+    const [issue] = await db.insert(issues).values({ companyId, title: "Blocked worker question", status: "blocked", assigneeAgentId: worker.id }).returning();
+    const [blocker] = await db.insert(issues).values({ companyId, title: "Unfinished QA", status: "blocked" }).returning();
+    await db.insert(issueRelations).values({ companyId, issueId: blocker.id, relatedIssueId: issue.id, type: "blocks" });
+    const [interaction] = await db.insert(issueThreadInteractions).values({ companyId, issueId: issue.id,
+      kind: "ask_user_questions", createdByAgentId: worker.id, addresseeAgentId: agentId,
+      effectiveResolverPolicy: "anyone", payload: { version: 1, questions: [] } }).returning();
+    const [occupied] = await db.insert(issues).values({ companyId, title: "Recipient is occupied", status: "in_progress", assigneeAgentId: agentId }).returning();
+    const { runId: occupyingRunId } = await seedQueuedRun({ companyId, agentId, issueId: occupied.id });
+    await db.update(heartbeatRuns).set({ status: "running", startedAt: new Date() }).where(eq(heartbeatRuns.id, occupyingRunId));
+    await heartbeat.wakeup(agentId, { source: "automation", triggerDetail: "system", reason: "interaction_pending",
+      requestedByActorType: "agent", requestedByActorId: worker.id,
+      payload: { issueId: issue.id, interactionId: interaction.id, interactionKind: interaction.kind, mutation: "interaction" },
+      idempotencyKey: `interaction-pending:${interaction.id}`,
+      contextSnapshot: { issueId: issue.id, source: "issue.interaction.created",
+        interactionId: interaction.id, interactionKind: interaction.kind, wakeReason: "interaction_pending" } });
+    const [queued] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.issueId, issue.id));
+    expect(queued).toMatchObject({ status: "queued", contextSnapshot: { dependencyBlockedInteraction: true } });
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+    if (change === "answered") {
+      await db.update(issueThreadInteractions).set({ status: "answered", resolvedAt: new Date() }).where(eq(issueThreadInteractions.id, interaction.id));
+    } else {
+      await db.update(issues).set({ assigneeAgentId: agentId }).where(eq(issues.id, issue.id));
+    }
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, occupyingRunId));
+    await heartbeat.resumeQueuedRuns();
+    expect(await waitForCondition(async () => (await heartbeat.getRun(queued.id))?.status === "cancelled")).toBe(true);
+    expect(await heartbeat.getRun(queued.id)).toMatchObject({ status: "cancelled", errorCode: "issue_dependencies_blocked" });
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+    expect((await db.select().from(issues).where(eq(issues.id, issue.id)))[0]).toMatchObject({ status: "blocked", assigneeAgentId: change === "answered" ? worker.id : agentId });
+    expect((await issueService(db).listDependencyReadiness(companyId, [issue.id])).get(issue.id)?.isDependencyReady).toBe(false);
   });
 
   it.each(["queued", "scheduled_retry"] as const)("retains a valid %s addressed question when a worker wake arrives", async status => {
