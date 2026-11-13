@@ -165,17 +165,128 @@ therefore preserves canonical replay identity and saved provider sessions.
 
 ## Aggregate capacity and cursor continuation
 
-A binding can optionally set `maxContentBytes` to a positive safe integer. Omission retains the existing 128 MiB reader default. This setting requires the capacity-capable manifest pinned by the server; the original accepted reader remains supported for configurations without this option. Manifest hashes, reader revisions and all 38 code-file hashes are verified before execution. Capacity is operator configuration, never source-code instructions.
+A binding can optionally set `maxContentBytes` to a positive safe integer. Without the optional top-level `capacity` policy below, omission retains the existing 128 MiB reader default. With that policy, the default is sized from memory and disk and can exceed 128 MiB. This setting requires the capacity-capable manifest pinned by the server; the original accepted reader remains supported for configurations without this option. Manifest hashes, reader revisions and all 38 code-file hashes are verified before execution. Capacity is operator configuration, never source-code instructions.
 
 Aggregate content capacity is separate from file eligibility, per-file limits, ledger disk usage and RAM. Adjusting aggregate capacity preserves the saved immutable revision, file plan, committed cursor and cached blobs. Subsequent manifests record the effective configured content budget. Changed filtering limits still reject an existing plan, and reducing capacity below already indexed bytes rejects even an unchanged index. No state is deleted or silently restarted.
 
-A worker deadline bounds one operation, not repository size. Operators must retain the task, scope, frozen revision and plan and verify cursor progress before admitting another continuation; the runtime does not implement a progress-based continuation scheduler. Completed blobs stay cached. The operator must stop on a non-advancing cursor, changed identity, cleanup failure, unsupported reader, exhausted configured resource capacity or missing authority, and must not wake a provider merely to poll indexing. Native dependency/review handoffs wait for an actual complete report.
+Without the optional `capacity` policy, a worker deadline bounds one operation, not repository size. Operators must retain the task, scope, frozen revision and plan and verify cursor progress before admitting another continuation; there is no background continuation scheduler. With `capacity`, the completion-driven continuation loop below handles this within one bounded native preparation. Completed blobs stay cached. The operator must stop on a non-advancing cursor, changed identity, cleanup failure, unsupported reader, exhausted configured resource capacity or missing authority, and must not wake a provider merely to poll indexing. Native dependency/review handoffs wait for an actual complete report.
 
 The additional real-worker capacity release test requires `PAPERCLIP_SOURCE_CAPACITY_FIXTURES` to name a JSON file with `legacy` and `capacity` reader entries containing `root`, `manifest`, `manifestSha256` and `revision`. Both code-only readers must match the server pins; missing fixtures fail the test. This gate exercises manifest selection, old-reader refusal with a configured budget, constructor budget forwarding and actual facts provenance without providers or production data.
 
 
-Ledger disk capacity is an independent operator gate: measure the entire scoped state directory, including SQLite WAL/SHM files, before admitting a continuation and after each operation. Enforce the configured per-repository and total state limits and check available disk and process memory; an aggregate content limit alone does not bound SQLite storage. A ledger-capacity failure stops further continuation and handoff. The reader itself does not enforce a filesystem quota. `source_memory_index_budget` and `source_memory_manifest_changed` distinguish reader capacity and saved-plan failures from a generic worker failure.
+Without the `capacity` policy, ledger disk capacity is an independent operator gate: measure the entire scoped state directory, including SQLite WAL/SHM files, before admitting a continuation and after each operation. Enforce the configured per-repository and total state limits and check available disk and process memory; an aggregate content limit alone does not bound SQLite storage. A ledger-capacity failure stops further continuation and handoff. The reader itself does not enforce a filesystem quota. `source_memory_index_budget` and `source_memory_manifest_changed` distinguish reader capacity and saved-plan failures from a generic worker failure.
 
 These Node release gates are excluded from ordinary Vitest discovery: `server/vitest.config.ts` includes only `src/**/*.test.ts` and `scripts/**/*.test.mjs`, while the gates live in `src/services/*.test.mjs`. The root config delegates server discovery to that project configuration. Run the config gate explicitly with `node --test server/src/services/source-memory-capacity-config.test.mjs`, and the worker gate with `PAPERCLIP_SOURCE_CAPACITY_FIXTURES=/absolute/fixtures.json node --test server/src/services/source-memory-capacity-worker.test.mjs`.
 
 The exact reusable reader delta is retained in `docs/guides/source-reader-capacity.patch`, including the five real Git/SQLite regression tests and source provenance. Apply it to the exact accepted code-only reader baseline described there; runtime code remains covered by the new 38-file manifest pin.
+
+## Resource-aware indexing and saved-progress continuation
+
+An optional `capacity` object in the operator source-memory JSON configuration
+provides resource-aware storage allowances for native preparation. It does not
+change the independent limits of external operator scripts. With
+no `capacity` object the existing behavior is unchanged. This is infrastructure
+configuration, never a task-prompt setting; only explicitly bound projects use it.
+It requires the existing capacity reader `d09c6d2da901d5201b58deebd040725ba926737c`.
+
+```json
+{
+  "capacity": {
+    "mode": "auto",
+    "diskFraction": 0.1,
+    "reserveDiskBytes": 1073741824,
+    "memoryFraction": 0.2,
+    "retrievalExpansionFactor": 16,
+    "reserveMemoryBytes": 268435456,
+    "maxBatchFiles": 100,
+    "sliceMs": 60000,
+    "maxSlices": 32,
+    "maxDurationMs": 600000
+  }
+}
+```
+
+This fragment belongs beside `version`, `state`, `reader`, `manifest`, and
+`bindings` in the existing configuration. It does not enable a new project or
+change any model, provider, agent session, task policy, or approval. Existing
+per-binding `maxContentBytes` remains an explicit content ceiling.
+
+Automatic mode allocates up to 10% of filesystem capacity, constrained by current
+free disk after the 1 GiB reserve. The share stays fixed as usage grows; repeated
+batches cannot ratchet the allowance upward. Optional `maxStateBytes` and
+`maxScopeBytes` impose explicit ceilings that automatic sizing cannot increase.
+Fixed mode requires both ceilings. Sizes are bytes. Storage is measured on disk,
+including SQLite sidecars; it is independent of RAM. The disk-derived content allowance
+is a quarter of the scope storage allowance. Full document retrieval also needs
+memory: content is capped at the usable memory share divided by
+`retrievalExpansionFactor` (default 16, configurable integer 1–64). Explicit
+content ceilings can lower this further. If committed content exceeds a newly
+smaller resource allowance, the request stops with saved progress intact; it does
+not evict source or repeatedly retry.
+
+Available memory is the lesser of host free memory and Node's process-available
+memory (which accounts for supported container limits). After the memory reserve,
+20% is usable for batches. Each batch reserves a conservative 16-times per-file
+expansion plus disk overhead. Disk and memory are resampled between batches.
+Complete `verify` and existing-event `commit` skip allocation probes and never
+fail merely because another scope exceeded its disk allowance. A phase that
+materializes full documents still checks memory, but not shared growth allowance.
+These are admission safeguards, not hard OS memory quotas or exact predictions of
+SQLite expansion. Limits are checked again after each batch; an external writer
+or disk consumption outside Paperclip can still cause a resource failure. The additional content ceiling accounts for the existing full-document
+retrieval path; its 16-times expansion allowance is still a conservative estimate,
+not an OS-enforced maximum. On systems whose free-memory reading excludes
+reclaimable pages, operators can lower the reserve and the expansion factor after
+measuring actual retrieval cost; this explicitly reduces the safety margin.
+
+The private SQLite capacity lease serializes index growth across configured
+companies/scopes sharing this state directory. Complete unchanged scopes and
+pre-dispatch verification do not take the global lease; the existing per-scope
+runtime lock still applies. The growth lease is released before document retrieval
+and runtime observation writes. Growth contention refuses immediately
+with `source_memory_capacity_busy`; no polling or hidden retry is started. SQLite
+releases the lease on process exit, including a crash. External tools and legacy
+configurations without this policy must not concurrently write the same state.
+The configured `state` root must be private (mode 0700) and must not itself be a
+symlink; enabling capacity on an incompatible existing root refuses with a named
+state error. The feature does not rewrite existing directory permissions. State
+inventories refuse symlinks and special files, skip vanished journal entries,
+and are capped at 20,000 entries.
+
+Each worker commits reader batches to the existing manifest and blob cache. At
+the soft slice deadline it yields its revision, immutable plan identity and saved
+cursor. The parent continues immediately only after strictly increasing progress
+on the same plan. Completed files and cached blobs are reused, and the total blob
+read count includes every slice. A completed unchanged revision takes the normal
+zero-blob-read path. Restarting the request resumes the same durable reader state;
+no new ledger, file-plan reset, or synthetic successful runtime observation is
+created for an unfinished slice.
+
+The 180-second process watchdog remains unchanged. `sliceMs` is 1–120,000 ms,
+`maxSlices` is 1–128, `maxBatchFiles` is 1–500, and `maxDurationMs` is
+1–3,600,000 ms. The overall invocation deadline also cancels an active child.
+Defaults are 60 seconds / 32 slices / 100 files / 10 minutes. The current batch
+may overrun the soft deadline; the watchdog and cancellation still apply. No
+resource refusal, reader exception, aborted operation, changed source/plan, or
+non-advancing cursor is automatically retried. Budget exhaustion is named
+`source_memory_continuation_budget`; insufficient resources use
+`source_memory_capacity_wait`. Saved progress remains for the next authorized
+preparation after capacity/configuration changes. There is no timer, provider wake,
+new agent turn, or scheduler that repeatedly probes for capacity.
+
+Validation: use `source-memory-autosize.test.mjs` with the pinned-reader fixture
+configuration. It exercises disposable Git repositories, real SQLite manifests,
+separate parent/worker processes, saved-progress restart, byte-identical cache
+reuse, zero-read duplicates, contention, resource refusal and no-progress stops.
+It does not index company source or run a model as a fixture.
+
+Native admission/capture regression gate (disposable Git and private ledgers):
+
+```sh
+SOURCE_MEMORY_READER_FIXTURE=/absolute/tooling-9c477cebfff7 \
+node --experimental-vm-modules --test server/src/services/heartbeat/source-memory-admission.test.mjs
+```
+
+The adjacent `tooling-9c477cebfff7-manifest.json` must match the server's legacy
+reader pin. The VM flag is required by the synthetic authorization-store fixture;
+it is not a server runtime requirement. Missing it fails before the tests run.

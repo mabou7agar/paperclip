@@ -25,7 +25,7 @@ test('real worker enforces reader pins, per-binding capacity and reader provenan
     encoding:'utf8',env:{...process.env,GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:'/dev/null',GIT_TERMINAL_PROMPT:'0'}}).trim();
   try{
     await writeFile(path.join(built,'package.json'),'{}');
-    for(const name of ['source-memory','source-memory-retention','source-citation-reader']){
+    for(const name of ['source-memory','source-memory-capacity','source-memory-resource-repository','source-memory-indexing','source-memory-retention','source-citation-reader']){
       const code=await readFile(new URL('./'+name+'.ts',import.meta.url),'utf8');
       await writeFile(path.join(built,name+'.js'),stripTypeScriptTypes(code,{mode:'transform',sourceUrl:fileURLToPath(new URL('./'+name+'.ts',import.meta.url))}));
     }

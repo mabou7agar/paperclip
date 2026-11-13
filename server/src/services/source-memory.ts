@@ -1,3 +1,6 @@
+import { validateIndexCapacity, continueSourceIndex, type SourceIndexCapacity, type IndexProgress } from "./source-memory-capacity.js";
+import { SourceMemoryResourceRepository } from "./source-memory-resource-repository.js";
+import { refreshSourceIndex } from "./source-memory-indexing.js";
 import { initializeSourceMemoryRetention, cleanupSourceMemoryRetention } from "./source-memory-retention.js";
 export { SOURCE_MEMORY_RETENTION, initializeSourceMemoryRetention, cleanupSourceMemoryRetention } from "./source-memory-retention.js";
 import { readSourceCitationFromGit } from "./source-citation-reader.js";
@@ -23,7 +26,7 @@ type Scope = { companyId: string; projectId: string; repositoryId: string };
 type Binding = Scope & { roots: string[]; remoteRoots?: string[]; maxContentBytes?: number };
 export type RemoteSourceRequest = { args: string[]; stdin?: string; maxBytes: number; guards?: { safe: string; storage: string } };
 export type RemoteSourceReader = (request: RemoteSourceRequest) => Promise<string>;
-type Configuration = { version: 1; state: string; reader: string; manifest: string; bindings: Binding[] };
+type Configuration = { version: 1; state: string; reader: string; manifest: string; bindings: Binding[]; capacity?: SourceIndexCapacity };
 export type SourceMemoryInput = {
   companyId: string; projectId: string | null; issueId: string; runId: string;
   phase: string | null; provider: string | null; model: string | null;
@@ -31,7 +34,7 @@ export type SourceMemoryInput = {
   signal?: AbortSignal; query?: string;
 };
 type CitationRead = { revision: string; path: string; startLine: number; endLine: number };
-type WorkerInput = { config: Configuration; scope: Scope; input: Omit<SourceMemoryInput, "signal">; operation: "phase" | "commit" | "verify" | "citation" | "capture"; citation?: CitationRead; expected?: Pick<SourceMemoryEvidence, "revision" | "ref" | "dirty"> };
+type WorkerInput = { config: Configuration; scope: Scope; input: Omit<SourceMemoryInput, "signal">; operation: "phase" | "commit" | "verify" | "citation" | "capture"; indexProgress?: IndexProgress; citation?: CitationRead; expected?: Pick<SourceMemoryEvidence, "revision" | "ref" | "dirty"> };
 export type SourceMemoryEvidence = {
   schema: 1; scope: Scope; revision: string; ref: string; taskRef: string; event: "changed" | "duplicate";
   dirty: { trackedDiffSha256: string; untrackedPathsSha256: string; trackedBytes: number; untrackedPaths: number };
@@ -57,6 +60,7 @@ async function configuration(file: string, scope: Pick<SourceMemoryInput, "compa
   requireValue(c.version === 1 && path.isAbsolute(c.state) && path.isAbsolute(c.reader) && path.isAbsolute(c.manifest) && Array.isArray(c.bindings), "configuration_invalid");
   for (const b of c.bindings) requireValue(b.companyId && b.projectId && b.repositoryId && Array.isArray(b.roots) && b.roots.every(r => path.isAbsolute(r)) && (!b.remoteRoots || Array.isArray(b.remoteRoots) && b.remoteRoots.every(r => path.posix.isAbsolute(r))), "configuration_invalid");
   for (const b of c.bindings) requireValue(b.maxContentBytes === undefined || Number.isSafeInteger(b.maxContentBytes) && b.maxContentBytes > 0, "capacity_invalid");
+  if (c.capacity !== undefined) validateIndexCapacity(c.capacity);
   return c;
 }
 
@@ -103,7 +107,16 @@ export async function prepareSourceMemory(input: SourceMemoryInput, operation: "
   requireValue(approved.some(r => root === r || root.startsWith(r + path.sep)), "root_denied");
   const { signal, ...workerInput } = input;
   const payload: WorkerInput = { config, scope: { companyId: input.companyId, projectId: input.projectId, repositoryId }, input: { ...workerInput, cwd: root }, operation, expected, citation };
-  return runWorker(payload, signal, remoteRead);
+  if (!config.capacity || operation === "capture" || operation === "citation") return runWorker(payload, signal, remoteRead) as Promise<SourceMemoryEvidence>;
+  let blobReads = 0;
+  return continueSourceIndex<SourceMemoryEvidence>(config.capacity, async (indexProgress, remainingMs) => {
+    const deadline = AbortSignal.timeout(remainingMs);
+    let result: WorkerResult;
+    try { result = await runWorker({ ...payload, indexProgress }, signal ? AbortSignal.any([signal, deadline]) : deadline, remoteRead); }
+    catch (error) { if (deadline.aborted && !signal?.aborted) throw new Error("source_memory_continuation_budget"); throw error; }
+    blobReads += result.blobReads;
+    return "indexPending" in result ? result : { ...result, blobReads };
+  }, signal);
 }
 
 /** Runs on its own event loop while the worker's main thread is blocked by
@@ -165,7 +178,8 @@ if (process.ppid !== expectedParent || !process.connected || process.hrtime.bigi
 await import(pathToFileURL(process.argv[1]).href);
 `;
 
-function runWorker(payload: WorkerInput, signal?: AbortSignal, remoteRead?: RemoteSourceReader): Promise<SourceMemoryEvidence> {
+type WorkerResult = SourceMemoryEvidence | { indexPending: IndexProgress; blobReads: number };
+function runWorker(payload: WorkerInput, signal?: AbortSignal, remoteRead?: RemoteSourceReader): Promise<WorkerResult> {
   return new Promise((resolve, reject) => {
     requireValue(process.pid !== 1, "parent_pid1_unsupported");
     requireValue(!signal?.aborted, "cancelled");
@@ -235,7 +249,7 @@ async function verifiedReader(config: Configuration) {
   const m = JSON.parse(manifest.toString());
   const expectedRevision = manifestHash === MANIFEST_HASH ? READER_REVISION : CAPACITY_READER_REVISION;
   requireValue(m.revision === expectedRevision && m.files.length === 38, "reader_revision_changed");
-  requireValue(!config.bindings.some(b => b.maxContentBytes !== undefined) || m.revision === CAPACITY_READER_REVISION, "reader_capacity_unsupported");
+  requireValue(!config.capacity && !config.bindings.some(b => b.maxContentBytes !== undefined) || m.revision === CAPACITY_READER_REVISION, "reader_capacity_unsupported");
   const root = await realpath(config.reader);
   for (const f of m.files) {
     const file = await realpath(path.resolve(root, f.path));
@@ -376,7 +390,11 @@ async function worker(payload: WorkerInput) {
     // Immutable Git-object mode: evidence always comes from the full committed SHA.
     // Dirty work is never indexed; actual diff/hidden-index proof remains separate before and after.
     memory.sources.freshness = async (_root: string, revision: string) => (await git(input.cwd, ["rev-parse", "HEAD"])).trim() === revision ? null : "checkout_revision_changed";
-    const refresh = await memory.refresh(scope, { batchSize: remoteMode ? 50 : 500, phase: operation === "phase" });
+    const refresh = config.capacity
+      ? await refreshSourceIndex(memory, scope, before.revision, config.capacity,
+          new SourceMemoryResourceRepository(config.state, state), binding.maxContentBytes, payload.indexProgress, remoteMode ? 50 : 500, !previous || operation === "phase")
+      : await memory.refresh(scope, { batchSize: remoteMode ? 50 : 500, phase: operation === "phase" });
+    if ("indexPending" in refresh) return refresh;
     let queue = previous ? JSON.parse(previous.queue) : [];
     if (!previous) {
       let changed: string[];
