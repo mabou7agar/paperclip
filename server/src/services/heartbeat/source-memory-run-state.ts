@@ -1,6 +1,7 @@
 /** Source snapshot ownership follows the run, not the retry chain. */
 export function freshSourceMemoryRetryContext(context: Record<string, unknown>) {
-  const { sourceSnapshot: _previousSnapshot, ...fresh } = context;
+  const { sourceSnapshot: _previousSnapshot, sourceReferenceUsage: _previousReferenceUsage,
+    paperclipSourceReferenceUsage: _previousPromptUsage, ...fresh } = context;
   return fresh;
 }
 

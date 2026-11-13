@@ -1,3 +1,4 @@
+import type { SourceReferenceBundle } from "./source-memory-reference-types.js";
 import { validateIndexCapacity, continueSourceIndex, type SourceIndexCapacity, type IndexProgress } from "./source-memory-capacity.js";
 import { SourceMemoryResourceRepository } from "./source-memory-resource-repository.js";
 import { refreshSourceIndex } from "./source-memory-indexing.js";
@@ -34,7 +35,7 @@ export type SourceMemoryInput = {
   signal?: AbortSignal; query?: string;
 };
 type CitationRead = { revision: string; path: string; startLine: number; endLine: number };
-type WorkerInput = { config: Configuration; scope: Scope; input: Omit<SourceMemoryInput, "signal">; operation: "phase" | "commit" | "verify" | "citation" | "capture"; indexProgress?: IndexProgress; citation?: CitationRead; expected?: Pick<SourceMemoryEvidence, "revision" | "ref" | "dirty"> };
+type WorkerInput = { config: Configuration; scope: Scope; input: Omit<SourceMemoryInput, "signal">; operation: "phase" | "commit" | "verify" | "citation" | "capture" | "reference"; referenceRevision?: string; indexProgress?: IndexProgress; citation?: CitationRead; expected?: Pick<SourceMemoryEvidence, "revision" | "ref" | "dirty"> };
 export type SourceMemoryEvidence = {
   schema: 1; scope: Scope; revision: string; ref: string; taskRef: string; event: "changed" | "duplicate";
   dirty: { trackedDiffSha256: string; untrackedPathsSha256: string; trackedBytes: number; untrackedPaths: number };
@@ -119,6 +120,19 @@ export async function prepareSourceMemory(input: SourceMemoryInput, operation: "
   }, signal);
 }
 
+/** Index-only reference read; never enters current-candidate capture or refresh. */
+export async function prepareSourceReferenceIndex(input:SourceMemoryInput,revision:string,file:string):Promise<SourceReferenceBundle|null> {
+  const config=await configuration(file,input);
+  if (!config || !input.projectId || !input.repoUrl) return null;
+  const repositoryId=sourceMemoryRepositoryId(input.repoUrl);
+  const bindings=config.bindings.filter(b=>b.companyId===input.companyId&&b.projectId===input.projectId&&b.repositoryId===repositoryId);
+  requireValue(bindings.length===1 && !input.remoteAuthority && /^[a-f0-9]{40}$/.test(revision),"reference_binding_invalid");
+  const root=await realpath(input.cwd),roots=await Promise.all(bindings[0].roots.map(r=>realpath(r)));
+  requireValue(roots.includes(root),"root_denied");
+  const {signal,...workerInput}=input;
+  return runWorker<SourceReferenceBundle>({config,scope:{companyId:input.companyId,projectId:input.projectId,repositoryId},input:{...workerInput,cwd:root},operation:"reference",referenceRevision:revision},signal);
+}
+
 /** Runs on its own event loop while the worker's main thread is blocked by
  * synchronous bundle initialization or SQLite. Only its own detached process
  * group may be killed; expectedParent is used for comparison, never as a target.
@@ -179,7 +193,7 @@ await import(pathToFileURL(process.argv[1]).href);
 `;
 
 type WorkerResult = SourceMemoryEvidence | { indexPending: IndexProgress; blobReads: number };
-function runWorker(payload: WorkerInput, signal?: AbortSignal, remoteRead?: RemoteSourceReader): Promise<WorkerResult> {
+function runWorker<T = WorkerResult>(payload: WorkerInput, signal?: AbortSignal, remoteRead?: RemoteSourceReader): Promise<T> {
   return new Promise((resolve, reject) => {
     requireValue(process.pid !== 1, "parent_pid1_unsupported");
     requireValue(!signal?.aborted, "cancelled");
@@ -330,6 +344,11 @@ async function worker(payload: WorkerInput) {
   const { config, scope, input, operation } = payload;
   const { Memory, readerRevision } = await verifiedReader(config);
   remoteMode = input.remoteAuthority;
+  if (operation === "reference") {
+    requireValue(!input.remoteAuthority && payload.referenceRevision, "reference_binding_invalid");
+    const {SourceMemoryReferenceRepository}=await import("./source-memory-reference-repository.js");
+    return new SourceMemoryReferenceRepository(config.state).read(scope, payload.referenceRevision, input.query ?? "");
+  }
   requireValue(sourceMemoryRepositoryId((await git(input.cwd, ["remote", "get-url", "origin"])).trim()) === scope.repositoryId, "repository_mismatch");
   if (operation === "citation") {
     const citation = await readSourceCitationFromGit(scope, payload.citation!, async (args, stdin, maxBytes) => {

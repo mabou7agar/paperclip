@@ -290,3 +290,72 @@ node --experimental-vm-modules --test server/src/services/heartbeat/source-memor
 The adjacent `tooling-9c477cebfff7-manifest.json` must match the server's legacy
 reader pin. The VM flag is required by the synthetic authorization-store fixture;
 it is not a server runtime requirement. Missing it fails before the tests run.
+
+## Share existing indices as development references
+
+Current-candidate evidence and historical development references have separate
+purposes. Opting an ordinary delivery project into strict source review solely
+to read another project's index can block its legacy reviews. Keep the existing
+`bindings` and their candidate gates unchanged. An operator can instead add
+`references` to the same private source-memory configuration:
+
+```json
+{
+  "references": [
+    {
+      "companyId": "company-id",
+      "consumerProjectId": "delivery-project-id",
+      "projectId": "indexed-source-project-id",
+      "repositoryId": "github.com/example/application",
+      "revision": "0123456789012345678901234567890123456789"
+    }
+  ]
+}
+```
+
+This is an additive configuration fragment. Keep the configured reader, state,
+capacity policy and source-project bindings. The referenced project must have
+one matching binding in the same company and an already complete index at the
+explicit full revision. References are opt-in per consuming project. Removing
+a share before its lookup finishes discards the returned snippets. An unreadable
+or invalid configuration does not opt a consumer into reference preparation. Missing,
+busy, corrupt or incomplete reference indices report `unavailable` when no
+reference is delivered, or `partial` when other targets still supply snippets. They do
+not rebuild the index, retry, wake agents or impose a new review requirement.
+Run cancellation and lost execution ownership still stop preparation normally.
+
+Native task prompts receive a bounded **Indexed repository references** section
+during planning, implementation and review. The native preparation branch owns
+this optional integration. Legacy adapter preparation and compact resume
+markdown stay unchanged. The lookup reads the
+existing SQLite documents in a guarded subprocess; it performs no Git blob
+reads, index refresh or source-plan rewrite. It selects at most four reference
+targets and two snippets per target, with a six-second shared deadline. The
+injected section is bounded to 24 KiB, including metadata. Search first ranks
+matching paths; only a path miss scans indexed document text. Caseful Unicode
+uses Unicode folding. Search is lexical, not semantic, and coverage/exclusions
+remain those of the indexed revision. A successful empty lookup reports
+`no_matches`. No-match scans can take longer than path matches; the shared
+subprocess deadline makes this optional work bounded.
+
+Each snippet names its indexed scope, revision, path, line range and full-file
+content hash. These are historical, untrusted references for locating relevant
+code. Inspect the actual task workspace and changes before implementation or
+review. Reference snippets cannot populate `sourceCitations`,
+`sourceCitationResults` or `sourceCurrentEvidenceSatisfied` and cannot satisfy
+current-candidate, independent-review, acceptance or deployment gates.
+
+A server-written `contextSnapshot.sourceReferenceUsage` receipt records the
+lookup status, number of reference targets and snippets, and zero blob reads
+and refreshes. That records preparation of the reference context; it does not
+claim the model understood every file or actually relied on every snippet.
+Recovery retains the saved execution input and does not perform a new lookup.
+No task/session reassignment, session reset, budget reset or retry is added.
+
+For UI development, keep design requirements in the existing trusted agent/task
+instructions. For projects that use UI UX Pro Max and Impeccable, require both
+workflows, inspect the rendered interface before editing, and retain sanitized before/after
+screenshots and a video of the relevant desktop/mobile journey. Use the
+existing task evidence/attachment system and independent review. A backend-only
+reference change does not establish browser acceptance or justify fabricated
+UI evidence.

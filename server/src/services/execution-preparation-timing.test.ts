@@ -167,3 +167,11 @@ it("keeps plugin dispatch beneath its active startup step and gives the worker t
   }));
   expect(parents.get("execution.plugin_dispatch")).toBe(stepContext);
 });
+
+
+it("times optional source reference preparation without tracing or repeating its work", async () => {
+  vi.stubEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "");
+  const work = vi.fn(async () => ({ hits: 1 }));
+  await expect(createRunPreparationTiming("reference-run")("source_references", work)).resolves.toEqual({ hits: 1 });
+  expect(work).toHaveBeenCalledOnce();
+});

@@ -59,6 +59,7 @@ import { nativeRecoveryClaimRelinquished } from "./native-runtime/native-executi
 import { executeHeartbeatRuntime, NativeSessionResumeScheduledError, NativeWorkspaceFinalizeScheduledError } from "./heartbeat/runtime-execution.js";
 import { sourceMemoryRunIdentity, sourceReviewCandidateSha, sourceReviewAssignedTo } from "./heartbeat/source-memory-run-state.js";
 import { attachSourceMemoryContext } from "./source-memory.js";
+import { prepareHeartbeatSourceReferences, recordSourceReferenceUsage } from "./heartbeat/source-references.js";
 import { readRemoteWorkspaceAuthority } from "./remote-workspaces.js";
 import { authorizeSourceCitation } from "./source-citation-authorization.js";
 import { prepareHeartbeatSourceMemory } from "./heartbeat/source-memory.js";
@@ -3519,6 +3520,15 @@ export function heartbeatService(
               ? (await executionWorkspacesSvc.getStoredById(run.companyId, persistedExecutionWorkspace.id))?.metadata : null),
           }));
           attachSourceMemoryContext(context, sourceMemoryState.current.evidence);
+          if (nativeRuntimeResolution.kind === "native") await timePreparation("source_references",()=>prepareHeartbeatSourceReferences({
+            identity:{companyId:run.companyId,projectId:executionWorkspace.projectId,issueId:issueRef?.id??"",runId:run.id,...sourceRunIdentity,
+              cwd:executionWorkspace.cwd,repoUrl:executionWorkspace.repoUrl,remoteAuthority:false,signal:executionControl.controller.signal,
+              query:[issueRef?.title,issueRef?.description].filter(Boolean).join(" ").slice(0,2000)},
+            recovering:recoveringSource,context,
+            assertOwned:()=>run.runtimeMode==="native"?assertNativeSessionPreparationAuthority({db,companyId:run.companyId,runId:run.id,leaseOwner:runOptions.nativeLeaseOwner}):controllerLease.assertOwned(),
+            recordUsage:usage=>recordSourceReferenceUsage(db,{companyId:run.companyId,runId:run.id},usage),
+            warn:()=>logger.warn({companyId:run.companyId,runId:run.id},"Optional source reference usage receipt could not be saved"),
+          }));
         };
         // Fresh native attribution arrives after overrides/defaults/compatibility
         // selection, before its prompt is built. Recovery never reindexes HEAD.
