@@ -794,6 +794,8 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(issue).toMatchObject({ status, assigneeAgentId: reassigned ? null : agentId });
   });
 
+  // Cold Linux workspace/accounting preparation exceeded 15 seconds. Bound
+  // observable handoff at 30 seconds inside a 45-second test budget.
   it.each(["in_review", "blocked"])("delivers an addressed CTO question once without taking worker ownership or losing context (%s)", async status => {
     const { companyId, agentId } = await seedCompanyAndAgent({ agentName: "CTO", heartbeatConfig: { enabled: false } });
     const workerId = randomUUID();
@@ -812,7 +814,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       wakeReason: "interaction_pending", invocationSource: "automation", contextExtras: context });
 
     await heartbeat.resumeQueuedRuns();
-    expect(await waitForCondition(async () => countExecuteCallsForRun(runId) === 1)).toBe(true);
+    expect(await waitForCondition(async () => countExecuteCallsForRun(runId) === 1, 30_000)).toBe(true);
     await heartbeat.waitForRunExecutionDrain(runId);
     await heartbeat.resumeQueuedRuns();
     const run = await heartbeat.getRun(runId);
@@ -821,7 +823,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect((await db.select().from(issues).where(eq(issues.id, issue.id)))[0]).toMatchObject({ status, assigneeAgentId: workerId });
     expect((await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, interaction.id)))[0].status).toBe("pending");
     if (status === "blocked") expect((await issueService(db).listDependencyReadiness(companyId, [issue.id])).get(issue.id)?.isDependencyReady).toBe(false);
-  });
+  }, 45_000);
 
   it.each(["pending", "answered", "wrong_recipient", "human_only", "self_addressed", "owner_not_creator", "creator_not_owner"] as const)("admits only a current authorized addressed card on a dependency-blocked task (%s)", async kind => {
     const { companyId, agentId } = await seedCompanyAndAgent();
@@ -849,7 +851,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.issueId, issue.id)),
         JSON.stringify(await db.select({ status: agentWakeupRequests.status, reason: agentWakeupRequests.reason }).from(agentWakeupRequests)))
         .toHaveLength(1);
-      expect(await waitForCondition(async () => mockAdapterExecute.mock.calls.length === 1)).toBe(true);
+      expect(await waitForCondition(async () => mockAdapterExecute.mock.calls.length === 1, 30_000)).toBe(true);
       const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.issueId, issue.id));
       await heartbeat.waitForRunExecutionDrain(run.id);
       expect(await heartbeat.getRun(run.id)).toMatchObject({ status: "succeeded", contextSnapshot: { dependencyBlockedInteraction: true } });
@@ -859,7 +861,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(mockAdapterExecute).toHaveBeenCalledTimes(kind === "pending" ? 1 : 0);
     expect((await db.select().from(issues).where(eq(issues.id, issue.id)))[0]).toMatchObject({ status: "blocked", assigneeAgentId: ownerId });
     expect((await issueService(db).listDependencyReadiness(companyId, [issue.id])).get(issue.id)?.isDependencyReady).toBe(false);
-  });
+  }, 45_000);
 
   it.each(["answered", "recipient_became_owner"] as const)("refuses a blocked addressed card changed while waiting for recipient capacity (%s)", async change => {
     const { companyId, agentId } = await seedCompanyAndAgent();
