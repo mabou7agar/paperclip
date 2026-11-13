@@ -223,6 +223,9 @@ describe.skipIf(!support.supported)("heartbeat runtime selection boundary", () =
     await db.update(heartbeatRuns).set({status:"cancelled"}).where(eq(heartbeatRuns.id,other.run.id));
     expect(await recordSourceReferenceUsage(db,{companyId:other.agent.companyId,runId:other.run.id},usage)).toBe(false);
     expect((await read(other.run.id)).contextSnapshot ?? {}).not.toHaveProperty("sourceReferenceUsage");
+    await prepareHeartbeatSourceReferences({identity:{companyId:f.agent.companyId,projectId:"delivery",issueId:f.issue.id,runId:f.run.id,phase:"implementation",provider:"codex",model:"sol",cwd:"/unused",repoUrl:null,remoteAuthority:false},recovering:false,context,lookup,assertOwned,
+      recordUsage:receipt=>recordSourceReferenceUsage(db,{companyId:f.agent.companyId,runId:f.run.id},receipt),warn});
+    expect(warn).toHaveBeenCalledOnce();expect(lookup).toHaveBeenCalledTimes(2);expect((await read(f.run.id)).contextSnapshot?.sourceReferenceUsage).toEqual(usage);
   });
   it("native source reference receipt failure warns without blocking prepared context or scheduling another lookup",async()=>{
     const f=await fixture(),context:Record<string,unknown>={paperclipTaskMarkdown:"Accepted plan"},warn=vi.fn(),lookup=vi.fn(async()=>referencePacket(f.agent.companyId));

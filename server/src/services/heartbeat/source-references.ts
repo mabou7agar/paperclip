@@ -15,12 +15,12 @@ export async function recordSourceReferenceUsage(db:Db,run:{companyId:string;run
 /** Shared by actual heartbeat wiring and the assembled native-input tests. */
 export async function prepareHeartbeatSourceReferences(input:{
   identity:SourceMemoryInput; recovering:boolean; context:Record<string,unknown>;
-  assertOwned:()=>Promise<void>; recordUsage:(usage:SourceReferenceUsage)=>Promise<unknown>; warn:()=>void;
+  assertOwned:()=>Promise<void>; recordUsage:(usage:SourceReferenceUsage)=>Promise<boolean>; warn:()=>void;
   lookup?:typeof prepareSourceMemoryReferences;
 }) {
   if(input.recovering)return;
   const lookup=await(input.lookup??prepareSourceMemoryReferences)(input.identity,input.assertOwned);
   const usage=attachSourceReferenceContext(input.context,lookup);
   if(!usage)return;
-  try{await input.recordUsage(usage);}catch{input.warn();}
+  try{if(await input.recordUsage(usage)===false)input.warn();}catch{input.warn();}
 }

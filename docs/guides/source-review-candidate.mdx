@@ -350,6 +350,9 @@ lookup status, number of reference targets and snippets, and zero blob reads
 and refreshes. That records preparation of the reference context; it does not
 claim the model understood every file or actually relied on every snippet.
 Recovery retains the saved execution input and does not perform a new lookup.
+New admissions remove inherited reference packets and delivery receipts while
+retaining the task plan and later routing guidance. A rejected receipt write
+warns without retrying the lookup or blocking task preparation.
 No task/session reassignment, session reset, budget reset or retry is added.
 
 For UI development, keep design requirements in the existing trusted agent/task

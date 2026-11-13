@@ -94,8 +94,8 @@ test('malformed optional bindings return unavailable instead of failing a consum
 const fixturesFile=process.env.PAPERCLIP_SOURCE_CAPACITY_FIXTURES;
 test('guarded native subprocess consumes an existing index and refuses revoked access without Git or refresh', {skip:!fixturesFile},async()=>{
  const f=await fixture();try{
-  const known=JSON.parse(await readFile(fixturesFile,'utf8'));const built=path.join(f.root,'built');await mkdir(built);await writeFile(path.join(built,'package.json'),'{"type":"module"}');
-  for(const name of ['source-memory','source-memory-reference','source-memory-reference-types','source-memory-reference-repository','source-memory-retention','source-citation-reader','source-memory-capacity','source-memory-resource-repository','source-memory-indexing'])await writeFile(path.join(built,name+'.js'),stripTypeScriptTypes(await readFile(new URL('./'+name+'.ts',import.meta.url),'utf8'),{mode:'transform'}));
+  const known=JSON.parse(await readFile(fixturesFile,'utf8'));const built=path.join(f.root,'built');await mkdir(built);await mkdir(path.join(built,'heartbeat'));await writeFile(path.join(built,'package.json'),'{"type":"module"}');
+  for(const name of ['source-memory','source-memory-reference','source-memory-reference-types','source-memory-reference-repository','source-memory-retention','source-citation-reader','source-memory-capacity','source-memory-resource-repository','source-memory-indexing','heartbeat/source-memory-run-state'])await writeFile(path.join(built,name+'.js'),stripTypeScriptTypes(await readFile(new URL('./'+name+'.ts',import.meta.url),'utf8'),{mode:'transform'}));
   const checkout=path.join(f.root,'checkout');await mkdir(checkout);const config=path.join(f.root,'config.json');
   const data={version:1,state:f.root,reader:known.reader,manifest:known.manifest,bindings:[{...scope,roots:[checkout]},{...scope,projectId:'other-project',roots:['/must-not-be-read']}],references:[target]};await writeFile(config,JSON.stringify(data));
   const oldPath=process.env.PATH;process.env.PATH='/nonexistent';const service=await import(pathToFileURL(path.join(built,'source-memory-reference.js')).href);process.env.PATH=oldPath;
@@ -113,8 +113,22 @@ test('guarded native subprocess consumes an existing index and refuses revoked a
  }finally{await rm(f.root,{recursive:true,force:true});}
 });
 
-test('new admissions do not inherit old reference delivery receipts or lose the saved plan',async()=>{
+test('new admissions clear old snippets and receipts without changing the saved plan or predecessor',async()=>{
  const {freshSourceMemoryRetryContext}=await import('./heartbeat/source-memory-run-state.ts');
- const plan={task:'same',acceptedPlan:'preserve',providerSession:'same-thread'};
- assert.deepEqual(freshSourceMemoryRetryContext({...plan,sourceSnapshot:{revision},sourceReferenceUsage:{status:'available'},paperclipSourceReferenceUsage:{hits:3}}),plan);
+ const plan={task:'same',acceptedPlan:'preserve',providerSession:'same-thread',paperclipTaskMarkdown:'Accepted plan',paperclipTaskMarkdownAssignment:'Accepted assignment',paperclipTaskMarkdownCompact:'Compact plan'};
+ const previous={...plan,sourceSnapshot:{revision},sourceReferenceUsage:{status:'available'}};
+ attachSourceReferenceContext(previous,{schema:1,status:'available',references:[{schema:1,standing:'reference',indexedScope:scope,revision,hits:[{path:'src/McpBrowser.ts',startLine:1,endLine:3,content,indexedContentSha256:sha(content)}],blobReads:0,indexRefreshes:0}],blobReads:0,indexRefreshes:0});
+ previous.paperclipTaskMarkdown+='\n\nLater routing guidance';
+ const saved=structuredClone(previous),next=freshSourceMemoryRetryContext(previous);
+ assert.deepEqual(next,{...plan,paperclipTaskMarkdown:plan.paperclipTaskMarkdown+'\n\nLater routing guidance'});assert.deepEqual(previous,saved);assert.ok(!JSON.stringify(next).includes('## Indexed repository references'));
+});
+
+test('a target that returns no index result reports unavailable rather than no matches',async()=>{
+ const root=await realpath(await mkdtemp(path.join(tmpdir(),'reference-null-target-')));
+ try{
+  const file=path.join(root,'config.json'),data={version:1,state:root,reader:'/unused-reader',manifest:'/unused-manifest',bindings:[{...scope,roots:[root]}],references:[target]},bytes=JSON.stringify(data);
+  await writeFile(file,bytes);let owned=0;
+  const result=await prepareSourceMemoryReferences({companyId:'company',projectId:'delivery',issueId:'issue',runId:'run',phase:'implementation',provider:'codex',model:'sol',cwd:root,repoUrl:null,remoteAuthority:false},async()=>{await writeFile(file,++owned===1?JSON.stringify({...data,bindings:[]}):bytes);},file);
+  assert.equal(result.status,'unavailable');assert.deepEqual(result.references,[]);assert.equal(result.blobReads,0);assert.equal(owned,2);
+ }finally{await rm(root,{recursive:true,force:true});}
 });
