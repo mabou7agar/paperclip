@@ -21,7 +21,7 @@ const { readFile, mkdir } = await import('node:fs/promises');
 const compiled = await mkdtemp(path.join(tmpdir(),'osa457-compiled-'));
 await mkdir(path.join(compiled,'heartbeat'));
 await writeFile(path.join(compiled,'package.json'),' {"type":"module"}');
-for (const file of ['source-memory','source-memory-retention','source-memory-remote','source-citation-consumer','source-citation-reader','heartbeat/source-memory']) {
+for (const file of ['source-memory','source-memory-capacity','source-memory-resource-repository','source-memory-indexing','source-memory-retention','source-memory-remote','source-citation-consumer','source-citation-reader','heartbeat/source-memory']) {
   const source = await readFile(new URL('../'+file+'.ts',import.meta.url),'utf8');
   await writeFile(path.join(compiled,file+'.js'),stripTypeScriptTypes(source));
 }
