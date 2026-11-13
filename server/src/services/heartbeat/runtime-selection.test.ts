@@ -4,7 +4,7 @@ import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { activityLog, agents, authUsers, companyMemberships, companySkillRepositorySnapshots, principalPermissionGrants, environments, environmentLeases, companies, completionContracts, createDb, applyPendingMigrations, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, executionWorkspaces, heartbeatRuns, issues, nativeRunFinalizations, workspaceOperations, type Db } from "@paperclipai/db";
+import { activityLog, issueThreadInteractions, statusDecisions, workAssessments, nativeRunResults, agents, authUsers, companyMemberships, companySkillRepositorySnapshots, principalPermissionGrants, environments, environmentLeases, companies, completionContracts, createDb, applyPendingMigrations, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS, executionWorkspaces, heartbeatRuns, issues, nativeRunFinalizations, workspaceOperations, type Db } from "@paperclipai/db";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "../../__tests__/helpers/embedded-postgres.js";
@@ -25,7 +25,11 @@ import { resolveHeartbeatNativeRuntimeMode } from "../native-runtime/runtime-mod
 import { claimNativeRestartRecoveries } from "../native-runtime/native-restart-recovery.js";
 import { buildNativeModelEnvelope, canonicalNativeRuntimeContextDigest } from "../../vendor/paperclip-runner/index.js";
 import { prepareAndSelectHeartbeatRuntime, selectHeartbeatRuntime, type HeartbeatRuntimeSelectionInput } from "./runtime-selection.js";
+import { ensureNativeCompletionContract } from "../native-runtime/completion-contracts.js";
 import { reserveRunBudget } from "../budget-reservations.js";
+import { attachSourceReferenceContext } from "../source-memory-reference.js";
+import { prepareHeartbeatSourceReferences, recordSourceReferenceUsage } from "./source-references.js";
+import type { SourceReferenceLookup, SourceReferenceUsage } from "../source-memory-reference-types.js";
 import { legacyControllerClaim } from "../legacy-controller-lease.js";
 import { agentInstructionWorkingCopyService } from "../agent-instruction-working-copies.js";
 import { createHeartbeatInstructionWorkingCopy } from "./instruction-working-copy.js";
@@ -136,6 +140,8 @@ describe.skipIf(!support.supported)("heartbeat runtime selection boundary", () =
       expect((await read(run.id)).runnerProfileJson ?? {}).not.toHaveProperty("nativeExecutionInput");
       expect(await coordinators(run.id)).toEqual([]);
       input.task.context.paperclipTaskMarkdown = String(input.task.context.paperclipTaskMarkdown ?? "") + "\nsource context from selected runtime";
+      await prepareHeartbeatSourceReferences({identity:{companyId:input.agent.companyId,projectId:"delivery",issueId:input.task.issueRef!.id,runId:run.id,phase:"implementation",provider:identity.provider,model:identity.model,cwd:"/unused",repoUrl:null,remoteAuthority:false},recovering:false,context:input.task.context,
+        assertOwned:async()=>{},lookup:async()=>referencePacket(input.agent.companyId),recordUsage:usage=>recordSourceReferenceUsage(db,{companyId:input.agent.companyId,runId:run.id},usage),warn:()=>{throw Error("Unexpected receipt refusal");}});
     });
     const selected = await prepareAndSelectHeartbeatRuntime(db, input, {
       measure: async (_phase, work) => work(),
@@ -149,6 +155,34 @@ describe.skipIf(!support.supported)("heartbeat runtime selection boundary", () =
     expect(selected.nativeExecution.provider).toMatchObject({ kind: "codex", model: "gpt-6.1-sol" });
     expect(selected.nativeExecution.task.prompt).toContain("source context from selected runtime");
     expect(selected.nativeExecution.task.prompt).toContain("prepared instruction guidance");
+    expect(selected.nativeExecution.task.prompt).toContain("Existing indexed architecture");
+    expect(selected.nativeExecution.task.prompt).toContain("NOT current-candidate evidence");
+    expect(selected.nativeExecution.task.prompt).toContain("Complete this task");
+    const receipt=(await read(run.id)).contextSnapshot?.sourceReferenceUsage;
+    expect(receipt).toMatchObject({status:"available",hits:1});expect(input.task.context.sourceReferenceUsage).toEqual(receipt);
+    // Exercise a whole-object snapshot write after the real native preparation.
+    await db.update(heartbeatRuns).set({contextSnapshot:input.task.context}).where(eq(heartbeatRuns.id,run.id));
+    expect((await read(run.id)).contextSnapshot?.sourceReferenceUsage).toEqual(receipt);
+  });
+
+  it("native named review receives historical reference context exactly once",async()=>{
+    const f=await fixture(),companyId=f.agent.companyId,issueId=f.issue.id;
+    const [worker]=await db.insert(agents).values({companyId,name:"Source worker",status:"active",adapterType:"paperclip_runner"}).returning();
+    const [reviewIssue]=await db.update(issues).set({status:"in_review",assigneeAgentId:worker.id}).where(eq(issues.id,issueId)).returning();
+    const contract=await ensureNativeCompletionContract({db,companyId,issue:f.issue,actorId:worker.id});
+    const [source]=await db.insert(heartbeatRuns).values({companyId,agentId:worker.id,nativeIssueId:issueId,runtimeMode:"native",status:"succeeded",completionContractId:contract.row.id}).returning();
+    const [result]=await db.insert(nativeRunResults).values({companyId,issueId,runId:source.id,completionContractId:contract.row.id,serverFingerprint:randomUUID(),schemaStatus:"accepted",resultJson:{},canonicalSha256:randomUUID()}).returning();
+    const [assessment]=await db.insert(workAssessments).values({companyId,issueId,runId:source.id,contractId:contract.row.id,resultId:result.id,triggerKind:"native_result",triggerActorCompanyId:companyId,priorIssueStatus:f.issue.status,priorStatusVersion:Number(f.issue.statusVersion),policyVersion:"fixture",assessmentJson:{},inputDigest:randomUUID()}).returning();
+    const [decision]=await db.insert(statusDecisions).values({companyId,issueId,runId:source.id,assessmentId:assessment.id,decisionVersion:1,policyVersion:"fixture",fromStatus:f.issue.status,toStatus:"in_review",reasonCode:"explicit_review",decisionJson:{projectedStatusVersion:Number(reviewIssue.statusVersion)},decisionDigest:randomUUID(),applicationState:"applied"}).returning();
+    const [interaction]=await db.insert(issueThreadInteractions).values({companyId,issueId,kind:"request_confirmation",sourceRunId:source.id,addresseeAgentId:f.agent.id,createdByAgentId:worker.id,payload:{version:1,prompt:"Review submitted work",target:{type:"custom",key:"native_completion_review",revisionId:decision.id}}}).returning();
+    const [issue]=await db.update(issues).set({lastStatusDecisionId:decision.id}).where(eq(issues.id,issueId)).returning();
+    f.input.task.issueRef=issue;Object.assign(f.input.task.context,{nativeReviewInteractionId:interaction.id,nativeReviewDecisionId:decision.id});
+    f.input.prepareNativeTaskContext=vi.fn(async identity=>{expect(identity.reviewAssigned).toBe(true);attachSourceReferenceContext(f.input.task.context,referencePacket(companyId));});
+    const selected=await selectHeartbeatRuntime(db,f.input);
+    if(!selected.selected||!selected.nativeExecution)throw Error("Expected native review selection");
+    const prompt=selected.nativeExecution.task.prompt;
+    expect(prompt).toContain("named reviewer");expect(prompt).toContain("NOT current-candidate evidence");
+    expect(prompt.match(/## Indexed repository references/g)).toHaveLength(1);expect(f.input.prepareNativeTaskContext).toHaveBeenCalledOnce();
   });
 
   it("native task context uses saved attribution once without changing the admitted input on same-run resume", async () => {
@@ -160,13 +194,51 @@ describe.skipIf(!support.supported)("heartbeat runtime selection boundary", () =
     f.input.session.persistedRunnerProfile = saved.runnerProfileJson ?? {};
     f.input.session.persistedNativeExecutionInput = selected.nativeExecution;
     f.input.agent.adapterConfig = { ...f.input.agent.adapterConfig, model: "gpt-6.1-astra" };
+    f.input.task.context.paperclipSourceReferenceMarkdown = "Changed index guidance must not rewrite the admitted input";
     f.input.prepareNativeTaskContext = vi.fn(async identity => {
       expect(identity).toEqual({ provider: "codex", model: "gpt-5.6-luna", reviewAssigned: false });
     });
     const resumed = await selectHeartbeatRuntime(db, f.input);
     expect(f.input.prepareNativeTaskContext).toHaveBeenCalledOnce();
     expect(resumed).toMatchObject({ selected: true, nativeExecution: selected.nativeExecution });
+    expect(JSON.stringify(resumed)).not.toContain("Changed index guidance must not rewrite");
     expect((await read(f.run.id)).runnerProfileJson).toEqual(saved.runnerProfileJson);
+  });
+
+  const referencePacket=(companyId:string):SourceReferenceLookup=>({schema:1,status:"available",blobReads:0,indexRefreshes:0,references:[{
+    schema:1,standing:"reference",indexedScope:{companyId,projectId:"shared-index",repositoryId:"github.com/example/app"},revision:"a".repeat(40),blobReads:0,indexRefreshes:0,
+    hits:[{path:"src/Existing.ts",startLine:1,endLine:1,content:"Existing indexed architecture",indexedContentSha256:"b".repeat(64)}],
+  }]});
+  it("native source reference preparation records the real guarded receipt without changing current-source standing",async()=>{
+    const f=await fixture(),context:Record<string,unknown>={paperclipTaskMarkdown:"Accepted plan",sourceCurrentEvidenceSatisfied:false};
+    const lookup=vi.fn(async()=>referencePacket(f.agent.companyId)),assertOwned=vi.fn(async()=>{}),warn=vi.fn();
+    await prepareHeartbeatSourceReferences({identity:{companyId:f.agent.companyId,projectId:"delivery",issueId:f.issue.id,runId:f.run.id,phase:"implementation",provider:"codex",model:"sol",cwd:"/unused",repoUrl:null,remoteAuthority:false},recovering:false,context,lookup,assertOwned,
+      recordUsage:usage=>recordSourceReferenceUsage(db,{companyId:f.agent.companyId,runId:f.run.id},usage),warn});
+    expect(lookup).toHaveBeenCalledOnce();expect(warn).not.toHaveBeenCalled();expect(context.paperclipTaskMarkdown).toContain("Existing indexed architecture");expect(context.sourceCurrentEvidenceSatisfied).toBe(false);
+    const usage=(await read(f.run.id)).contextSnapshot?.sourceReferenceUsage as SourceReferenceUsage;
+    expect(usage).toMatchObject({status:"available",hits:1,blobReads:0,indexRefreshes:0});
+    expect(await recordSourceReferenceUsage(db,{companyId:f.agent.companyId,runId:f.run.id},{...usage,hits:9})).toBe(false);
+    expect((await read(f.run.id)).contextSnapshot?.sourceReferenceUsage).toEqual(usage);
+    const [otherRun]=await db.insert(heartbeatRuns).values({companyId:f.agent.companyId,agentId:f.agent.id,issueId:f.issue.id,scopeKind:"issue",status:"running"}).returning();
+    const other={run:otherRun,agent:f.agent};
+    expect(await recordSourceReferenceUsage(db,{companyId:randomUUID(),runId:other.run.id},usage)).toBe(false);
+    expect((await read(other.run.id)).contextSnapshot ?? {}).not.toHaveProperty("sourceReferenceUsage");
+    await db.update(heartbeatRuns).set({status:"cancelled"}).where(eq(heartbeatRuns.id,other.run.id));
+    expect(await recordSourceReferenceUsage(db,{companyId:other.agent.companyId,runId:other.run.id},usage)).toBe(false);
+    expect((await read(other.run.id)).contextSnapshot ?? {}).not.toHaveProperty("sourceReferenceUsage");
+    await prepareHeartbeatSourceReferences({identity:{companyId:f.agent.companyId,projectId:"delivery",issueId:f.issue.id,runId:f.run.id,phase:"implementation",provider:"codex",model:"sol",cwd:"/unused",repoUrl:null,remoteAuthority:false},recovering:false,context,lookup,assertOwned,
+      recordUsage:receipt=>recordSourceReferenceUsage(db,{companyId:f.agent.companyId,runId:f.run.id},receipt),warn});
+    expect(warn).toHaveBeenCalledOnce();expect(lookup).toHaveBeenCalledTimes(2);expect((await read(f.run.id)).contextSnapshot?.sourceReferenceUsage).toEqual(usage);
+  });
+  it("native source reference receipt failure warns without blocking prepared context or scheduling another lookup",async()=>{
+    const f=await fixture(),context:Record<string,unknown>={paperclipTaskMarkdown:"Accepted plan"},warn=vi.fn(),lookup=vi.fn(async()=>referencePacket(f.agent.companyId));
+    await expect(prepareHeartbeatSourceReferences({identity:{companyId:f.agent.companyId,projectId:"delivery",issueId:f.issue.id,runId:f.run.id,phase:"planning",provider:"codex",model:"sol",cwd:"/unused",repoUrl:null,remoteAuthority:false},recovering:false,context,lookup,assertOwned:async()=>{},recordUsage:async()=>{throw Error("synthetic receipt failure");},warn})).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledOnce();expect(lookup).toHaveBeenCalledOnce();expect(context.paperclipTaskMarkdown).toContain("Existing indexed architecture");
+  });
+  it("native source reference recovery retains the saved context and makes no new lookup or receipt",async()=>{
+    const f=await fixture(),context={paperclipTaskMarkdown:"Saved accepted plan and references",paperclipSourceReferenceUsage:{hits:1}},before=structuredClone(context),lookup=vi.fn(),recordUsage=vi.fn();
+    await prepareHeartbeatSourceReferences({identity:{companyId:f.agent.companyId,projectId:"delivery",issueId:f.issue.id,runId:f.run.id,phase:"review",provider:null,model:null,cwd:"/unused",repoUrl:null,remoteAuthority:false},recovering:true,context,lookup,recordUsage,assertOwned:async()=>{},warn:vi.fn()});
+    expect(context).toEqual(before);expect(lookup).not.toHaveBeenCalled();expect(recordUsage).not.toHaveBeenCalled();
   });
 
   it("native task context refusal publishes no execution and retains one idempotent completion contract", async () => {

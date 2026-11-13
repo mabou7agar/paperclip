@@ -1,6 +1,22 @@
+export const SOURCE_REFERENCE_HEADING="## Indexed repository references";
+
+/** Remove the exact generated packet, retaining the plan and later guidance. */
+export function clearSourceReferenceContext(context:Record<string,unknown>) {
+  const previous=context.paperclipSourceReferenceMarkdown;
+  for(const key of ["paperclipTaskMarkdown","paperclipTaskMarkdownCompact","paperclipTaskMarkdownAssignment","paperclipTaskMarkdownAssignmentCompact"]){
+    const text=context[key];
+    if(typeof previous==="string" && previous.startsWith(SOURCE_REFERENCE_HEADING+"\n") && typeof text==="string"){
+      context[key]=text.replaceAll("\n\n"+previous,"");
+    }
+  }
+  delete context.paperclipSourceReferenceMarkdown;delete context.paperclipSourceReferenceUsage;
+}
+
 /** Source snapshot ownership follows the run, not the retry chain. */
 export function freshSourceMemoryRetryContext(context: Record<string, unknown>) {
-  const { sourceSnapshot: _previousSnapshot, ...fresh } = context;
+  const { sourceSnapshot: _previousSnapshot, sourceReferenceUsage: _previousReferenceUsage,
+    paperclipSourceReferenceUsage: _previousPromptUsage, ...fresh } = context;
+  clearSourceReferenceContext(fresh);
   return fresh;
 }
 
