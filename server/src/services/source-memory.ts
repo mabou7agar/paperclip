@@ -127,10 +127,11 @@ export async function prepareSourceReferenceIndex(input:SourceMemoryInput,revisi
   const repositoryId=sourceMemoryRepositoryId(input.repoUrl);
   const bindings=config.bindings.filter(b=>b.companyId===input.companyId&&b.projectId===input.projectId&&b.repositoryId===repositoryId);
   requireValue(bindings.length===1 && !input.remoteAuthority && /^[a-f0-9]{40}$/.test(revision),"reference_binding_invalid");
-  const root=await realpath(input.cwd),roots=await Promise.all(bindings[0].roots.map(r=>realpath(r)));
-  requireValue(roots.includes(root),"root_denied");
+  // This operation never opens a checkout. Retain its declared binding identity
+  // without requiring historical checkout folders to remain on disk.
+  requireValue(bindings[0].roots.includes(input.cwd),"root_denied");
   const {signal,...workerInput}=input;
-  return runWorker<SourceReferenceBundle>({config,scope:{companyId:input.companyId,projectId:input.projectId,repositoryId},input:{...workerInput,cwd:root},operation:"reference",referenceRevision:revision},signal);
+  return runWorker<SourceReferenceBundle>({config,scope:{companyId:input.companyId,projectId:input.projectId,repositoryId},input:workerInput,operation:"reference",referenceRevision:revision},signal);
 }
 
 /** Runs on its own event loop while the worker's main thread is blocked by

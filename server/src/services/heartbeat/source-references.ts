@@ -22,5 +22,8 @@ export async function prepareHeartbeatSourceReferences(input:{
   const lookup=await(input.lookup??prepareSourceMemoryReferences)(input.identity,input.assertOwned);
   const usage=attachSourceReferenceContext(input.context,lookup);
   if(!usage)return;
-  try{if(await input.recordUsage(usage)===false)input.warn();}catch{input.warn();}
+  try{
+    if(await input.recordUsage(usage))input.context.sourceReferenceUsage=usage;
+    else input.warn();
+  }catch{input.warn();}
 }

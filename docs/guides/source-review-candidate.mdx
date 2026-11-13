@@ -329,7 +329,9 @@ during planning, implementation and review. The native preparation branch owns
 this optional integration. Legacy adapter preparation and compact resume
 markdown stay unchanged. The lookup reads the
 existing SQLite documents in a guarded subprocess; it performs no Git blob
-reads, index refresh or source-plan rewrite. It selects at most four reference
+reads, index refresh or source-plan rewrite. Completed references do not need
+the historical checkout folders to remain on disk. Current-source operations
+retain their existing checkout checks. It selects at most four reference
 targets and two snippets per target, with a six-second shared deadline. The
 injected section is bounded to 24 KiB, including metadata. Search first ranks
 matching paths; only a path miss scans indexed document text. Caseful Unicode

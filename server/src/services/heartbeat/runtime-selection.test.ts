@@ -140,10 +140,8 @@ describe.skipIf(!support.supported)("heartbeat runtime selection boundary", () =
       expect((await read(run.id)).runnerProfileJson ?? {}).not.toHaveProperty("nativeExecutionInput");
       expect(await coordinators(run.id)).toEqual([]);
       input.task.context.paperclipTaskMarkdown = String(input.task.context.paperclipTaskMarkdown ?? "") + "\nsource context from selected runtime";
-      attachSourceReferenceContext(input.task.context,{schema:1,status:"available",blobReads:0,indexRefreshes:0,references:[{
-        schema:1,standing:"reference",indexedScope:{companyId:input.agent.companyId,projectId:"shared-index",repositoryId:"github.com/example/app"},
-        revision:"a".repeat(40),blobReads:0,indexRefreshes:0,hits:[{path:"src/Existing.ts",startLine:1,endLine:1,content:"Existing indexed architecture",indexedContentSha256:"b".repeat(64)}],
-      }]});
+      await prepareHeartbeatSourceReferences({identity:{companyId:input.agent.companyId,projectId:"delivery",issueId:input.task.issueRef!.id,runId:run.id,phase:"implementation",provider:identity.provider,model:identity.model,cwd:"/unused",repoUrl:null,remoteAuthority:false},recovering:false,context:input.task.context,
+        assertOwned:async()=>{},lookup:async()=>referencePacket(input.agent.companyId),recordUsage:usage=>recordSourceReferenceUsage(db,{companyId:input.agent.companyId,runId:run.id},usage),warn:()=>{throw Error("Unexpected receipt refusal");}});
     });
     const selected = await prepareAndSelectHeartbeatRuntime(db, input, {
       measure: async (_phase, work) => work(),
@@ -160,6 +158,11 @@ describe.skipIf(!support.supported)("heartbeat runtime selection boundary", () =
     expect(selected.nativeExecution.task.prompt).toContain("Existing indexed architecture");
     expect(selected.nativeExecution.task.prompt).toContain("NOT current-candidate evidence");
     expect(selected.nativeExecution.task.prompt).toContain("Complete this task");
+    const receipt=(await read(run.id)).contextSnapshot?.sourceReferenceUsage;
+    expect(receipt).toMatchObject({status:"available",hits:1});expect(input.task.context.sourceReferenceUsage).toEqual(receipt);
+    // Exercise a whole-object snapshot write after the real native preparation.
+    await db.update(heartbeatRuns).set({contextSnapshot:input.task.context}).where(eq(heartbeatRuns.id,run.id));
+    expect((await read(run.id)).contextSnapshot?.sourceReferenceUsage).toEqual(receipt);
   });
 
   it("native named review receives historical reference context exactly once",async()=>{

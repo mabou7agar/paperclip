@@ -96,12 +96,15 @@ test('guarded native subprocess consumes an existing index and refuses revoked a
  const f=await fixture();try{
   const known=JSON.parse(await readFile(fixturesFile,'utf8'));const built=path.join(f.root,'built');await mkdir(built);await mkdir(path.join(built,'heartbeat'));await writeFile(path.join(built,'package.json'),'{"type":"module"}');
   for(const name of ['source-memory','source-memory-reference','source-memory-reference-types','source-memory-reference-repository','source-memory-retention','source-citation-reader','source-memory-capacity','source-memory-resource-repository','source-memory-indexing','heartbeat/source-memory-run-state'])await writeFile(path.join(built,name+'.js'),stripTypeScriptTypes(await readFile(new URL('./'+name+'.ts',import.meta.url),'utf8'),{mode:'transform'}));
-  const checkout=path.join(f.root,'checkout');await mkdir(checkout);const config=path.join(f.root,'config.json');
+  // The completed index remains usable after the indexed checkout is removed.
+  const checkout=path.join(f.root,'removed-checkout');const config=path.join(f.root,'config.json');
   const data={version:1,state:f.root,reader:known.reader,manifest:known.manifest,bindings:[{...scope,roots:[checkout]},{...scope,projectId:'other-project',roots:['/must-not-be-read']}],references:[target]};await writeFile(config,JSON.stringify(data));
   const oldPath=process.env.PATH;process.env.PATH='/nonexistent';const service=await import(pathToFileURL(path.join(built,'source-memory-reference.js')).href);process.env.PATH=oldPath;
   const input={companyId:'company',projectId:'delivery',issueId:'issue',runId:'run',phase:'implementation',provider:'openai',model:'sol',cwd:'/unused',repoUrl:null,remoteAuthority:true,query:'MCP screenshots'};
   const before=sha(await readFile(f.file));let owned=0;const result=await service.prepareSourceMemoryReferences(input,async()=>{owned++;},config);
   assert.equal(result.status,'available');assert.equal(result.references[0].hits.length,1);assert.equal(result.blobReads,0);assert.equal(result.indexRefreshes,0);assert.equal(owned,2);assert.equal(sha(await readFile(f.file)),before);
+  const memory=await import(pathToFileURL(path.join(built,'source-memory.js')).href);
+  await assert.rejects(memory.prepareSourceReferenceIndex({...input,projectId:scope.projectId,repoUrl:'https://'+scope.repositoryId,cwd:'/not-declared-in-binding',remoteAuthority:false},revision,config),/root_denied/);
   await assert.rejects(service.prepareSourceMemoryReferences(input,async()=>{if(++owned===4)throw Error('revoked');},config),/revoked/);
   let checks=0;const revoked=await service.prepareSourceMemoryReferences(input,async()=>{if(++checks===2)await writeFile(config,JSON.stringify({...data,references:[]}));},config);
   assert.equal(revoked,null);const revokedContext={paperclipTaskMarkdown:'Accepted plan'};assert.equal(service.attachSourceReferenceContext(revokedContext,revoked),null);assert.deepEqual(revokedContext,{paperclipTaskMarkdown:'Accepted plan'});
