@@ -1,0 +1,25 @@
+---
+title: Ubuntu runner project domains
+description: Private project domains, declared subdomains and local TLS in an existing Ubuntu runner.
+---
+
+Paperclip can use the optional [Ubuntu runner integration](https://github.com/mabou7agar/paperclip/blob/codex/ubuntu-project-domains-20261114/integrations/ubuntu-runner/README.md)
+to publish local development applications as `{project}-agent.test`. The operator
+registers Paperclip company/project identities and non-root execution principals.
+Project labels and concurrent preview mode are configurable; tenant/service aliases
+are declared per lease. Unknown projects and hostnames do not acquire routes.
+
+The module reuses an existing Ubuntu container and Traefik gateway. It has its own
+root-owned code, state, CA and expiry guard. It does not require the Hermas app or
+change task sessions, model routing, review gates or execution budgets. Installation
+does not rebuild the image or restart the container.
+
+An agent reserves a lease, starts its own local server, activates the lease with
+the real listener identity, and releases it when finished. The executor still owns
+application process cleanup. Expiry and listener loss revoke preview access without
+waking any agent or retrying any test. Read the integration guide for installation,
+the command contract, trust setup, concurrency and rollback boundaries.
+
+DNS and certificate trust apply inside the Ubuntu execution container. Access from
+a laptop requires an explicitly configured secure tunnel, exact DNS mapping and
+public CA trust. Nothing is publicly exposed by this integration.

@@ -1,9 +1,9 @@
-import { and, desc, eq } from "drizzle-orm";
-import { agentConfigRevisions, type Db, type agents, type agentTaskSessions, type heartbeatRuns, type issues, type projects } from "@paperclipai/db";
+import { and, desc, eq, sql } from "drizzle-orm";
+import { agentConfigRevisions, heartbeatRuns, type Db, type agents, type agentTaskSessions, type issues, type projects } from "@paperclipai/db";
 import type { AiConnectionBinding, AiRuntimeConnectionBinding } from "@paperclipai/shared";
 import { getServerAdapter } from "../../adapters/index.js";
 import type { prepareManagedAiRuntime } from "../ai-connection-runtime.js";
-import { aiConnectionSessionCompatibilityInputs, managedAiSessionIdentityCompatible } from "../ai-connection-session.js";
+import { aiConnectionSessionCompatibilityInputs, managedAiSessionIdentityCompatible, managedAiSubscriptionCompatibilityConfig } from "../ai-connection-session.js";
 import { createNativeSessionHandoffLoader } from "../native-runtime/native-session-handoff.js";
 import { agentInstructionsService } from "../agent-instructions.js";
 import {
@@ -167,8 +167,22 @@ export async function prepareHeartbeatSession(db: Db, input: HeartbeatSessionPre
     const revisions = requestedAiBinding?.mode === "router" || input.config.phaseRouted
       ? await db.select().from(agentConfigRevisions).where(and(eq(agentConfigRevisions.companyId, agent.companyId), eq(agentConfigRevisions.agentId, agent.id))).orderBy(desc(agentConfigRevisions.createdAt), desc(agentConfigRevisions.id)).limit(21)
       : [];
-    const candidates = aiConnectionSessionCompatibilityInputs({
-      effectiveAdapterConfig: runtimeConfig, agentRuntimeConfig: agent.runtimeConfig,
+    // Read only the prior run's accounting/session binding, never its transcript
+    // or full context. It must be this saved session's company, agent and issue.
+    const prior = taskSession.lastRunId && issueRef
+      ? await db.select({
+        subscriptionId: sql<string | null>`${heartbeatRuns.contextSnapshot}->'aiConnection'->>'subscriptionId'`,
+        sessionIdentity: sql<string | null>`${heartbeatRuns.contextSnapshot}->'aiConnection'->>'sessionIdentity'`,
+      }).from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.id, taskSession.lastRunId), eq(heartbeatRuns.companyId, agent.companyId),
+        eq(heartbeatRuns.agentId, agent.id), eq(heartbeatRuns.issueId, issueRef.id),
+      )).limit(1).then(rows => rows[0]) : undefined;
+    const accountingConfig = managedAiSessionIdentityCompatible(
+      taskSession.sessionParamsJson?.paperclipAiCredentialIdentity, managedAiRuntime.sessionIdentity, managedAiRuntime.identity,
+    ) ? managedAiSubscriptionCompatibilityConfig(runtimeConfig, prior) : null;
+    const configs = accountingConfig ? [runtimeConfig, accountingConfig] : [runtimeConfig];
+    const candidates = configs.flatMap(effectiveAdapterConfig => aiConnectionSessionCompatibilityInputs({
+      effectiveAdapterConfig, agentRuntimeConfig: agent.runtimeConfig,
       agentConfigRevision: sessionConfigMetadataInput.agentConfigRevision,
       issueOverrides: issueAssigneeOverrides, originalIssueOverrides: originalAiIssueOverrides,
       binding: aiBinding, router: requestedAiBinding?.mode === "router",
@@ -176,7 +190,10 @@ export async function prepareHeartbeatSession(db: Db, input: HeartbeatSessionPre
       persistedAgentRuntimeConfig: input.config.persistedAgentRuntimeConfig,
       storedIdentity: taskSession.sessionParamsJson?.paperclipAiCredentialIdentity,
       sessionIdentity: managedAiRuntime.sessionIdentity, credentialIdentity: managedAiRuntime.identity, revisions,
-    });
+    }));
+    if (accountingConfig) compatibleConfigMetadata.push(await buildEffectiveRunSessionConfigMetadata({
+      ...sessionConfigMetadataInput, effectiveAdapterConfig: accountingConfig,
+    }));
     compatibleConfigMetadata.push(...await Promise.all(candidates.flatMap(candidate => [
       buildEffectiveRunSessionConfigMetadata({ ...sessionConfigMetadataInput, ...candidate }),
       ...(importedManagedInstructions ? [buildEffectiveRunSessionConfigMetadata({

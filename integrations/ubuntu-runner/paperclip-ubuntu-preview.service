@@ -1,0 +1,19 @@
+[Unit]
+Description=Paperclip local Ubuntu preview ownership guard
+After=docker.service
+Requires=docker.service
+PartOf=docker.service
+StartLimitIntervalSec=120
+StartLimitBurst=3
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/default/paperclip-ubuntu-preview
+ExecStart=/opt/paperclip-ubuntu-runner-integration/supervise.sh
+ExecStop=/opt/paperclip-ubuntu-runner-integration/stop.sh
+Restart=always
+RestartSec=15
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target docker.service

@@ -16,6 +16,21 @@ function record(value: unknown): Record<string, unknown> {
     ? value as Record<string, unknown> : {};
 }
 
+/** Billing discovery can canonicalize a subscription row without changing the
+ * authorized provider session. Preserve only that exact historical attribution. */
+export function managedAiSubscriptionCompatibilityConfig(
+  config: Record<string, unknown>,
+  previous: { subscriptionId: unknown; sessionIdentity: unknown } | undefined,
+): Record<string, unknown> | null {
+  const managed = record(config.managedAiConnection);
+  if (managed.method !== "subscription" || typeof managed.sessionIdentity !== "string"
+    || !managed.sessionIdentity || previous?.sessionIdentity !== managed.sessionIdentity
+    || typeof previous.subscriptionId !== "string" || !previous.subscriptionId
+    || typeof managed.subscriptionId !== "string" || !managed.subscriptionId
+    || previous.subscriptionId === managed.subscriptionId) return null;
+  return { ...config, managedAiConnection: { ...managed, subscriptionId: previous.subscriptionId } };
+}
+
 export function aiConnectionOnlyConfigRevision(revision: ConfigRevision): boolean {
   const withoutBinding = (snapshot: Record<string, unknown>) => {
     const runtimeConfig = { ...record(snapshot.runtimeConfig) };
