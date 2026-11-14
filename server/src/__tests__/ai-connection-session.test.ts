@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { aiConnectionSessionCompatibilityInputs, managedAiSessionIdentityCompatible, aiConnectionOnlyConfigRevision, aiConnectionRevisionMetadata } from "../services/ai-connection-session.js";
+import { aiConnectionSessionCompatibilityInputs, managedAiSessionIdentityCompatible, managedAiSubscriptionCompatibilityConfig, aiConnectionOnlyConfigRevision, aiConnectionRevisionMetadata } from "../services/ai-connection-session.js";
 import { buildEffectiveRunSessionConfigMetadata, resolveTaskSessionConfigFreshness } from "../services/heartbeat.js";
 
 const binding = { mode: "shared" as const, provider: "openai" as const, method: "subscription" as const, connectionId: "account", grantId: "grant" };
@@ -13,6 +13,36 @@ const revision = (id: string, beforeBinding: unknown, afterBinding: unknown, ext
   id, changedKeys: ["runtimeConfig"], createdAt: new Date(`2026-10-02T00:00:0${id.slice(-1)}Z`),
   beforeConfig: { name: "Agent", runtimeConfig: { aiConnection: beforeBinding }, adapterConfig: { model: "gpt-5.6-sol" } },
   afterConfig: { name: "Agent", runtimeConfig: { aiConnection: afterBinding }, adapterConfig: { model: "gpt-5.6-sol" }, ...extra },
+});
+
+describe("subscription attribution session compatibility", () => {
+  const previous = { subscriptionId: "previous-billing-row", sessionIdentity };
+  const current = { ...config, managedAiConnection: { ...config.managedAiConnection, subscriptionId: "canonical-billing-row" } };
+  it("resumes a stored fingerprint across billing-row canonicalization without changing live attribution", async () => {
+    const historical = { ...current, managedAiConnection: { ...current.managedAiConnection, subscriptionId: previous.subscriptionId } };
+    const alternative = managedAiSubscriptionCompatibilityConfig(current, previous)!;
+    expect(current.managedAiConnection.subscriptionId).toBe("canonical-billing-row");
+    expect(alternative).toEqual(historical);
+    const before = await buildEffectiveRunSessionConfigMetadata({ ...base, effectiveAdapterConfig: historical });
+    const after = await buildEffectiveRunSessionConfigMetadata({ ...base, effectiveAdapterConfig: current });
+    const compatible = await buildEffectiveRunSessionConfigMetadata({ ...base, effectiveAdapterConfig: alternative });
+    const params = { __paperclipConfiguredModel: "gpt-5.6-sol", __paperclipConfigFingerprint: before.fingerprint,
+      __paperclipConfigFingerprintVersion: before.version, __paperclipConfigCategoryFingerprints: before.categoryFingerprints };
+    const decide = (metadata: typeof after, wakeResetReason?: string) => resolveTaskSessionConfigFreshness({ hasTaskSession: true,
+      configuredModel: "gpt-5.6-sol", taskSessionParams: params, configMetadata: metadata,
+      compatibleConfigMetadata: [compatible], wakeResetReason });
+    expect(decide(after).reset).toBe(false);
+    expect(decide(after, "explicit session reset").reset).toBe(true);
+    const changedModel = await buildEffectiveRunSessionConfigMetadata({ ...base,
+      effectiveAdapterConfig: managedAiSubscriptionCompatibilityConfig({ ...current, model: "different-model" }, previous)! });
+    expect(resolveTaskSessionConfigFreshness({ hasTaskSession: true, configuredModel: "different-model", taskSessionParams: params,
+      configMetadata: changedModel, compatibleConfigMetadata: [changedModel] }).reset).toBe(true);
+  });
+  it.each([undefined, { ...previous, sessionIdentity: "other-grant:user:epoch" }, { ...previous, sessionIdentity: "grant:alice:1" },
+    { ...previous, subscriptionId: null }, { ...previous, subscriptionId: "canonical-billing-row" }])(
+    "refuses missing, changed authority or unchanged accounting bindings: %j", previous => {
+      expect(managedAiSubscriptionCompatibilityConfig(current, previous)).toBeNull();
+    });
 });
 
 async function decision(previous: Partial<MetadataInput>, next: Partial<MetadataInput> = {}, compatibility: Partial<CompatibilityInput> = {}, wakeResetReason?: string) {

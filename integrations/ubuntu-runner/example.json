@@ -1,0 +1,18 @@
+{
+  "state_root": "/var/lib/paperclip-ubuntu-preview",
+  "state_mount": "/var/lib/paperclip-ubuntu-preview",
+  "routes_root": "/var/lib/traefik/dynamic",
+  "hosts_file": "/etc/hosts",
+  "tls_public": "/etc/paperclip-ubuntu-preview",
+  "guard_address": "http://127.0.0.1:9848",
+  "tls_entrypoint": "preview-tls",
+  "gateway_binary": "/usr/local/bin/traefik",
+  "domain_template": "{project}-agent.test",
+  "reserved_namespaces": [],
+  "port_min": 39000,
+  "port_max": 39999,
+  "lease_seconds": 1800,
+  "starting_seconds": 300,
+  "principals": {},
+  "projects": {}
+}
