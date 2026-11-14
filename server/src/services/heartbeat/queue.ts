@@ -1104,7 +1104,11 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           context,
           ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
           blockerStallVerified,
-        )
+        ) &&
+        await addressedInteractionWakeState(db, {
+          companyId: run.companyId, issueId, agentId: run.agentId, contextSnapshot: context,
+          excludeTaskOwnerAndCreator: true,
+        }) !== "pending"
       ) {
         await cancelQueuedRunForBlockedDependencies(
           run,
@@ -4068,17 +4072,23 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           // Human comment/mention wakes are the exception: they may run in a
           // bounded interaction mode so the assignee can answer or triage.
           // A stalled child or blocker (issue_blocker_stalled, once per stall)
-          // is the other exception: the assignee must be able to re-delegate,
+          // is another exception: the assignee must be able to re-delegate,
           // escalate or block with a reason while that dependency is stuck.
+          // A current addressed card also permits its authorized recipient to
+          // answer, without taking ownership or satisfying the dependency.
           const blockedInteractionWake =
             dependencyReadiness &&
             !dependencyReadiness.isDependencyReady &&
-            allowsDependencyBlockedWake(
+            (allowsDependencyBlockedWake(
               enrichedContextSnapshot,
               ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
               await verifyBlockerStallWake(tx as unknown as Db, { companyId: issue.companyId, issueId: issue.id,
                 contextSnapshot: enrichedContextSnapshot, requestedByActorType: opts.requestedByActorType }),
-            );
+            ) || await addressedInteractionWakeState(tx as unknown as Db, {
+              companyId: issue.companyId, issueId: issue.id, agentId,
+              contextSnapshot: enrichedContextSnapshot,
+              excludeTaskOwnerAndCreator: true,
+            }) === "pending");
 
           if (blockedInteractionWake) {
             enrichedContextSnapshot.dependencyBlockedInteraction = true;

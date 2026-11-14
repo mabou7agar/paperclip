@@ -717,6 +717,17 @@ Use it for:
 
 Blocked issues should stay idle while blockers remain unresolved. Paperclip should not create a queued heartbeat run for that issue until the final blocker is done and the `issue_blockers_resolved` wake can start real work.
 
+A pending question or confirmation explicitly addressed to an authorized agent
+other than the task's current owner and the card's creator is
+an attention exception at both admission and queued-run claim. The server verifies
+the current persisted card, company, issue, kind, audience and recipient; a wake
+reason or context flag alone grants nothing. This permits the recipient to answer
+while a task dependency is unresolved, without transferring assignment, resolving
+the dependency, waiving execution gates or authorizing implementation. Resolved,
+stale, misaddressed and human-only cards do not qualify, and final dispatch still
+revalidates the interaction. Existing saved runs and session identities retain
+their format; this change adds no automatic retry or polling.
+
 `cancelled` is terminal for the blocker issue itself, but it does not satisfy the dependency. A cancelled blocker edge remains unresolved until the edge is removed or replaced, and Paperclip must surface blocker attention on the dependent regardless of whether that dependent is currently displayed as `blocked`, `todo`, `backlog`, or another non-terminal agent-owned status.
 
 If a parent is truly waiting on a child, model that with blockers. Do not rely on the parent/child relationship alone.
