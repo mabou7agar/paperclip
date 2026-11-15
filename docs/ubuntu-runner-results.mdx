@@ -207,8 +207,11 @@ retained driver/audit evidence. Generic retries cannot manufacture that evidence
 The unit uses mixed termination: signal the root owner first, allow its bounded
 finally/cleanup grace, then fence remaining owned processes.
 
-If positive cleanup evidence cannot be obtained, keep the quarantine and alert
-its responsible lead once. An operator may inspect the original retained unit,
+If positive cleanup evidence cannot be obtained, keep the quarantine. The first
+new measured unknown outcome gets one normal worker reconciliation turn; the
+bridge does not send a separate lead alert for an unchanged quarantine. Its
+remaining signal is the retained result document and the private operator
+reconciliation procedure. An operator may inspect the original retained unit,
 job plan, attempt, driver and cleanup ledger with normal private administrative
 access, correct an actual cleanup defect under review, and reconcile only the
 original owned resources. Then the normal passive reader publishes the new
@@ -228,3 +231,13 @@ Systemd launch uses `--no-block` with retained unit identity, explicit `Restart=
 inspection or cancellation transport stays an internal observation wait. It
 emits no terminal result or agent wake. Only positive remote evidence may
 publish an unknown outcome, and unknown outcomes never self-block the task.
+
+
+Cancellation is acknowledged durably only after the remote unit manager accepts
+the stop request. A lost acknowledgement is reconciled on the next positive
+observation of that same unit; an active unit may receive the same idempotent
+stop again, within its original fixed lifetime. This never starts a test or a
+provider. Confirmed stops are not reissued. Current native pause, reassignment,
+cancellation or execution holds intentionally request cancellation of admitted
+work. Artifact transfer failures retain their internal evidence-delivery wait,
+including when cleanup is incomplete; they do not invent another unknown result.

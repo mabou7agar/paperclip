@@ -168,3 +168,30 @@ class JobTests(unittest.TestCase):
         self.service.load_packet.assert_not_called()
         self.assertEqual(self.repo.get(identity)['state'], 'queued')
         self.native.notify.assert_not_called()
+
+    def test_lost_cancel_is_confirmed_only_after_positive_remote_ack(self):
+        identity = self.register(); self.repo.claim(identity)
+        self.remote.inspect.return_value = {'phase': 'attempted'}
+        self.service.admission.binding.side_effect = Refusal('job_native_pause_hold')
+        self.remote.cancel.side_effect = [Refusal('remote_transport_unconfirmed'), {'cancellationRequested': True}]
+        self.service.execute(identity)
+        self.assertEqual(self.repo.get(identity)['cancel_requested'], 0)
+        self.assertIsNone(self.repo.get(identity)['result'])
+        self.service.execute(identity)
+        self.assertEqual(self.repo.get(identity)['cancel_requested'], 1)
+        self.service.execute(identity)
+        self.assertEqual(self.remote.cancel.call_count, 2)
+        self.native.notify.assert_not_called()
+        self.remote.launch.assert_not_called()
+
+    def test_incomplete_cleanup_artifact_transport_never_invents_unknown_result(self):
+        for index, code in enumerate(['artifact_transport_unconfirmed', 'artifact_transport_digest_mismatch']):
+            identity = self.register({**self.request, 'packetSha256': str(index + 1) * 64}); self.repo.claim(identity)
+            self.remote.inspect.return_value = {'phase': 'terminal', 'result': {'status': 'failed', 'kind': 'reviewed_controller',
+                'cleanupComplete': False, 'artifacts': [{'sha256': 'c' * 64}]}}
+            self.remote.artifact.side_effect = Refusal(code)
+            self.service.execute(identity)
+            self.assertEqual(self.repo.get(identity)['state'], 'launching')
+            self.assertIsNone(self.repo.get(identity)['result'])
+            self.native.notify.assert_not_called()
+            self.remote.launch.assert_not_called()

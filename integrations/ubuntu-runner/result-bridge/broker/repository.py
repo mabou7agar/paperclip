@@ -128,7 +128,13 @@ class JobRepository:
 
     def request_cancel(self, identity):
         with self.connection() as db:
-            return db.execute('UPDATE jobs SET cancel_requested=1 WHERE id=? AND cancel_requested=0', (identity,)).rowcount == 1
+            row = db.execute('SELECT cancel_requested FROM jobs WHERE id=?', (identity,)).fetchone()
+            require(row is not None, 'job_not_found')
+            return row[0] == 0
+
+    def confirm_cancel(self, identity):
+        with self.connection() as db:
+            db.execute('UPDATE jobs SET cancel_requested=1 WHERE id=?', (identity,))
 
     def bind_slot(self, identity, policy_digest, slot_id):
         with self.connection() as db:

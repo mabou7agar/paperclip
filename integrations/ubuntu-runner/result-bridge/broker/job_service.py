@@ -125,7 +125,8 @@ class JobService:
             self.repository.wait(identity, error.code)
         except Refusal as error:
             state = self.repository.get(identity)['state']
-            if state in ['launching', 'quarantined'] and error.code in ['remote_transport_unconfirmed', 'remote_launch_unconfirmed', 'remote_unit_identity_unavailable']:
+            if state in ['launching', 'quarantined'] and error.code in ['remote_transport_unconfirmed', 'remote_launch_unconfirmed', 'remote_unit_identity_unavailable', 'remote_cancel_unconfirmed', 'artifact_transport_unconfirmed',
+                    'artifact_transport_digest_mismatch', 'artifact_upload_unconfirmed', 'artifact_upload_receipt_mismatch']:
                 # An SSH/client observation failure is not terminal evidence.
                 # Keep the same ownership/attempt and let passive inspection
                 # reconcile it; never wake or block the worker mid-execution.
@@ -183,7 +184,9 @@ class JobService:
             self.admission.binding(request, profile)
         except Refusal:
             if self.repository.request_cancel(identity):
-                self.remote.cancel(profile, identity)
+                stopped = self.remote.cancel(profile, identity)
+                require(stopped.get('cancellationRequested') is True, 'remote_cancel_unconfirmed')
+                self.repository.confirm_cancel(identity)
 
     def finish(self, identity, request, outcome):
         # Exclude timestamps, process IDs, output hashes, packet identities and
