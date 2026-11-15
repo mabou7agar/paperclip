@@ -44,7 +44,7 @@ test('startup and ambiguous committed intent notify recovery without a provider 
     await set(key,value);
     if(key.namespace==='runner-requests')throw new Error('response lost after commit');
   };
-  await assert.rejects(f.client.call('submit',f.request),/response lost/);
+  await assert.rejects(f.client.call('submit',f.request),/admission_notification_unconfirmed/);
   assert.deepEqual(await f.ctx.state.get(requestKey(f.request.taskId,jobId(f.request))),f.request);
   assert.equal(f.hints,2);assert.equal(f.physicalWakes,0);
 });
@@ -126,4 +126,36 @@ test('reconciled progress wins over a stale signed result and replay returns ret
   assert.equal(replay.state,'terminal');assert.equal(replay.result.receiptSha256,'d'.repeat(64));assert.equal(replay.replayed,true);
   await assert.rejects(f.client.receive(f.envelope('result',{...reconciled,receiptSha256:'f'.repeat(64)},{sequence:2}),f.actor,f.service),/sequence_conflict/);
   assert.equal(f.physicalWakes,2);
+});
+
+
+test('an unacknowledged notification is reported as uncertain, never as a queued execution',async()=>{
+  const f=fixture();f.client.notify=async()=>false;
+  await assert.rejects(f.client.call('submit',f.request),/admission_notification_unconfirmed/);
+  assert.deepEqual(await f.ctx.state.get(requestKey(f.request.taskId,jobId(f.request))),f.request);
+  assert.equal(f.physicalWakes,0);
+});
+
+test('per-job result serialization covers side effects as well as saved sequence',async()=>{
+  const f=fixture();await f.client.call('submit',f.request);
+  await f.client.receive(f.envelope('admission',{jobId:jobId(f.request),state:'queued'}),f.actor,f.service);
+  let enter,release;const entered=new Promise(resolve=>enter=resolve),held=new Promise(resolve=>release=resolve);
+  const effects=[];const service={deliverResult:async result=>{effects.push('start:'+result.receiptSha256[0]);if(result.receiptSha256[0]==='1'){enter();await held;}effects.push('finish:'+result.receiptSha256[0]);return {recorded:true};}};
+  const first={...f.result,receiptSha256:'1'.repeat(64)};
+  const one=f.client.receive(f.envelope('result',first,{sequence:1}),f.actor,service);await entered;
+  const second={...f.result,receiptSha256:'2'.repeat(64)};
+  const two=f.client.receive(f.envelope('result',second,{sequence:2}),f.actor,service);
+  await Promise.resolve();assert.deepEqual(effects,['start:1']);release();await Promise.all([one,two]);
+  assert.deepEqual(effects,['start:1','finish:1','start:2','finish:2']);
+  assert.equal((await f.client.call('status',{jobId:jobId(f.request),companyId:f.request.companyId,agentId:f.request.agentId})).result.receiptSha256,second.receiptSha256);
+});
+
+
+test('unknown execution stays in reconciliation even when cleanup is measured complete',async()=>{
+ const f=fixture();await f.client.call('submit',f.request);
+ await f.client.receive(f.envelope('admission',{jobId:jobId(f.request),state:'queued'}),f.actor,f.service);
+ const result={...f.result,status:'unknown',result:{status:'unknown',cleanupComplete:true}};
+ await f.client.receive(f.envelope('result',result),f.actor,f.service);
+ const status=await f.client.call('status',{jobId:jobId(f.request),companyId:f.request.companyId,agentId:f.request.agentId});
+ assert.equal(status.state,'reconciliation_required');assert.equal((await f.client.call('submit',f.request)).state,'reconciliation_required');
 });

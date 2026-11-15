@@ -4,7 +4,7 @@ import type { AdapterExecutionTarget } from "@paperclipai/adapter-utils/executio
 import type { EnvironmentLease } from "@paperclipai/shared";
 import { beginRunPhase, measureRunPhase } from "./execution-preparation-timing.js";
 import { createHash, randomUUID } from "node:crypto";
-import { execFile as execFileCallback } from "node:child_process";
+import { execFile as execFileCallback } from "@paperclipai/adapter-utils/local-workspace-process";
 import { promisify } from "node:util";
 import fs from "node:fs/promises";
 import { constants as fsConstants } from "node:fs";

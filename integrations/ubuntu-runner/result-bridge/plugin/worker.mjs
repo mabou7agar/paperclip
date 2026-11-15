@@ -23,6 +23,10 @@ return definePlugin({
         ? await service.submit(args, run) : await service.status(args.jobId, run);
         return { content: JSON.stringify(data), data }; }
       catch (error) {
+        if (error?.message === 'runner_admission_notification_unconfirmed') return {
+          error:"Runner intent is saved but admission is unconfirmed. Keep this task and session. Do not submit another job, repeat tests, poll or wake yourself. Native broker recovery owns the intent; route a persistent configuration failure to the lead once.",
+          data:{state:'admission_unconfirmed',code:'runner_notification_unconfirmed'},
+        };
         const match = /^runner_broker:([a-z][a-z0-9_]{1,99})$/.exec(error?.message ?? '');
         const code = match?.[1] ?? 'runner_request_unavailable';
         return { error: `Runner request not admitted (${code}). Preserve this task and context. Do not retry execution blindly; route a genuine configuration failure to its lead once.`,

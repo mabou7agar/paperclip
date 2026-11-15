@@ -29,6 +29,11 @@ observation and cancellation remain allowed. This is a process/vault boundary,
 not a claim of complete per-workspace or per-company filesystem isolation.
 The example assumes `/paperclip` is the runtime home and `/app` holds live server
 code. It denies writes to live code and access to host container-control sockets.
+It also protects instance config/environment, embedded database, backups and
+logs; installed plugins, shell/Git/npm configuration, executable home paths and
+their replaceable ancestors. Prepare required provider/cache home directories
+before activation. Agents can use existing writable provider/workspace subtrees
+but cannot create or replace entries at the server home or instance root.
 Use a separate development checkout. Review and qualify the deny paths if those
 runtime locations differ; a fixture at another path does not attest a real vault.
 
@@ -41,7 +46,7 @@ that file:
 ```
 
 The executable and its ancestors must also be root-owned and non-writable. It
-must not be setuid or setgid. Install/load the reviewed AppArmor profiles and
+must be an ELF binary, without setuid or setgid. Install/load the reviewed AppArmor profiles and
 start the application under `paperclip-control`. Mount only the executable,
 required public shared library and policy as read-only files outside the
 application home. Keep the default Docker seccomp filter and existing capability
@@ -55,6 +60,16 @@ is required, startup failures never fall back to an unconfined process, the CLI
 engine, a fresh conversation or another provider launch. A warm process from a
 different launch policy is closed without discarding saved provider history;
 the compatible conversation is loaded into the newly confined process.
+
+Server-side workspace commands use the shared optional process boundary too.
+This includes Git hooks/filters/helpers, workspace runtime services, source
+memory workers, repository acquisition/restoration and streamed Git operations.
+Local archive capture/restore injects that executor while its serialized sandbox
+implementation remains self-contained. Already bounded read-only inventory
+operations keep their explicit isolated Git environment and disabled hooks and
+fsmonitor. Server startup instrumentation in the immutable application tree and fixed
+SSH/tar sandbox transfer operations are not workspace code executions; their
+existing bounded transport remains unchanged. No global child-process monkey patch is installed.
 
 ACP requests asking the parent to read/write files or start/manage terminals
 are refused before dispatch, because otherwise the parent would bypass the
@@ -90,16 +105,25 @@ public trust description at `/opt/paperclip-runner-trust/broker.json`:
 This sealed public file selects native transport at plugin setup. Company config
 continues to contain only allowed profile names. Without the public binding,
 legacy root IPC remains available with its original root-peer/HMAC checks; those
-checks have not been relaxed. A malformed binding fails setup.
+checks have not been relaxed. A malformed binding fails setup. Native mode
+requires an empty `callbackUrl`; the legacy webhook is not a native delivery path.
 Stop the old broker before switching transport. Both modes now share a
 state-directory lifetime lock; do not run an older release against that same
 ledger during migration.
 
 The broker's optional `nativeQueue` object contains `pluginId`,
-`signingKeyFile`, `isolationReceiptFile` and `isolationReceiptSha256`. Activation
+`signingKeyFile`, `isolationReceiptFile`, `isolationReceiptSha256` and
+`agentPolicyFile` (an exact private copy of the final loaded policy). Optional
+`hintPeerUid` and `hintPeerProfile` default to `1000` and `paperclip-control`;
+set them to the measured unprivileged plugin UID and loaded control domain. Activation
 requires the exact root-owned measured isolation receipt with schema
-`paperclip.agent-isolation.v1`, `actualAgentQualified: true` and false values for
-`serverEnvironmentOpenable`, `serverPipeOpenable` and `serverVaultOpenable`.
+`paperclip.agent-isolation.v2`, `actualAgentQualified: true`, the exact final
+`policySha256`, and false values for `serverEnvironmentOpenable`,
+`serverPipeOpenable`, `serverVaultOpenable`, `serverConfigOpenable`,
+`serverEnvironmentFileOpenable`, `serverDatabaseOpenable`, `serverBackupOpenable`,
+`serverLogOpenable`, `serverPluginWritable`, `serverHomeControlWritable` and
+`serverGitEscapesConfinement`. Missing measurements or a changed policy refuse
+activation. Version-one fixture receipts cannot activate this transport.
 Do not publish that receipt from a simulated fixture or infer it from reuse flags.
 
 No root secret or authenticated broker IPC is mounted in the application. A
@@ -107,7 +131,23 @@ separate root-owned directory at `/opt/paperclip-runner-wake` contains only a
 writeable hint socket. Create it before starting the native broker; add it to
 the broker service's allowed write paths and mount it at the same public path
 in the application. It contains no credential or signed response. Confined
-agents cannot open it. A hint carries no task, identity or execution authority.
+agents cannot open it. A hint carries only company/job/source-run/task IDs, never execution authority.
+The socket verifies both the application UID and the kernel-enforced control
+profile using `SO_PEERCRED`, the socket-bound `SO_PEERPIDFD`, and the pinned
+process’s kernel label. A shared UID alone is insufficient. This optional mode
+requires Linux 6.5+ and fails closed without the peer pidfd; it never falls back
+to a numeric PID lookup that can race process reuse. The installed 6.8 kernel
+can lack a usable AppArmor socket peer label, so `SO_PEERSEC` is not assumed.
+See the [Linux socket ABI](https://github.com/torvalds/linux/blob/v6.8/include/uapi/asm-generic/socket.h)
+and [AppArmor peer-label implementation](https://github.com/torvalds/linux/blob/v6.8/security/apparmor/lsm.c).
+These checks protect a separate hint inbox; the legacy root-peer/HMAC checks
+remain unchanged. The root ledger fsyncs an unresolved hint before its ACK.
+An empty native scan cannot consume it: only a validated matching native intent
+settles the obligation. A late commit or broker restart therefore keeps recovery
+active without waking a provider. An unacknowledged notification is returned as
+`admission_unconfirmed`, never a claimed queued execution or a safe-to-repeat
+test. The listener runs independently of execution recovery, so long-running
+inspection cannot prevent durable acknowledgement.
 Mount
 the plugin outside the application home so a standard home-ownership entrypoint
 does not try to chown read-only integration files. Check that the native health
@@ -128,7 +168,7 @@ result; do not poll or create a timer. The broker performs bounded full scans
 using native read-only queries on startup and producer hints. It verifies the host-set timestamp against the
 actual source run's time window and binds the first-seen immutable digest. There
 is no timestamp cursor that could lose a transaction committed late.
-The plugin hints after a write, including an ambiguous write response, and at
+The plugin hints after an attempted intent write, including an ambiguous write response, and at
 every worker startup. Unsettled writes remain failures, not claimed execution.
 If the broker is unavailable, its startup scan reconstructs committed intents.
 Configured idle and retained completed history cause no periodic native scans.
@@ -148,7 +188,8 @@ native durable key. A passed reused result remains deliverable. An unchanged
 failure is recorded without another provider wake. Reassignment or closed tasks
 retain evidence without waking the former worker. Unknown execution remains a
 reconciliation matter and never authorizes another launch.
-Signed results also carry their durable ledger sequence. A later reconciliation
+Signed result side effects are serialized per job, including evidence and wake
+requests, without serializing unrelated jobs. Signed results also carry their durable ledger sequence. A later reconciliation
 supersedes an older observation; delayed envelopes cannot replace that newer
 status. Replayed submissions and status reads return the retained result rather
 than a stale queued admission.
@@ -177,3 +218,21 @@ remain installed; do not change that host's code digest merely to copy unused
 transport modules. Run only new, failed or invalidated checks. Existing passed
 application tests, media, source approvals and accepted revisions remain evidence
 until their actual inputs or required scope change.
+
+## Deliberate boundaries
+
+A retained pre-execution refusal is immutable. Corrected work needs a distinct
+reviewed packet or scope; editing only an acknowledgement does not reset that
+job. This is not a spent test retry. Invalid or forged provenance is ignored
+without executing or waking an untrusted target; it needs operator diagnosis,
+not another blind tool call. Unknown ownership or pending cleanup remains an
+active reconciliation obligation, including the documented 15-second deadline;
+settled history alone does not keep it active.
+
+The common agent domain allows signals between its processes. It does not
+provide cross-company process or filesystem isolation. The policy also blocks
+`/proc/self/environ` readers and agent ptrace-based debugging tools. Use a
+separate independently reviewed profile for those needs. Do not loosen the
+transport activation boundary as a workaround. Agent resume failures retain the
+existing conversation and fail visibly; confinement never fabricates a new
+session to hide a lost provider history.

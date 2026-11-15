@@ -31,9 +31,13 @@ class NativeTransport:
         receipt = private_file(self.policy['isolationReceiptFile']).read_bytes()
         require(hashlib.sha256(receipt).hexdigest() == self.policy['isolationReceiptSha256'], 'native_isolation_receipt_changed')
         measured = closed_json(receipt)
-        require(measured.get('schema') == 'paperclip.agent-isolation.v1' and measured.get('actualAgentQualified') is True and
-                measured.get('serverEnvironmentOpenable') is False and measured.get('serverPipeOpenable') is False and
-                measured.get('serverVaultOpenable') is False, 'native_agent_isolation_not_qualified')
+        boundary=['serverEnvironmentOpenable','serverPipeOpenable','serverVaultOpenable','serverConfigOpenable',
+            'serverEnvironmentFileOpenable','serverDatabaseOpenable','serverBackupOpenable','serverLogOpenable',
+            'serverPluginWritable','serverHomeControlWritable','serverGitEscapesConfinement']
+        require(measured.get('schema') == 'paperclip.agent-isolation.v2' and measured.get('actualAgentQualified') is True and
+                all(measured.get(key) is False for key in boundary) and measured.get('policySha256')==
+                hashlib.sha256(private_file(self.policy['agentPolicyFile']).read_bytes()).hexdigest(),
+                'native_agent_isolation_not_qualified')
 
     def identity(self):
         require(self.reader.plugin_ready(), 'native_plugin_binding_unavailable')
@@ -68,6 +72,7 @@ class NativeTransport:
                         except Refusal as error:
                             response = {'jobId':row['key'],'state':'not_admitted','code':error.code}
                         self.ledger.admission(row['key'],response)
+                        self.ledger.observe_hint(request,row['key'])
                     except (Refusal,ValueError,KeyError,TypeError):
                         # Malformed/conflicting intent grants no execution and
                         # never suppresses another valid task/company's request.

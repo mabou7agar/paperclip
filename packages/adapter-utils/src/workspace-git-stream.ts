@@ -1,4 +1,5 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
+import { spawn } from "./local-workspace-process.js";
 import { WORKSPACE_STREAM_CHUNK_BYTES } from "./workspace-manifest.js";
 
 export interface WorkspaceGitProcessInput {

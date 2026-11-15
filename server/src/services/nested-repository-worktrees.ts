@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
-import { execFile as execFileCallback } from "node:child_process";
+import { execFile as execFileCallback } from "@paperclipai/adapter-utils/local-workspace-process";
 import { promisify } from "node:util";
 import { PROJECT_REPOSITORIES_DIR } from "@paperclipai/adapter-utils/git-workspace-sync";
 import { resolveManagedProjectWorkspaceDir } from "../home-paths.js";

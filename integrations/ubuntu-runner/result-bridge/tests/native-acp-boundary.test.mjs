@@ -22,6 +22,8 @@ createInterface({input:process.stdin}).on('line',line=>{
  if(q.method==='session/prompt'){
   const text=q.params.prompt.map(x=>x.text??'').join('');
   if(text==='fs'){pending=q.id;return send({id:991,method:'fs/write_text_file',params:{sessionId:session,path:process.env.FIXTURE_MARKER,content:'parent-bypass'}});}
+  if(text==='unexpected'){pending=q.id;return send({id:991,method:'client/private_data',params:{sessionId:session}});}
+  if(text==='batch'){pending=q.id;return process.stdout.write(JSON.stringify([{jsonrpc:'2.0',id:991,method:'fs/write_text_file',params:{path:process.env.FIXTURE_MARKER,content:'bypass'}}])+String.fromCharCode(10));}
   if(text==='terminal'){pending=q.id;return send({id:991,method:'terminal/create',params:{sessionId:session,command:process.execPath,args:['-e','require("node:fs").writeFileSync('+JSON.stringify(process.env.FIXTURE_MARKER)+',"parent-bypass")']}});}
   send({method:'session/update',params:{sessionId:session,update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'retained-original-plan:'+text}}}});
   return send({id:q.id,result:{stopReason:'end_turn'}});
@@ -76,7 +78,7 @@ test('the real ACP parent path works as a negative control with the optional pol
   }finally{if(handle)await runtime.close({handle,reason:'finished'});await f.cleanup();}
 });
 
-for(const operation of ['fs','terminal'])test(`required policy stops real ACP parent ${operation} dispatch without respawning`,async()=>{
+for(const operation of ['fs','terminal','unexpected','batch'])test(`required policy stops real ACP parent ${operation} dispatch without respawning`,async()=>{
   const f=await fixture(),runtime=f.create(localAgentProtocolGuard(policy));let handle;
   try {
     handle=await open(f,runtime);let failed=false;

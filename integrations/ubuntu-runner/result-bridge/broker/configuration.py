@@ -24,10 +24,15 @@ def load(path):
             "databaseUser", "databaseName", "callbackUrl", "profiles"}
     require(base <= set(config) <= base | {'nativeQueue'}, "broker_configuration_invalid")
     if 'nativeQueue' in config:
+        require(config['callbackUrl']=='','native_queue_legacy_callback_forbidden')
         value = config['nativeQueue']
-        require(isinstance(value,dict) and set(value)=={'pluginId','signingKeyFile','isolationReceiptFile','isolationReceiptSha256'} and
+        require(isinstance(value,dict) and {'pluginId','signingKeyFile','isolationReceiptFile','isolationReceiptSha256','agentPolicyFile'} <= set(value) <= {'pluginId','signingKeyFile','isolationReceiptFile','isolationReceiptSha256','agentPolicyFile','hintPeerUid','hintPeerProfile'} and
                 UUID.fullmatch(value['pluginId']) and SHA.fullmatch(value['isolationReceiptSha256']), 'native_queue_configuration_invalid')
         private_file(value['signingKeyFile']); private_file(value['isolationReceiptFile'])
+        private_file(value['agentPolicyFile'])
+        require(type(value.get('hintPeerUid',1000)) is int and 0<value.get('hintPeerUid',1000)<2147483648 and
+                isinstance(value.get('hintPeerProfile','paperclip-control'),str) and
+                re.fullmatch(r'[a-z][a-z0-9-]{1,79}',value.get('hintPeerProfile','paperclip-control')), 'native_hint_peer_configuration_invalid')
     url = urlsplit(config["apiBaseUrl"])
     require(url.scheme in ["http", "https"] and url.hostname in ["127.0.0.1", "localhost"] and
             not url.username and not url.password and not url.query and not url.fragment and url.path in ["", "/"], "broker_api_not_loopback")

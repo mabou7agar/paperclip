@@ -6,7 +6,7 @@ export { SOURCE_MEMORY_RETENTION, initializeSourceMemoryRetention, cleanupSource
 import { readSourceCitationFromGit } from "./source-citation-reader.js";
 /** Optional source evidence preparation. Operator configuration is never taken from a task prompt. */
 import { createHash } from "node:crypto";
-import { execFile, spawn } from "node:child_process";
+import { execFile, spawn } from "@paperclipai/adapter-utils/local-workspace-process";
 import { promisify } from "node:util";
 import { mkdir, readFile, realpath, stat, chmod } from "node:fs/promises";
 import path from "node:path";

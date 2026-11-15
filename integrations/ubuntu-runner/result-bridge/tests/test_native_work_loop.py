@@ -14,7 +14,7 @@ class Finished(Exception):pass
 class NativeWorkLoopTest(unittest.TestCase):
     def fixture(self):
         transport=Mock();service=Mock()
-        transport.ledger.pending_admissions.return_value=[]
+        transport.ledger.pending_admissions.return_value=[];transport.ledger.has_pending_hints.return_value=False
         service.repository.pending.return_value=[];service.repository.unfinished.return_value=[]
         return transport,service,NativeWorkLoop(transport,service)
 

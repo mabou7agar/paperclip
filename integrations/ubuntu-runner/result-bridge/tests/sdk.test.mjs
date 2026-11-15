@@ -60,7 +60,7 @@ test('built native worker uses host state and the real SDK action company/actor 
   harness.seed({issues:[{id:taskId,companyId,projectId,assigneeAgentId:agentId,checkoutRunId:runId,status:'in_progress',
     title:'Retained task',description:'Original shared planning context'}]});
   const pair=generateKeyPairSync('ed25519'),trust={pluginId:randomUUID(),brokerUserId:'fixture-operator',publicKey:pair.publicKey};
-  const client=new NativeQueueClient(harness.ctx,async()=>trust),plugin=createRunnerPlugin(client);
+  const client=new NativeQueueClient(harness.ctx,async()=>trust,async()=>true),plugin=createRunnerPlugin(client);
   await plugin.definition.setup(harness.ctx);
   const args={taskId,profile:'example',kind:'control_checks',attachmentId:randomUUID(),packetSha256:'d'.repeat(64),
     scopeIssueId:null,scopeCommentId:null,ackCommentId:null,recipe:'changed-input-new.py'};

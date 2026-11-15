@@ -6,11 +6,16 @@ import { notifyNativeBroker } from './native-wake.mjs';
 /** Intent uses host-owned state; signed responses use native actions. No IPC secret. */
 export class NativeQueueClient {
   constructor(ctx, trustLoader = loadTrust, notify = notifyNativeBroker) {
-    this.ctx = ctx; this.trustLoader = trustLoader; this.notify = notify; this.serial = Promise.resolve();
+    this.ctx = ctx; this.trustLoader = trustLoader; this.notify = notify; this.serial = Promise.resolve(); this.resultLocks=new Map();
   }
   async startup() { await this.notify(); }
   async locked(work) {
     const next = this.serial.then(work); this.serial = next.catch(() => {}); return next;
+  }
+  async resultLocked(job,work) {
+    const previous=this.resultLocks.get(job)??Promise.resolve();
+    const next=previous.catch(()=>{}).then(work);this.resultLocks.set(job,next);
+    try{return await next;}finally{if(this.resultLocks.get(job)===next)this.resultLocks.delete(job);}
   }
   async verified(envelope, companyId) {
     const trust = await this.trustLoader();
@@ -25,7 +30,7 @@ export class NativeQueueClient {
         if (value.kind !== 'result' || value.jobId !== id || value.agentId !== input.agentId ||
             value.projectId !== input.projectId || value.requestDigest !== digest(stableInput(input))) throw new Error('runner_request_conflict');
         const measured=delivery(value.data);
-        return {jobId:id,state:measured.result.cleanupComplete===true?'terminal':'reconciliation_required',result:measured,replayed:true,
+        return {jobId:id,state:measured.status!=='unknown'&&measured.result.cleanupComplete===true?'terminal':'reconciliation_required',result:measured,replayed:true,
           next:'Measured result already retained. Use it in this turn. Do not wait for another wake, repeat tests or reset the job.'};
       }
       const admission = await this.ctx.state.get(requestKey(input.taskId, id, ADMISSION_NAMESPACE));
@@ -41,15 +46,22 @@ export class NativeQueueClient {
       if (!Array.isArray(pending) || !pending.every(uuid) || pending.length > 128 ||
           (!pending.includes(id) && pending.length === 128)) throw new Error('runner_request_capacity_wait');
       if (Buffer.byteLength(JSON.stringify(input)) > 16 * 1024) throw new Error('runner_request_too_large');
+      let intentWriteAttempted=false;
       try {
         await this.ctx.state.set({ scopeKind: 'agent', scopeId: input.agentId, namespace: 'runner-index', stateKey: id },
           { taskId: input.taskId, companyId: input.companyId, agentId: input.agentId });
         await this.ctx.state.set(pendingKey, [...new Set([...pending, id])]);
+        intentWriteAttempted=true;
         if (!previous) await this.ctx.state.set(key, input);
+      } catch(error) {
+        if (intentWriteAttempted) throw new Error("runner_admission_notification_unconfirmed");
+        throw error;
       } finally {
         // An ambiguous state-write response may already have committed. Hint
         // even on error; a worker or plugin restart must not be a lost cursor.
-        await this.notify();
+        if (intentWriteAttempted && !await this.notify({...previous??input,jobId:id})) {
+          throw new Error("runner_admission_notification_unconfirmed");
+        }
       }
       return { jobId: id, state: 'pending_admission', replayed: !!previous,
         next: 'Intent saved, not execution authority. End this turn and wait for the native result. Do not poll, repeat tests, create a timer or wake yourself.' };
@@ -62,7 +74,7 @@ export class NativeQueueClient {
         const result = await this.verified(outcome, input.companyId);
         if (result.jobId !== input.jobId || result.agentId !== input.agentId || result.issueId !== index.taskId || result.kind !== 'result') throw new Error('runner_result_scope_invalid');
         const measured=delivery(result.data);
-        return { jobId:input.jobId, state:measured.result.cleanupComplete === true ? 'terminal' : 'reconciliation_required', result:measured };
+        return { jobId:input.jobId, state:measured.status !== 'unknown' && measured.result.cleanupComplete === true ? 'terminal' : 'reconciliation_required', result:measured };
       }
       const saved = await this.ctx.state.get(requestKey(index.taskId, input.jobId, ADMISSION_NAMESPACE));
       if (!saved) return { jobId: input.jobId, state: 'pending_admission' };
@@ -124,6 +136,7 @@ export class NativeQueueClient {
     const result = delivery(value.data);
     if (result.jobId !== value.jobId || result.companyId !== value.companyId || result.issueId !== value.issueId ||
         result.agentId !== value.agentId || result.projectId !== value.projectId) throw new Error('runner_delivery_scope_invalid');
+    return this.resultLocked(value.jobId,async()=>{
     const current = await this.locked(async () => {
       const resultKey=requestKey(value.issueId,value.jobId,'runner-results');
       const savedEnvelope=await this.ctx.state.get(resultKey);
@@ -136,6 +149,7 @@ export class NativeQueueClient {
       await this.ctx.state.set(resultKey,envelope);return true;
     });
     return current ? service.deliverResult(result) : {recorded:true,stale:true};
+    });
   }
 }
 

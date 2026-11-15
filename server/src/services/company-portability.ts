@@ -5,7 +5,7 @@ import { agentAppearanceSchema, agentHarnessType, paperclipRunnerProfileForHarne
 import { resolveNewAgentRunnerForCompany } from "./agent-runner-selection.js";
 import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
-import { execFile } from "node:child_process";
+import { execFile } from "@paperclipai/adapter-utils/local-workspace-process";
 import path from "node:path";
 import { promisify } from "node:util";
 import { and, eq, inArray } from "drizzle-orm";

@@ -17,6 +17,9 @@ describe("operator local agent launch policy", () => {
     for (const method of ["fs/read_text_file","fs/write_text_file","terminal/create","terminal/output"]) {
       expect(()=>guard("inbound",{id:1,method,params:{path:"/proc/server/environ"}})).toThrow(/confined child|Confined local/);
     }
+    expect(()=>guard("inbound",{id:1,method:"client/private_data"})).toThrow();
+    expect(()=>guard("inbound",[{id:1,method:"fs/read_text_file"}])).toThrow();
+    expect(()=>guard("inbound",{id:1,method:"session/request_permission",params:{}})).not.toThrow();
     expect(()=>guard("inbound",{method:"session/update",params:{}})).not.toThrow();
     expect(()=>guard("inbound",{id:1,result:{}})).not.toThrow();
     expect(()=>guard("outbound",{method:"fs/read_text_file"})).not.toThrow();

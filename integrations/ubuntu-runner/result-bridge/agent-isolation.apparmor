@@ -76,10 +76,21 @@ profile paperclip-agent flags=(attach_disconnected,mediate_deleted) {
   # Parent can observe/cancel its child. Agents cannot inspect the parent or
   # each other, nor transition back to the control profile on another exec.
   ptrace (readby,tracedby) peer=paperclip-control,
+  # Prevent moving a protected ancestor and reading its files by a new path.
+  # Existing provider/workspace subdirectories remain writable below it.
+  deny /paperclip wklx,
+  deny /paperclip/{instances,instances/*,instances/*/data,.paperclip,.config,.local} wklx,
+  deny /paperclip/.local/bin{,/**} wklx,
   deny @{PROC}/*/environ r,
   deny @{PROC}/*/mem rw,
   deny /paperclip/instances/*/secrets{,/**} rwklx,
+  deny /paperclip/instances/*/{config.json,.env,.env.*,db,db/**,data/backups,data/backups/**,logs,logs/**} rwklx,
   deny /paperclip/.env{,.*} rwklx,
+  deny /paperclip/plugins{,/**} wklx,
+  deny /paperclip/.paperclip/plugins{,/**} wklx,
+  deny /paperclip/{.gitconfig,.git-credentials,.npmrc,.profile,.bashrc,.bash_profile,.zshrc,.zprofile,.pam_environment} wklx,
+  deny /paperclip/.config/{git,npm}{,/**} wklx,
+  deny /paperclip/.ssh{,/**} wklx,
   deny /app/.env{,.*} rwklx,
   # Live control-plane code is not a development checkout. Keep provider
   # execution/read access, but prevent dependency/code replacement by agents.

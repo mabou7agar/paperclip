@@ -1,4 +1,4 @@
-import { execFile as execFileCallback, spawn } from "node:child_process";
+import { execFile as execFileCallback, spawn } from "@paperclipai/adapter-utils/local-workspace-process";
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";

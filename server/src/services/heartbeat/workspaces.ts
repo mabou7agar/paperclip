@@ -22,7 +22,7 @@ import {
 import fs from "node:fs/promises";
 import path from "node:path";
 import { localRepositoryPath } from "../local-repository-path.js";
-import { execFile as execFileCallback } from "node:child_process";
+import { execFile as execFileCallback } from "@paperclipai/adapter-utils/local-workspace-process";
 import { promisify } from "node:util";
 import {
   createHash,

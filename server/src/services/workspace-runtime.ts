@@ -11,7 +11,8 @@ import { verifiedRecordedIsolatedRemoteSource } from "./isolated-remote-workspac
 import { assertCurrentWorkspaceSourceHeld, workspaceSourceIdentities, withWorkspaceSourceLocks } from "./workspace-source-lock.js";
 import { localWorkspaceSourcePaths } from "./execution-workspace-source-roots.js";
 export { sanitizeRuntimeServiceBaseEnv } from "./runtime-service-env.js";
-import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { type ChildProcess } from "node:child_process";
+import { execFile, spawn } from "@paperclipai/adapter-utils/local-workspace-process";
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import fs from "node:fs/promises";
 import net from "node:net";

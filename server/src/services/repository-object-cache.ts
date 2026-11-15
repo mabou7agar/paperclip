@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { execFile as execute } from "node:child_process";
+import { execFile as execute } from "@paperclipai/adapter-utils/local-workspace-process";
 import { promisify } from "node:util";
 import { tryWithDirectoryMergeLock } from "@paperclipai/adapter-utils/workspace-restore-merge";
 import { assertWorkspaceManifestDiskSpace } from "@paperclipai/adapter-utils/workspace-manifest";

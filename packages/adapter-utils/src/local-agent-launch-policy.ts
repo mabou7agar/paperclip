@@ -29,6 +29,9 @@ function sealedPath(file: string, executable = false): void {
     }
     if (current === "/") break;
   }
+  if (executable && !fs.readFileSync(file).subarray(0,4).equals(Buffer.from([0x7f,0x45,0x4c,0x46]))) {
+    throw new Error("Local agent transition executable must be a sealed ELF binary");
+  }
 }
 
 /** Read on launch, not per token/tool. Missing required policy fails closed. */
@@ -89,6 +92,7 @@ export function localAgentSpawner(policy: LocalAgentLaunchPolicy | null) {
 export function localAgentProtocolGuard(policy: LocalAgentLaunchPolicy | null) {
   if (!policy) return undefined;
   return () => (direction: "inbound" | "outbound", message: unknown): void => {
+    if (direction === "inbound" && Array.isArray(message)) throw new Error("Confined ACP does not accept batch requests");
     const method = message && typeof message === "object" && "method" in message ? message.method : null;
     if (direction === "outbound" && method === "initialize" && message && typeof message === "object" &&
         "params" in message && message.params && typeof message.params === "object") {
@@ -99,7 +103,7 @@ export function localAgentProtocolGuard(policy: LocalAgentLaunchPolicy | null) {
       params.clientCapabilities = {...previous,fs:{readTextFile:false,writeTextFile:false},terminal:false};
     }
     if (direction === "inbound" && typeof method === "string" &&
-        (method.startsWith("fs/") || method.startsWith("terminal/"))) {
+        !["session/update","session/request_permission"].includes(method)) {
       throw new Error("Confined local ACP providers must use their own filesystem and terminal tools");
     }
   };
