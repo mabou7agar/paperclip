@@ -10,7 +10,7 @@ from packet import Packet
 from contracts import Refusal
 
 
-def fixture(patch=None, extra=None):
+def fixture(patch=None, extra=None, source_patch=None):
     root = '/tmp/example-owner'
     profile = {'candidate': 'f' * 40, 'authorityRoot': root, 'trialRoot': '/tmp/example-trial',
                'fixedTrialFields': {'uid': 1001}, 'continuationPattern': r'candidate-q[0-9]+',
@@ -26,7 +26,10 @@ def fixture(patch=None, extra=None):
     files = {'qualification-q1/trial.json': json.dumps(trial).encode(),
              'qualification-q1/candidate.json': json.dumps({'candidate': 'f' * 40}).encode(),
              'qualification-q1/scope-contract.json': json.dumps({'authoritySchema': 'example-q1-verified.v2'}).encode(),
-             'q1-cases-v1.tar.gz': b'opaque-reviewed-cases'}
+             'q1-cases-v1.tar.gz': b'opaque-reviewed-cases',
+             'qualification-q1/execute_qualification.py': b'print("data-only q1")\n'}
+    profile['privilegedCodeDigests'] = {'execute_qualification.py': hashlib.sha256(files['qualification-q1/execute_qualification.py'].replace(b'q1', b'{key}')).hexdigest()}
+    if source_patch: files.update(source_patch)
     manifest = {name: {'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()} for name, raw in files.items()}
     files.update({'manifest.json': json.dumps({'files': manifest}).encode(), 'SHA256SUMS': b'index'})
     stream = io.BytesIO()
@@ -64,3 +67,14 @@ class PacketTests(unittest.TestCase):
     def test_changed_packet_digest_is_refused(self):
         raw, sha, profile = fixture()
         with self.assertRaises(Refusal): Packet(raw + b'changed', sha, profile)
+
+class PrivilegedCodeTests(unittest.TestCase):
+    def test_only_operator_registered_python_templates_can_reach_root(self):
+        raw, sha, profile = fixture()
+        Packet(raw, sha, profile, privileged=True)
+        for source in [{'qualification-q1/execute_qualification.py': b'print("altered root code")'},
+                       {'qualification-q1/trial_support.so': b'ELF'},
+                       {'qualification-q1/sitecustomize.py': b'import os'},
+                       {'qualification-q1/import-package/__init__.py': b'import os'}]:
+            raw, sha, profile = fixture(source_patch=source)
+            with self.subTest(source=list(source)), self.assertRaises(Refusal): Packet(raw, sha, profile, privileged=True)

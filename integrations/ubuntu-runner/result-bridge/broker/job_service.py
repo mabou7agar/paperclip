@@ -1,9 +1,8 @@
 """Own external work, not the agent lifecycle. Native Paperclip owns the latter."""
 import hashlib
 import threading
-import time
 from concurrent.futures import ThreadPoolExecutor
-from contracts import canonical, digest, job_request, require, Refusal, closed_diagnostic
+from contracts import canonical, digest, job_request, require, Refusal, AdmissionWait, closed_diagnostic
 from packet import Packet
 from admission import ReviewAdmissionService
 
@@ -26,11 +25,17 @@ class JobService:
     def submit(self, value):
         request = job_request(value)
         profile = self.profile(request)
-        self.admission.binding(request, profile)
-        identity, created = self.repository.register(request, profile['policyDigest'])
+        self.admission.assert_profile(request, profile)
+        require((request['kind'] == 'control_checks' and profile.get('allowControlChecks') is True) or
+                (request['kind'] == 'reviewed_controller' and profile.get('allowReviewedController') is True), 'job_kind_not_enabled')
+        identity, created = self.repository.register(request, profile['policyDigest'], self.slot(profile))
         if created:
             self.schedule(identity)
-        return {'jobId': identity, 'state': self.repository.get(identity)['state'], 'replayed': not created,
+        saved = self.repository.get(identity)
+        if saved['state'] == 'terminal':
+            return {'jobId': identity, 'state': 'terminal', 'replayed': True, 'result': saved['result'],
+                    'next': 'Result already retained. Use it in this native turn; do not wait, poll, repeat tests or reset the job.'}
+        return {'jobId': identity, 'state': saved['state'], 'waitCode': saved['wait_code'], 'replayed': not created,
                 'next': 'Wait for the native runner-result delivery on this task. Do not poll, repeat tests, create a timer or ask the user. Report the concrete system-owned runner wait and end this turn.'}
 
     def schedule(self, identity):
@@ -57,98 +62,121 @@ class JobService:
                 matches[0]['byteSize'] <= 16 * 1024 * 1024, 'job_attachment_binding_invalid')
         raw = self.native.read('/api/attachments/' + request['attachmentId'] + '/content?download=1',
                                limit=16 * 1024 * 1024, binary=True)
-        return Packet(raw, request['packetSha256'], profile)
+        return Packet(raw, request['packetSha256'], profile, privileged=request['kind'] == 'reviewed_controller')
+
+    def slot(self, profile):
+        return digest([profile['sshTarget'], profile['runner']])
 
     def source_settled(self, request, profile):
-        # The tool returns immediately; the native agent finishes its turn.
-        # Only read persisted metadata while waiting. Never invoke a model.
-        for _ in range(180):
-            self.admission.binding(request, profile)
-            rows = self.native.metadata(request['companyId'], [request['sourceRunId']], [])
-            require(len(rows) == 1, 'job_source_run_missing')
-            row = rows[0]
-            require(row['agent'] == request['agentId'] and row['task'] == request['taskId'], 'job_source_run_scope_changed')
-            if row['status'] not in ['queued', 'running']:
-                require(row['status'] == 'succeeded' and row['before'] == row['after'] ==
-                        profile['savedSessions'][request['agentId']], 'job_source_session_unsettled')
-                return
-            time.sleep(2)
-        raise Refusal('job_source_run_not_settled')
+        self.admission.binding(request, profile)
+        rows = self.native.metadata(request['companyId'], [request['sourceRunId']], [])
+        require(len(rows) == 1, 'job_source_run_missing')
+        row = rows[0]
+        require(row['agent'] == request['agentId'] and row['task'] == request['taskId'], 'job_source_run_scope_changed')
+        if row['status'] in ['queued', 'running']:
+            raise AdmissionWait('job_source_run_not_settled')
+        require(row['status'] == 'succeeded' and row['before'] == row['after'] ==
+                profile['savedSessions'][request['agentId']], 'job_source_session_unsettled')
+
+    def prepare(self, request, profile):
+        self.source_settled(request, profile)
+        packet = self.load_packet(request, profile)
+        if request['kind'] == 'reviewed_controller':
+            require(profile.get('allowReviewedController') is True, 'job_controller_not_enabled')
+            return packet, self.admission.controller(request, profile, packet), None
+        require(profile.get('allowControlChecks') is True and request['recipe'] in packet.files,
+                'job_control_checks_not_registered')
+        inputs = {name: packet.file_sha(packet.directory + '/' + name) for name in profile['controlInputs']}
+        key = digest([packet.file_sha(request['recipe']), inputs, profile['preparedImage'], profile['uid'], profile['gid']])
+        return packet, {'controlDigest': key}, key
 
     def execute(self, identity):
         saved = self.repository.get(identity)
         request = saved['input']
-        profile = self.profile(request)
         try:
+            profile = self.profile(request)
             require(saved['policy_digest'] == profile['policyDigest'], 'job_saved_policy_incompatible')
-            if saved['state'] in ['launching', 'quarantined']:
-                # Inspect the exact remote unit/result. A restart never turns
-                # an uncertain attempt into a fresh execution.
-                return self.follow(identity, request, profile, recover=True)
-            if self.repository.ownership_holds(identity):
-                # Admission waiting is not a spent execution or a model wake.
-                # Recovery will observe the durable hold's actual release.
+            self.repository.bind_slot(identity, profile['policyDigest'], self.slot(profile))
+            if saved['state'] in ['launching', 'quarantined', 'delivering']:
+                return self.follow(identity, request, profile)
+            if saved['state'] != 'queued':
                 return
-            self.source_settled(request, profile)
-            packet = self.load_packet(request, profile)
-            if request['kind'] == 'reviewed_controller':
-                admission = self.admission.controller(request, profile, packet)
-            else:
-                require(profile.get('allowControlChecks') is True and request['recipe'] in packet.files,
-                        'job_control_checks_not_registered')
-                admission = None
-                inputs = {name: packet.file_sha(packet.directory + '/' + name) for name in profile['controlInputs']}
-                key = digest([packet.file_sha(request['recipe']), inputs, profile['preparedImage'], profile['uid'], profile['gid']])
-                previous = self.repository.passed_controls(key)
+            if self.repository.ownership_holds(identity):
+                return self.repository.wait(identity, 'runner_slot_owned')
+            packet, admission, key = self.prepare(request, profile)
+            if key:
+                previous = self.repository.passed_controls(key, request['companyId'], request['profile'], profile['policyDigest'])
                 if previous:
                     original_id, result = previous
                     return self.finish(identity, request, {**result['result'], 'reusedFromJobId': original_id})
-            require(self.repository.claim(identity), 'job_already_claimed')
+            # Staging writes data only. A failed API read or partial SSH upload
+            # before confirmed staging cannot consume the execution identity.
             self.remote.stage(profile, identity, request, packet, admission)
-            # Re-read live task ownership immediately before launching.
-            self.admission.binding(request, profile)
+            # Re-verify the ENTIRE admission, including current target/verdict,
+            # after staging and immediately before the first launch.
+            current_packet, current_admission, _ = self.prepare(request, profile)
+            require(digest(current_admission) == digest(admission), 'job_admission_changed_before_launch')
+            require(self.repository.claim(identity), 'job_already_claimed')
             self.remote.launch(profile, identity)
-            return self.follow(identity, request, profile, control_key=key if request['kind'] == 'control_checks' else None)
+            return self.follow(identity, request, profile)
+        except AdmissionWait as error:
+            self.repository.wait(identity, error.code)
         except Refusal as error:
             state = self.repository.get(identity)['state']
+            if state == 'delivering':
+                return self.repository.wait(identity, 'evidence_delivery_pending')
+            if state == 'queued' and error.code in ['job_native_pause_hold', 'job_native_execution_hold', 'job_agent_unavailable', 'job_source_run_missing']:
+                return self.repository.wait(identity, error.code)
+            if state == 'queued' and error.code == 'remote_transport_unconfirmed':
+                return self.repository.wait(identity, 'runner_staging_transport_pending')
             self.finish(identity, request, {'status': 'unknown' if state in ['launching', 'quarantined'] else 'failed',
-                                          'code': error.code, 'kind': request['kind']})
+                'code': error.code, 'kind': request['kind'], 'executionStarted': state != 'queued',
+                'cleanupComplete': state == 'queued'})
         except Exception:
-            # Preserve the job and any remote ownership. No second command.
+            state = self.repository.get(identity)['state']
+            if state in ['queued', 'delivering']:
+                return self.repository.wait(identity, 'native_or_delivery_transport_pending')
             self.finish(identity, request, {'status': 'unknown', 'code': 'job_execution_unreconciled', 'kind': request['kind']})
 
-    def follow(self, identity, request, profile, recover=False, control_key=None):
-        cancellation_requested = False
-        for _ in range(1200):
-            value = self.remote.inspect(profile, identity)
-            if value['phase'] == 'terminal':
-                outcome = closed_diagnostic(value['result'])
-                published = []
-                for item in outcome.pop('artifacts', []):
-                    raw = self.remote.artifact(profile, identity, item['sha256'])
-                    published.append(self.native.upload_evidence(request, item, raw))
-                if published:
-                    outcome['evidenceAttachments'] = published
-                if control_key:
-                    outcome['controlDigest'] = control_key
-                return self.finish(identity, request, outcome)
-            if recover and value['phase'] == 'not_staged':
-                return self.finish(identity, request, {'status': 'unknown', 'kind': request['kind'], 'code': 'remote_launch_not_reconciled'})
-            if recover and value['phase'] == 'staged':
-                # The same remote job's exclusive attempt marker is the
-                # execution identity. Re-delivering its unit is idempotent.
-                self.admission.binding(request, profile)
-                self.remote.launch(profile, identity)
+    def follow(self, identity, request, profile):
+        # One passive observation per recovery event. Do not hold the shared
+        # executor on a six-minute source wait or forty-minute SSH poll loop.
+        value = self.remote.inspect(profile, identity)
+        if value['phase'] == 'terminal':
+            outcome = closed_diagnostic(value['result'])
+            if outcome.get('cleanupComplete') is True and outcome['status'] != 'unknown':
+                self.repository.delivering(identity)
+            published = []
+            for item in outcome.pop('artifacts', []):
+                raw = self.remote.artifact(profile, identity, item['sha256'])
+                published.append(self.native.upload_evidence(request, item, raw))
+            if published:
+                outcome['evidenceAttachments'] = published
+            return self.finish(identity, request, outcome)
+        if value['phase'] == 'not_staged':
+            # Launching is saved only AFTER staging was confirmed. Loss of
+            # that remote state is identity loss, not permission to replay.
+            return self.finish(identity, request, {'status': 'unknown', 'kind': request['kind'], 'code': 'remote_confirmed_state_missing'})
+        if value['phase'] == 'staged':
+            # No marker and no unit: a trusted positive pre-dispatch fact.
             try:
-                self.admission.binding(request, profile)
-            except Refusal:
-                if not cancellation_requested:
-                    self.remote.cancel(profile, identity)
-                    cancellation_requested = True
-            time.sleep(2)
-        if not cancellation_requested:
-            self.remote.cancel(profile, identity)
-        self.finish(identity, request, {'status': 'unknown', 'kind': request['kind'], 'code': 'remote_cleanup_or_termination_unconfirmed'})
+                packet, admission, _ = self.prepare(request, profile)
+                self.remote.stage(profile, identity, request, packet, admission)
+            except Refusal as error:
+                if error.code in ['job_native_pause_hold', 'job_native_execution_hold', 'job_agent_unavailable',
+                                  'job_source_run_not_settled', 'remote_transport_unconfirmed']:
+                    return self.repository.release_unlaunched(identity, error.code)
+                return self.finish(identity, request, {'status': 'failed', 'kind': request['kind'], 'code': error.code,
+                    'executionStarted': False, 'cleanupComplete': True})
+            except Exception:
+                return self.repository.release_unlaunched(identity, 'native_transport_pending')
+            self.remote.launch(profile, identity)
+            return
+        try:
+            self.admission.binding(request, profile)
+        except Refusal:
+            if self.repository.request_cancel(identity):
+                self.remote.cancel(profile, identity)
 
     def finish(self, identity, request, outcome):
         # Exclude timestamps, process IDs, output hashes, packet identities and
@@ -166,4 +194,4 @@ class JobService:
         saved = self.repository.get(value['jobId'])
         request = saved['input']
         require(value['companyId'] == request['companyId'] and value['agentId'] == request['agentId'], 'job_status_scope_mismatch')
-        return {'jobId': saved['id'], 'state': saved['state'], 'result': saved['result']}
+        return {'jobId': saved['id'], 'state': saved['state'], 'waitCode': saved['wait_code'], 'result': saved['result']}

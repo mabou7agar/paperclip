@@ -2,7 +2,7 @@ import { profiles } from './configuration.mjs';
 import { submission, delivery, uuid } from './contracts.mjs';
 
 /** Persist evidence before requesting one native continuation. Never owns
- * task status, sessions, reviews, tests, retry counters or approval policy. */
+ * sessions, assignments, reviews, tests, retry counters or approval policy. */
 export class ResultService {
   constructor(ctx, broker) { this.ctx = ctx; this.broker = broker; this.pending = new Map(); }
 
@@ -52,12 +52,18 @@ export class ResultService {
     if (existing && existing.body !== body) throw new Error('runner_result_document_conflict');
     if (!existing) await this.ctx.issues.documents.upsert({ companyId: result.companyId, issueId: issue.id,
       key, title: 'Runner result', format: 'markdown', body });
-    if (!result.newEvidence || ['done', 'cancelled'].includes(issue.status) ||
-        issue.assigneeAgentId !== result.agentId) {
+    if (['done', 'cancelled'].includes(issue.status) || issue.assigneeAgentId !== result.agentId) {
+      return this.broker.call('acknowledge', { jobId, receiptSha256: result.receiptSha256, disposition: 'recorded_only' });
+    }
+    if (!result.newEvidence && result.status !== 'passed') {
+      // A repeated failure is a visible native wait, not an in-progress task
+      // silently awaiting a callback that we deliberately suppress. The common
+      // SDK update service preserves execution/review/session ownership.
+      if (issue.status !== 'blocked') await this.ctx.issues.update(issue.id, { status: 'blocked' }, result.companyId);
       return this.broker.call('acknowledge', { jobId, receiptSha256: result.receiptSha256, disposition: 'recorded_only' });
     }
     const wake = await this.ctx.issues.requestWakeup(issue.id, result.companyId, {
-      reason: 'runner_result_received', expectedAssigneeAgentId: result.agentId, contextSource: 'ubuntu.runner.result',
+      durable: true, reason: 'runner_result_received', expectedAssigneeAgentId: result.agentId, contextSource: 'ubuntu.runner.result',
       idempotencyKey: `runner-result:${jobId}:${result.receiptSha256}`,
     });
     return this.broker.call('acknowledge', { jobId, receiptSha256: result.receiptSha256,

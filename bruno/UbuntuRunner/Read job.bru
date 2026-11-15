@@ -8,6 +8,10 @@ post {
   body: json
   auth: none
 }
+headers {
+  X-Paperclip-Runner-Plugin: paperclip.ubuntu-runner-results
+  X-Paperclip-Runner-Signature: {{serviceSignature}}
+}
 body:json {
   { "operation": "status", "input": { "jobId": "{{jobId}}", "companyId": "{{companyId}}", "agentId": "{{agentId}}" } }
 }

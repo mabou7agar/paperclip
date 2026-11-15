@@ -1733,6 +1733,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
       },
       async requestWakeup(issueId, companyId, options) {
         requireCapability(manifest, capabilitySet, "issues.wakeup");
+        if (options?.durable) requireCapability(manifest, capabilitySet, "issues.wakeup.durable");
         const record = issues.get(issueId);
         if (!isInCompany(record, companyId)) throw new Error(`Issue not found: ${issueId}`);
         if (options?.expectedAssigneeAgentId && record.assigneeAgentId !== options.expectedAssigneeAgentId) {
@@ -1746,8 +1747,9 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
         if (unresolved.length > 0) throw new Error("Issue is blocked by unresolved blockers");
         return { queued: true, runId: randomUUID() };
       },
-      async requestWakeups(issueIds, companyId) {
+      async requestWakeups(issueIds, companyId, options) {
         requireCapability(manifest, capabilitySet, "issues.wakeup");
+        if (options?.durable) requireCapability(manifest, capabilitySet, "issues.wakeup.durable");
         const results = [];
         for (const issueId of issueIds) {
           const record = issues.get(issueId);

@@ -13,7 +13,7 @@ def sha(raw):
 
 
 class Packet:
-    def __init__(self, raw, expected_sha, profile):
+    def __init__(self, raw, expected_sha, profile, privileged=False):
         require(len(raw) <= 16 * 1024 * 1024 and sha(raw) == expected_sha, "packet_digest_mismatch")
         self.raw = raw
         self.files = {}
@@ -66,6 +66,18 @@ class Packet:
         self.case_name = prefix + "-cases-v1.tar.gz"
         require(self.case_name in self.files and self.trial["continuationAttempt"] == self.trial["maxContinuationAttempts"] == 1,
                 "packet_attempt_boundary_invalid")
+        if privileged:
+            # Only operator-registered Python templates may execute as root.
+            # Prefix substitution changes bounded data identities, never free
+            # code. No extension modules, bytecode, packages or import hooks.
+            root_files = {name.removeprefix(self.directory + '/'): raw for name, raw in self.files.items()
+                          if name.startswith(self.directory + '/')}
+            require(all('/' not in name and re.fullmatch(r'[A-Za-z0-9_.-]+', name) and
+                        not name.endswith(('.so', '.pyc', '.pyo', '.pth', '.zip')) for name in root_files),
+                    'packet_privileged_import_inventory_invalid')
+            code = {name.replace(prefix, '{key}'): sha(data.replace(prefix.encode(), b'{key}'))
+                    for name, data in root_files.items() if name.endswith('.py')}
+            require(code == profile['privilegedCodeDigests'], 'packet_privileged_code_not_registered')
         self.authority_schema = profile["authoritySchemaTemplate"].replace("{key}", prefix)
         require(self.trial["authoritySchema"] == self.contract["authoritySchema"] == self.authority_schema, "packet_authority_schema_invalid")
 

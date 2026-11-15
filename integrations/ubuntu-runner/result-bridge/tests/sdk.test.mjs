@@ -39,3 +39,15 @@ test('built worker registers real SDK tools/jobs and persists a measured webhook
   assert.equal((await harness.ctx.issues.get(taskId, companyId)).description, 'Original accepted plan and candidate');
   assert.equal((await plugin.definition.onHealth()).status, 'ok');
 });
+
+
+test('durable wake opt-in requires its declared host capability while legacy keyed wakes still work', async () => {
+  const harness = createTestHarness({ manifest, capabilities: manifest.capabilities.filter(x => x !== 'issues.wakeup.durable') });
+  const companyId = randomUUID(), issueId = randomUUID();
+  harness.seed({ issues: [{ id: issueId, companyId, status: 'in_progress', assigneeAgentId: randomUUID(), title: 'Legacy keyed wake' }] });
+  await harness.ctx.issues.requestWakeup(issueId, companyId, { idempotencyKey: 'legacy-key' });
+  await assert.rejects(harness.ctx.issues.requestWakeup(issueId, companyId,
+    { idempotencyKey: 'durable-key', durable: true }), /issues.wakeup.durable/);
+  await assert.rejects(harness.ctx.issues.requestWakeups([issueId], companyId,
+    { idempotencyKeyPrefix: 'durable-batch', durable: true }), /issues.wakeup.durable/);
+});

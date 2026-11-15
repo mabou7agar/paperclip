@@ -38,7 +38,7 @@ class NativeRepository:
         require(UUID.fullmatch(issue_id) and UUID.fullmatch(comment_id), "native_comment_id_invalid")
         return self.read(f"/api/issues/{issue_id}/comments/{comment_id}")
 
-    def admission_gates(self, company_id, task_id):
+    def admission_gates_sql(self, company_id, task_id):
         require(UUID.fullmatch(company_id) and UUID.fullmatch(task_id), 'native_gate_ids_invalid')
         sql = f"""SELECT json_build_object('companyActive',c.status='active' AND c.paused_at IS NULL,
           'projectActive',p.id IS NULL OR p.paused_at IS NULL,
@@ -46,7 +46,10 @@ class NativeRepository:
              WHERE m.company_id=c.id AND m.issue_id=i.id AND NOT m.skipped AND h.status='active' AND h.mode='pause'))
           FROM issues i JOIN companies c ON c.id=i.company_id LEFT JOIN projects p ON p.id=i.project_id
           WHERE i.company_id='{company_id}' AND i.id='{task_id}';"""
-        rows = self.query(sql)
+        return sql
+
+    def admission_gates(self, company_id, task_id):
+        rows = self.query(self.admission_gates_sql(company_id, task_id))
         require(len(rows) == 1, 'native_admission_gate_missing')
         return rows[0]
 
@@ -58,7 +61,7 @@ class NativeRepository:
         require(result.returncode == 0 and len(result.stdout) <= 256 * 1024, 'native_attestation_unavailable')
         return [closed_json(line) for line in result.stdout.splitlines() if line]
 
-    def metadata(self, company_id, run_ids, source_decisions):
+    def metadata_sql(self, company_id, run_ids, source_decisions):
         require(UUID.fullmatch(company_id) and len(run_ids) <= 256 and all(UUID.fullmatch(x) for x in run_ids), "native_run_ids_invalid")
         require(len(source_decisions) <= 16 and all(UUID.fullmatch(x) for x in source_decisions), "native_decision_ids_invalid")
         runs = ",".join("'" + x + "'" for x in run_ids) or "NULL"
@@ -73,7 +76,10 @@ class NativeRepository:
           FROM heartbeat_runs h WHERE h.company_id='{company_id}' AND h.id IN({runs});
         SELECT json_build_object('kind','decision','id',id,'issue',issue_id,'stageId',stage_id,'outcome',outcome,'bodyMd5',md5(body))
           FROM issue_execution_decisions WHERE company_id='{company_id}' AND id IN({decisions});"""
-        return self.query(sql)
+        return sql
+
+    def metadata(self, company_id, run_ids, source_decisions):
+        return self.query(self.metadata_sql(company_id, run_ids, source_decisions))
 
     def upload_evidence(self, job, descriptor, raw):
         require(hashlib.sha256(raw).hexdigest() == descriptor['sha256'] and len(raw) == descriptor['bytes'], 'artifact_upload_digest_mismatch')

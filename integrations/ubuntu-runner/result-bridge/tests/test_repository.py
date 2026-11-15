@@ -80,7 +80,8 @@ class RepositoryTests(unittest.TestCase):
         self.repository.claim(identity)
         self.repository.terminal(identity, self.result(identity, status='unknown'))
         self.assertEqual(self.repository.get(identity)['state'], 'quarantined')
-        self.assertEqual(self.repository.ownership_holds('other'), [identity])
+        other, _ = self.repository.register({**self.request, 'packetSha256': 'f' * 64}, 'policy')
+        self.assertEqual(self.repository.ownership_holds(other), [identity])
         self.repository.terminal(identity, self.result(identity, status='failed', receipt='d' * 64, fingerprint='e' * 64))
         self.assertEqual(self.repository.get(identity)['state'], 'terminal')
         self.repository.acknowledge(identity, 'b' * 64)
@@ -124,3 +125,38 @@ class SupersededDeliveryTests(unittest.TestCase):
         self.assertEqual(self.repository.pending(), [])
         with self.repository.connection() as db:
             self.assertEqual(db.execute('SELECT count(*) FROM deliveries').fetchone()[0], 2)
+
+class ScopedReuseTests(unittest.TestCase):
+    setUp = RepositoryTests.setUp
+    tearDown = RepositoryTests.tearDown
+    result = RepositoryTests.result
+
+    def test_passed_reuse_is_a_real_completion_event_for_the_new_job(self):
+        first, _ = self.repository.register(self.request, 'policy')
+        one = self.result(first, status='passed')
+        one['result']['controlDigest'] = 'f' * 64
+        self.repository.terminal(first, one)
+        other, _ = self.repository.register({**self.request, 'packetSha256': 'e' * 64}, 'policy')
+        two = {**one, 'jobId': other, 'receiptSha256': 'c' * 64}
+        self.assertTrue(self.repository.terminal(other, two)['newEvidence'])
+
+    def test_cache_never_crosses_company_profile_or_operator_policy(self):
+        first, _ = self.repository.register(self.request, 'policy')
+        value = self.result(first, status='passed')
+        value['result']['controlDigest'] = 'f' * 64
+        self.repository.terminal(first, value)
+        self.assertIsNotNone(self.repository.passed_controls('f' * 64, self.request['companyId'], 'example', 'policy'))
+        for company, profile, policy in [(str(uuid.uuid4()), 'example', 'policy'),
+                                         (self.request['companyId'], 'other', 'policy'),
+                                         (self.request['companyId'], 'example', 'changed')]:
+            self.assertIsNone(self.repository.passed_controls('f' * 64, company, profile, policy))
+
+    def test_old_deterministic_job_id_reuses_original_row_and_source_run(self):
+        from contracts import canonical, digest, stable_input
+        legacy_id = str(uuid.uuid4())
+        with self.repository.connection() as db:
+            db.execute("INSERT INTO jobs(id,input_digest,input_json,policy_digest,state)VALUES(?,?,?,?,?)", (
+                legacy_id, digest(stable_input(self.request)), canonical(self.request).decode(), 'policy', 'queued'))
+        result = self.repository.register({**self.request, 'sourceRunId': str(uuid.uuid4())}, 'policy')
+        self.assertEqual(result, (legacy_id, False))
+        self.assertEqual(self.repository.get(legacy_id)['input']['sourceRunId'], self.request['sourceRunId'])

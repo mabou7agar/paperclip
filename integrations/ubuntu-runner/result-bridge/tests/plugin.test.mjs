@@ -14,6 +14,7 @@ function fixture() {
   let providers = 0, failAcknowledgement = false, rejectWake = false;
   const ctx = { config: { get: async () => ({ profiles: ['example'] }) }, issues: {
     get: async () => issue,
+    update: async (_id, patch) => Object.assign(issue, patch),
     assertCheckoutOwner: async () => ({ issueId }),
     documents: {
       get: async (_id, key) => documents.get(key) ?? null,
@@ -71,7 +72,7 @@ test('evidence survives a native admission hold and resumes only through that ad
 test('the same unresolved failure is recorded without another provider wake', async () => {
   const f = fixture(); f.result.newEvidence = false;
   await f.service().deliver(f.result.jobId);
-  assert.equal(f.writes.length, 1); assert.equal(f.providers, 0);
+  assert.equal(f.writes.length, 1); assert.equal(f.providers, 0); assert.equal(f.issue.status, 'blocked');
 });
 
 test('unknown execution gets one reconciliation turn, never an execution retry', async () => {

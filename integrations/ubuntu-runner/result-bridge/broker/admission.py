@@ -6,7 +6,7 @@ decision identities separately. No package-provided permission is sufficient.
 import copy
 import datetime
 import re
-from contracts import require, closed_json, canonical, digest
+from contracts import require, closed_json, canonical, digest, AdmissionWait
 
 
 def first_json(body):
@@ -25,9 +25,11 @@ class ReviewAdmissionService:
     def __init__(self, native):
         self.native = native
 
-    def binding(self, job, profile):
+    def assert_profile(self, job, profile):
         require(job["companyId"] == profile["companyId"] and job["projectId"] == profile["projectId"] and
                 job["taskId"] in profile["taskIds"] and job["agentId"] == profile["agentId"], "job_profile_scope_mismatch")
+    def binding(self, job, profile):
+        self.assert_profile(job, profile)
         issue = self.native.read("/api/issues/" + job["taskId"])
         require(issue["companyId"] == job["companyId"] and issue["projectId"] == job["projectId"] and
                 issue["assigneeAgentId"] == job["agentId"] and issue["status"] not in ["done", "cancelled", "backlog"],
@@ -39,10 +41,27 @@ class ReviewAdmissionService:
                 'job_native_pause_hold')
         require(not issue.get('executionBlocker') and not any(x['status'] != 'done' for x in issue.get('blockedBy', [])),
                 'job_native_execution_hold')
+        require(issue["status"] in ["todo", "in_progress", "in_review"], "job_native_execution_hold")
         return issue
 
     def controller(self, job, profile, packet):
         self.binding(job, profile)
+        require(packet.trial['harnessIssueId'] == job['taskId'], 'job_packet_task_binding_invalid')
+        # Root privilege is accepted independently for an exact operator code
+        # template. A lead-authored packet review alone cannot grant it.
+        root_policy = profile['privilegedCodeApproval']
+        root_approval = self.native.read(f'/api/issues/{root_policy["issueId"]}/documents/{root_policy["documentKey"]}')
+        try:
+            root_value = first_json(root_approval['body'])
+        except Exception:
+            raise AdmissionWait('job_root_template_not_accepted') from None
+        accepted = (root_approval['companyId'] == job['companyId'] and
+                root_approval['updatedByAgentId'] == root_policy['reviewerAgentId'] and
+                root_value.get('kind') == 'operator_root_template' and root_value.get('approved') is True and
+                root_value.get('companyId') == job['companyId'] and root_value.get('projectId') == job['projectId'] and
+                root_value.get('codeManifestSha256') == digest(profile['privilegedCodeDigests']))
+        if not accepted:
+            raise AdmissionWait('job_root_template_not_accepted')
         scope = self.native.comment(job["scopeIssueId"], job["scopeCommentId"])
         ack = self.native.comment(job["taskId"], job["ackCommentId"])
         require(scope["companyId"] == ack["companyId"] == job["companyId"] and
@@ -52,6 +71,11 @@ class ReviewAdmissionService:
         target = self.native.read(f'/api/issues/{job["taskId"]}/documents/{profile["targetDocumentKey"]}')
         acp = self.native.read(f'/api/issues/{job["taskId"]}/documents/{profile["actualAcpDocumentKey"]}')
         S, A, C = first_json(scope["body"]), first_json(ack["body"]), first_json(acp["body"])
+        root_acceptance = {'kind': 'issue_document_revision', 'issueId': root_policy['issueId'],
+                           'documentKey': root_policy['documentKey'], 'revisionId': root_approval['latestRevisionId'],
+                           'reviewerAgentId': root_policy['reviewerAgentId'], 'codeManifestSha256': digest(profile['privilegedCodeDigests'])}
+        require(S['rootPrivilegeAcceptance'] == A['rootPrivilegeAcceptance'] == root_acceptance,
+                'job_scope_root_template_not_accepted')
         expected_scope = {**S, "kind": "issue_comment", "issueId": scope["issueId"],
                           "commentId": scope["id"], "authorAgentId": profile["scopeAgentId"]}
         require(A["continuationScope"] == expected_scope and
@@ -77,6 +101,11 @@ class ReviewAdmissionService:
                 A["nativeReview"]["documentRevisionId"], "job_verdict_identity_mismatch")
         verdict = self.native.read(f'/api/issues/{job["taskId"]}/documents/{profile["reviewDocumentKey"]}')
         require(verdict["latestRevisionId"] == C["verdictDocumentRevisionId"], "job_verdict_superseded")
+        V = first_json(verdict['body'])
+        require(verdict['updatedByAgentId'] == C['reviewerAgentId'] and
+                V['wholePacketSha256'] == job['packetSha256'] and V['outcome'] == 'approved' and
+                V['reviewerRunId'] == C['reviewerRunId'] and
+                V['targetDocumentRevisionId'] == target['latestRevisionId'], 'job_reviewer_packet_binding_missing')
         interactions = self.native.read(f'/api/issues/{job["taskId"]}/interactions')
         matches = [x for x in interactions if x["id"] == S["nativeReviewInteractionId"] == C["interactionId"]]
         require(len(matches) == 1, "job_native_review_missing")
@@ -93,10 +122,15 @@ class ReviewAdmissionService:
                 A["sourceLineageHistoricalEvidence"] == {k: source["sourceLineage"][k] for k in
                     ["historicalPacketSha256", "documentationErrataSha256"]}, "job_source_lineage_mismatch")
         authors = packet.json("author-provider-ledger.json")["rows"]
-        ids = {x["runId"] for x in authors} | {C["reviewerRunId"], scope["createdByRunId"], ack["createdByRunId"], job["sourceRunId"]}
+        ids = {x["runId"] for x in authors} | {root_value['reviewerRunId'], C["reviewerRunId"], scope["createdByRunId"], ack["createdByRunId"], job["sourceRunId"]}
         records = self.native.metadata(job["companyId"], sorted(ids), list(profile["sourceDecisionFingerprints"]))
         runs = {x["id"]: x for x in records if x["kind"] == "run"}
         require(set(runs) == ids, "job_run_attestation_missing")
+        security_run = runs[root_value['reviewerRunId']]
+        require(security_run['status'] == 'succeeded' and security_run['task'] == root_policy['issueId'] and
+                security_run['agent'] == root_policy['reviewerAgentId'] and
+                security_run['agent'] not in [job['agentId'], profile['scopeAgentId']] and
+                instant(security_run['finished']) < instant(scope['createdAt']), 'job_root_security_identity_invalid')
         actual = runs[C["reviewerRunId"]]
         require(actual["status"] == "succeeded" and actual["agent"] == C["reviewerAgentId"] and
                 actual["provider"] == C["provider"] == "anthropic" and actual["actualACP"] is True and

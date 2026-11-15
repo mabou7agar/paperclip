@@ -707,6 +707,10 @@ export function createHostClientHandlers(
   ): HostHandler<M> {
     return async (params: WorkerToHostMethods[M][0], context?: WorkerHostCallContext) => {
       requireCapability(method);
+      if ((method === "issues.requestWakeup" || method === "issues.requestWakeups") &&
+          (params as { durable?: boolean }).durable === true && !capabilitySet.has("issues.wakeup.durable")) {
+        throw new CapabilityDeniedError(pluginId, method, "issues.wakeup.durable");
+      }
       requireInvocationCompanyScope(method, params, context);
       return handler(params, context);
     };

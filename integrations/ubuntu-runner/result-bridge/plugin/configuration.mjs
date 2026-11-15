@@ -1,5 +1,6 @@
 /** Operator-mounted socket; company settings cannot select a network destination. */
 export const BROKER_SOCKET = '/paperclip/ubuntu-runner/broker.sock';
+export const BROKER_AUTH_FILE = '/paperclip/ubuntu-runner/plugin-auth';
 export const MAX_BYTES = 128 * 1024;
 
 export function profiles(config) {

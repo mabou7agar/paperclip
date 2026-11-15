@@ -20,6 +20,7 @@ from repository import JobRepository
 from native_repository import NativeRepository
 from remote_repository import RemoteRepository
 from job_service import JobService
+from authentication import authenticate
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -31,7 +32,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             require(self.path == '/api/v1/broker' and self.headers.get('Content-Type') == 'application/json', 'broker_route_invalid')
             length = int(self.headers.get('Content-Length', '0'))
             require(0 < length <= 128 * 1024, 'broker_request_too_large')
-            request = closed_json(self.rfile.read(length))
+            self.connection.settimeout(20)
+            raw = self.rfile.read(length)
+            self.server.authenticate(self.connection, self.headers, raw)
+            request = closed_json(raw)
             require(isinstance(request, dict) and set(request) == {'operation', 'input'} and isinstance(request['input'], dict), 'broker_envelope_invalid')
             operation, value = request['operation'], request['input']
             service = self.server.service
@@ -58,7 +62,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body = canonical(result)
             require(len(body) <= 128 * 1024, 'broker_result_too_large')
             self.send_response(200)
-        except (Refusal, ValueError, KeyError, TypeError):
+        except Refusal as error:
+            body = canonical({'error': error.code})
+            self.send_response(409)
+        except (ValueError, KeyError, TypeError):
             body = canonical({'error': 'broker_request_refused'})
             self.send_response(409)
         except Exception:
@@ -92,15 +99,16 @@ def serve(config):
         path.unlink()
     with Server(str(path), Handler) as server:
         server.service = service
+        server.authenticate = lambda connection, headers, raw: authenticate(connection, headers, raw, config)
         os.chown(path, 0, config['socketGid'])
-        path.chmod(0o660)
-        service.recover()
+        path.chmod(0o600)
         def recover():
-            while not stop.wait(15):
+            while not stop.is_set():
                 try:
                     service.recover()
                 except Exception:
                     pass  # Persisted jobs remain pending; this never starts a model.
+                stop.wait(15)
         stop = threading.Event()
         thread = threading.Thread(target=recover, daemon=True)
         thread.start()

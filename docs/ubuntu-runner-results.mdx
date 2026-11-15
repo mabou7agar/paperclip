@@ -18,11 +18,12 @@ it. A new packet, timestamp, job ID or arbitrary commit is not failure progress.
 
 A completion hint contains only `jobId`. The plugin obtains the measured result
 from the operator Unix socket, saves an immutable task document, then requests a
-keyed native wake. Paperclip's normal pause, dependency, budget, execution and
+durable, keyed native wake. Paperclip's normal pause, dependency, budget, execution and
 review guards still apply. An optional `expectedAssigneeAgentId` also prevents a result from waking a new
 owner after a reassignment race. The existing task/provider session and plan remain
-owned by native admission; the plugin never writes assignment, status, review
-counters or session rows. The normal lead/review/CTO handoff remains unchanged.
+owned by native admission; the plugin never writes assignment, review counters or session rows.
+An unchanged failure uses the native SDK update service to enter a visible
+blocked wait once; it does not wake the worker again. The normal lead/review/CTO handoff remains unchanged.
 
 Duplicate hints and lost acknowledgements reuse the document and the original
 native wake receipt/run. A new closed diagnostic or actual gate result may cause
@@ -54,8 +55,13 @@ On the Paperclip host, provision a root-private native operator token file,
 root-private SSH key and known-hosts file, root-only state directory, and
 `/opt/paperclip-runner-ipc` owned by root with no group/world write. Mount that
 IPC directory read-only into the Paperclip container at
-`/paperclip/ubuntu-runner`; give the socket group access to the actual Paperclip
-service group. Mount the built `plugin` directory read-only into that container
+`/paperclip/ubuntu-runner`; keep the IPC socket and a random 64-character hexadecimal `plugin-auth`
+credential file root-owned mode `0600`. The current adapter requires a root
+Paperclip plugin worker and non-root native agents. It checks Linux `SO_PEERCRED`
+and a per-request HMAC bound to the plugin identity and exact body. Shared Unix
+group membership grants no access. Do not add agents to that security principal
+or grant them the credential. Non-root plugin services need a separate isolated
+service-identity adapter; do not weaken these checks. Mount the built `plugin` directory read-only into that container
 and install it through the normal native `/api/plugins/install` management API.
 No agent receives the token, SSH private key or host Docker socket.
 
@@ -66,7 +72,8 @@ The broker config is root-owned mode `0600` at
 {
   "stateRoot": "/var/lib/paperclip-ubuntu-runner-results",
   "socketPath": "/opt/paperclip-runner-ipc/broker.sock",
-  "socketGid": 1000,
+  "socketGid": 0,
+  "pluginAuthFile": "/opt/paperclip-runner-ipc/plugin-auth",
   "apiBaseUrl": "http://127.0.0.1:3100",
   "tokenFile": "/etc/paperclip-runner-results/native-token",
   "databaseContainer": "paperclip-database-1",
@@ -87,13 +94,17 @@ continuation/execution patterns. Every non-variable trial field must match
 Also configure the fixed remote installation/state paths, dedicated
 `sshIdentityFile`/`sshKnownHostsFile` and target, non-root UID/GID, concurrency
 `1`, allowed modes, prepared image digest, `allowControlChecks` and exact
-`controlInputs`. Changing policy cannot silently reinterpret an admitted job.
+`controlInputs`, `allowReviewedController`, `privilegedCodeDigests` and
+`privilegedCodeApproval`. Changing policy cannot silently reinterpret an admitted job.
 
 Enable profile names per company through the native plugin configuration,
 for example `{"profiles":["synthetic-preview"]}`. Company config cannot choose
 hosts, paths, credentials, commands or higher concurrency. Restart the broker
 through its systemd service after validated operator configuration. A paused or
-disabled plugin retains pending deliveries for later recovery.
+disabled plugin retains pending deliveries for later recovery. Pre-dispatch
+source, pause and dependency waits remain queued; one passive observation
+returns immediately so another job is not stranded behind a six-minute wait.
+Execution ownership is scoped to the actual registered host/runner slot.
 
 The API URL and completion URL must use the same loopback origin. Current native
 management/webhook routes retain their host API paths for compatibility. The
@@ -130,7 +141,76 @@ attempts, receipts, SQLite state or native sessions. Already admitted remote
 work keeps its existing execution/cleanup identity. Inspect/reconcile it before
 removing service code. Do not reset an unknown attempt as a rollback shortcut.
 
-The native core addition is optional keyed plugin receipt admission using the
-existing wake-request primary key. Unkeyed SDK calls are unchanged. Exact,
+The manifest requires the `issues.wakeup.durable` host capability. A stock host without it must reject installation rather than silently ignore durable admission. Legacy keyed wakes keep their existing behavior.
+
+The native core addition is opt-in (`durable: true`) keyed plugin receipt admission using the
+existing wake-request primary key. Existing keyed and unkeyed SDK calls are unchanged unless they opt in. Exact,
 unambiguous older random-ID receipts are reused; ambiguous or changed identities
 fail with named conflicts. No database schema migration is required.
+
+## Privileged template acceptance
+
+The packet cannot supply arbitrary root Python. For `reviewed_controller`, the
+broker and execution host both require the exact operator-registered Python
+inventory/digests in `privilegedCodeDigests`. Only the validated attempt prefix
+is normalized to `{key}`; other bytes must match. Native extension modules,
+bytecode, import-hook files and package directories are forbidden. This adapter
+keeps root host orchestration separate from the fixed non-root application/test
+commands inside the registered templates.
+
+A lead's packet review is insufficient to accept that root boundary. The
+configured `privilegedCodeApproval` identifies an independent Security task
+(`issueId`, `documentKey`, `reviewerAgentId`). Its current reviewer-authored
+native document must contain:
+
+```json
+{
+  "kind": "operator_root_template",
+  "approved": true,
+  "companyId": "REGISTERED_COMPANY_UUID",
+  "projectId": "REGISTERED_PROJECT_UUID",
+  "codeManifestSha256": "SHA256_OF_CANONICAL_PRIVILEGED_CODE_DIGESTS",
+  "reviewerRunId": "ACTUAL_SUCCESSFUL_SECURITY_RUN_UUID"
+}
+```
+
+The broker verifies actual native run ownership, task, successful completion and
+chronology. The CTO's scope and worker acknowledgement must both carry the same
+`rootPrivilegeAcceptance` reference: `kind: issue_document_revision`, issue ID,
+document key, exact revision ID, independent reviewer agent ID and code-manifest
+SHA. This is an explicit privilege acceptance, not a fabricated execution
+approval or an inference from a source review. Until it exists, no controller
+runs. Existing access/installation/deployment holds still apply.
+
+The independent packet review also needs reviewer-authored JSON in the verdict:
+`wholePacketSha256`, `outcome: approved`, `reviewerRunId` and
+`targetDocumentRevisionId`. Native actor/run metadata and the current accepted
+interaction must match. Lead-authored copies alone cannot bind a packet to a
+review. The ACP command-name check is an attestation heuristic; it is combined
+with trusted native actor/provider/run records and the reviewer-authored verdict,
+not treated as a cryptographic provider signature.
+
+## Reconciling exceptional ownership
+
+A source/API/SSH failure before confirmed staging leaves a queued job, not a
+spent proof. Staging is published atomically. A staged recovery revalidates the
+whole current review/scope before its first launch. A missing attempt marker
+and no pending/running unit is a positive pre-dispatch observation; releasing
+that admission wait does not reset a test attempt. Missing confirmed remote
+state after an ambiguous launch remains a named identity-loss hold.
+
+The execution host can reconcile a terminated pure-control unit by its exact
+container labels. It gets one cleanup attempt and never starts its tests again.
+A lost cleanup response can be resolved by a healthy, exact absence check. A
+foreign container identity is not removed. Controller cleanup must have matching
+retained driver/audit evidence. Generic retries cannot manufacture that evidence.
+The unit uses mixed termination: signal the root owner first, allow its bounded
+finally/cleanup grace, then fence remaining owned processes.
+
+If positive cleanup evidence cannot be obtained, keep the quarantine and alert
+its responsible lead once. An operator may inspect the original retained unit,
+job plan, attempt, driver and cleanup ledger with normal private administrative
+access, correct an actual cleanup defect under review, and reconcile only the
+original owned resources. Then the normal passive reader publishes the new
+receipt. Never remove attempt markers, clear session state, relaunch a test or
+modify a native review/approval to resolve an ownership gap.

@@ -12,7 +12,12 @@ return definePlugin({
       try { const data = tool.name === 'submit-runner-job'
         ? await service.submit(args, run) : await service.status(args.jobId, run);
         return { content: JSON.stringify(data), data }; }
-      catch { return { error: 'Runner request was refused or unavailable. Read the saved result; do not retry execution blindly.' }; }
+      catch (error) {
+        const match = /^runner_broker:([a-z][a-z0-9_]{1,99})$/.exec(error?.message ?? '');
+        const code = match?.[1] ?? 'runner_request_unavailable';
+        return { error: `Runner request not admitted (${code}). Preserve this task and context. Do not retry execution blindly; route a genuine configuration failure to its lead once.`,
+          data: { state: 'not_admitted', code } };
+      }
     });
     ctx.jobs.register('deliver-pending-results', () => service.drain());
   },

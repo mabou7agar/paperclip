@@ -2429,7 +2429,7 @@ export function buildHostServices(
         }
         const contextSource = params.contextSource ?? "plugin.issue.requestWakeup";
         const reason = params.reason ?? "plugin_issue_wakeup_requested";
-        const delivery = params.idempotencyKey ? await preparePluginWakeupReceipt(db, {
+        const delivery = params.durable === true && params.idempotencyKey ? await preparePluginWakeupReceipt(db, {
           companyId, pluginId, issueId: issue.id, agentId: issue.assigneeAgentId,
           idempotencyKey: params.idempotencyKey, contextSource, reason,
         }) : null;
@@ -2505,7 +2505,7 @@ export function buildHostServices(
           }
           const contextSource = params.contextSource ?? "plugin.issue.requestWakeups";
           const reason = params.reason ?? "plugin_issue_wakeup_requested";
-          const delivery = params.idempotencyKeyPrefix ? await preparePluginWakeupReceipt(db, {
+          const delivery = params.durable === true && params.idempotencyKeyPrefix ? await preparePluginWakeupReceipt(db, {
             companyId, pluginId, issueId: issue.id, agentId: issue.assigneeAgentId,
             idempotencyKey: `${params.idempotencyKeyPrefix}:${issue.id}`, contextSource, reason,
           }) : null;

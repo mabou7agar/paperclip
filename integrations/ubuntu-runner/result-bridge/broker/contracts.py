@@ -15,6 +15,10 @@ class Refusal(Exception):
         super().__init__(code)
 
 
+class AdmissionWait(Refusal):
+    """A persisted pre-execution wait, never a consumed test attempt."""
+
+
 def require(value, code):
     if not value:
         raise Refusal(code)
@@ -65,7 +69,7 @@ def stable_input(value):
 
 
 def job_id(value):
-    identity = {k: value[k] for k in ["companyId", "profile", "kind", "packetSha256", "scopeCommentId", "recipe"]}
+    identity = {k: value[k] for k in ["companyId", "taskId", "profile", "kind", "packetSha256", "scopeCommentId", "recipe"]}
     return str(uuid.uuid5(uuid.NAMESPACE_URL, "paperclip.runner-job.v1:" + digest(identity)))
 
 

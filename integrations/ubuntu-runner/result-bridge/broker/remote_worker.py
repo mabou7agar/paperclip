@@ -30,6 +30,7 @@ from contracts import UUID, canonical, closed_json, closed_diagnostic, digest, r
 from packet import Packet
 from bounded_process import capture
 from evidence import inventory, descriptors, private_bytes, LIMIT
+from control_runner import control_checks, reconcile_control
 
 STATE = pathlib.Path('/var/lib/paperclip-ubuntu-runner-results')
 INSTALL = pathlib.Path('/opt/paperclip-ubuntu-runner-results')
@@ -75,17 +76,30 @@ def stage(plan):
             require(digest(saved) == digest({k: v for k, v in plan.items() if k != 'packet'}), 'remote_job_plan_conflict')
             return {'staged': True, 'replayed': True}
         packet_bytes = base64.b64decode(plan['packet'], validate=True)
-        packet = Packet(packet_bytes, plan['request']['packetSha256'], plan['profile'])
-        root.mkdir(mode=0o700)
-        packet_root = root / 'packet'
-        packet_root.mkdir(mode=0o700)
-        for name, raw in packet.files.items():
-            target = packet_root / name
-            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            write_once(target, raw, raw=True)
-        # Preserve the exact compressed input, not a re-packed substitute.
-        write_once(root / 'packet.tar.gz', packet_bytes, raw=True)
-        write_once(root / 'plan.json', {k: v for k, v in plan.items() if k != 'packet'})
+        packet = Packet(packet_bytes, plan['request']['packetSha256'], plan['profile'], privileged=plan['request']['kind'] == 'reviewed_controller')
+        import shutil
+        temporary = root.parent / ('.staging-' + plan['jobId'])
+        if temporary.exists():
+            trusted_root(temporary)
+            shutil.rmtree(temporary)  # Data-only interrupted staging; never an attempt.
+        try:
+            temporary.mkdir(mode=0o700)
+            packet_root = temporary / 'packet'
+            packet_root.mkdir(mode=0o700)
+            for name, raw in packet.files.items():
+                target = packet_root / name
+                target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                write_once(target, raw, raw=True)
+            # Preserve the exact compressed input, not a re-packed substitute.
+            write_once(temporary / 'packet.tar.gz', packet_bytes, raw=True)
+            write_once(temporary / 'plan.json', {k: v for k, v in plan.items() if k != 'packet'})
+            temporary.rename(root)
+            descriptor = os.open(root.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try: os.fsync(descriptor)
+            finally: os.close(descriptor)
+        finally:
+            if temporary.exists():
+                shutil.rmtree(temporary)
         return {'staged': True, 'replayed': False}
 
 
@@ -112,15 +126,28 @@ def inspect(identity):
         if unit.returncode == 0 and unit.stdout.strip() in [b'exited', b'dead', b'failed']:
             plan = read_json(root / 'plan.json', 2 * 1024 * 1024)
             if plan['request']['kind'] == 'reviewed_controller':
-                packet = Packet((root / 'packet.tar.gz').read_bytes(), plan['request']['packetSha256'], plan['profile'])
+                packet = Packet((root / 'packet.tar.gz').read_bytes(), plan['request']['packetSha256'], plan['profile'], privileged=True)
                 current = controller_result(plan, packet, None)
-                if current.get('cleanupComplete') and current.get('auditComplete'):
-                    try: write_once(root / 'reconciled.json', current)
-                    except FileExistsError: pass
-                    return {'phase': 'terminal', 'result': read_json(root / 'reconciled.json')}
+            else:
+                current = reconcile_control(root, plan, write_once)
+            if current.get('cleanupComplete') and (plan['request']['kind'] != 'reviewed_controller' or current.get('auditComplete')):
+                try: write_once(root / 'reconciled.json', current)
+                except FileExistsError: pass
+                return {'phase': 'terminal', 'result': read_json(root / 'reconciled.json')}
     if saved:
         return {'phase': 'terminal', 'result': saved}
-    return {'phase': 'attempted' if (root / 'attempt.json').exists() else 'staged'}
+    if not (root / 'attempt.json').exists():
+        unit = subprocess.run(['systemctl', 'show', '--property=LoadState', '--property=SubState',
+                               'paperclip-runner-job-' + identity], capture_output=True, timeout=10)
+        require(unit.returncode == 0 and len(unit.stdout) <= 1024, 'remote_unit_identity_unavailable')
+        fields = dict(line.split('=', 1) for line in unit.stdout.decode().splitlines() if '=' in line)
+        if fields.get('LoadState') == 'not-found':
+            return {'phase': 'staged'}
+        if fields.get('SubState') in ['exited', 'dead', 'failed']:
+            return {'phase': 'terminal', 'result': {'status': 'failed', 'kind': read_json(root / 'plan.json', 2 * 1024 * 1024)['request']['kind'],
+                'code': 'remote_unit_did_not_start', 'executionStarted': False, 'cleanupComplete': True}}
+        return {'phase': 'submitted'}
+    return {'phase': 'attempted'}
 
 
 def launch(identity):
@@ -137,7 +164,7 @@ def launch(identity):
         # or repeated launch RPC from executing the controller a second time.
         result = subprocess.run(['systemd-run', '--quiet', '--unit=paperclip-runner-job-' + identity,
                                  '--property=Type=oneshot', '--property=RemainAfterExit=yes',
-                                 '--property=UMask=0077', '--property=RuntimeMaxSec=2400', '--property=TimeoutStopSec=660',
+                                 '--property=UMask=0077', '--property=RuntimeMaxSec=2140', '--property=KillMode=mixed', '--property=TimeoutStopSec=660',
                                  sys.executable, '-I', '-B', str(INSTALL / 'remote_worker.py'), '--run', identity],
                                 capture_output=True, timeout=20)
         if result.returncode:
@@ -146,62 +173,6 @@ def launch(identity):
             require(unit.returncode == 0 and unit.stdout.strip() == b'loaded', 'remote_launch_unconfirmed')
         return {'phase': 'submitted'}
 
-
-def control_checks(root, plan, packet):
-    profile, request = plan['profile'], plan['request']
-    name = 'paperclip-controls-' + plan['jobId']
-    image = profile['preparedImage']
-    require(image.startswith('sha256:') and len(image) == 71, 'control_image_not_pinned')
-    require(request['recipe'] in packet.files and request['recipe'].endswith('-new.py'), 'control_recipe_missing')
-    # No workspaces, secrets, Docker socket, production/database volumes or
-    # network are mounted. Reuse the prepared image; never build an image.
-    script = r'''import sys,pathlib,tempfile,tarfile,io,json,base64,hashlib,os,shutil
-payload=json.load(sys.stdin);assert os.getuid()==payload['uid'];os.umask(0o077)
-collector={};exec(base64.b64decode(payload['collector']),collector)
-scratch=pathlib.Path(tempfile.mkdtemp(prefix='paperclip-controls-'));out={'uid':os.getuid(),'network':'none','workspaceMounts':0}
-try:
- with tarfile.open(fileobj=io.BytesIO(base64.b64decode(payload['packet'],validate=True)))as archive:
-  for m in archive.getmembers():
-   p=pathlib.PurePosixPath(m.name);assert not p.is_absolute()and'..'not in p.parts and(m.isdir()or m.isfile())
-   target=scratch/m.name
-   if m.isdir():target.mkdir(parents=True,exist_ok=True)
-   else:target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes(archive.extractfile(m).read());target.chmod(0o600)
- env={'PATH':'/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin','HOME':str(scratch),'TMPDIR':str(scratch),'PYTHONDONTWRITEBYTECODE':'1'}
- r=collector['capture']([sys.executable,'-I','-B',str(scratch/payload['recipe']),str(scratch),str(payload['uid'])],cwd=scratch,env=env,timeout=120)
- out.update(exit=r['exit'],timedOut=r['timedOut'],stdoutBytes=r['stdout']['bytes'],stdoutSha256=r['stdout']['sha256'],stderrBytes=r['stderr']['bytes'],stderrSha256=r['stderr']['sha256'],overflow=r['stdout']['overflow']or r['stderr']['overflow'])
- if r['exit']==0 and not out['overflow']and not out['timedOut']:out['checks']=json.loads(r['stdout']['retained'])
-finally:
- shutil.rmtree(scratch);out['scratchRemoved']=not scratch.exists()
-print(json.dumps(out))
-'''
-    args = ['docker', 'run', '--name', name, '--network=none', '--read-only', '--cap-drop=ALL',
-            '--security-opt=no-new-privileges', '--pids-limit=128', '--cpus=1', '--memory=512m',
-            '--tmpfs=/tmp:rw,nosuid,nodev,mode=1777,size=268435456', '--user=' + str(profile['uid']) + ':' + str(profile['gid']),
-            '--tmpfs=/workspace:rw,nosuid,nodev,mode=0700,size=1048576',
-            '--tmpfs=/home:rw,nosuid,nodev,mode=0700,size=1048576',
-            '--tmpfs=/root:rw,nosuid,nodev,mode=0700,size=1048576',
-            '--tmpfs=/run:rw,nosuid,nodev,mode=0700,size=1048576', '--workdir=/tmp',
-            '-i', '--entrypoint=/usr/bin/env', image, '-i',
-            'PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
-            'HOME=/tmp', 'TMPDIR=/tmp', 'python3', '-I', '-B', '-c', script]
-    try:
-        result = capture(args, input_bytes=canonical({'uid': profile['uid'], 'recipe': request['recipe'],
-                         'collector': base64.b64encode((INSTALL / 'bounded_process.py').read_bytes()).decode(),
-                         'packet': base64.b64encode((root / 'packet.tar.gz').read_bytes()).decode()}), timeout=150)
-        require(result['exit'] == 0 and not result['timedOut'] and
-                not result['stdout']['overflow'] and not result['stderr']['overflow'], 'control_process_failed')
-        raw = result['stdout']['retained']
-        facts = closed_diagnostic(closed_json(raw))
-        require(facts['uid'] == profile['uid'] and facts['network'] == 'none' and facts['scratchRemoved'] is True and facts['overflow'] is False and facts['timedOut'] is False,
-                'control_boundary_failed')
-        return {'status': 'passed' if facts['exit'] == 0 else 'failed', 'kind': 'control_checks',
-                'recipeSha256': packet.file_sha(request['recipe']), 'facts': facts,
-                'preparedImageSha256': image.removeprefix('sha256:'), 'containerRemoved': True}
-    except Refusal as error:
-        return {'status': 'failed', 'kind': 'control_checks', 'code': error.code, 'cleanupComplete': True}
-    finally:
-        stopped = subprocess.run(['docker', 'rm', '-f', name], capture_output=True, timeout=20)
-        require(stopped.returncode == 0, 'control_cleanup_not_confirmed')
 
 
 def reviewed_controller(root, plan, packet):
@@ -220,6 +191,7 @@ def reviewed_controller(root, plan, packet):
     write_once(pathlib.Path(trial['externalAuthorityPath']), plan['admission']['authority'])
     write_once(pathlib.Path(trial['preexecutionAdmissionPath']), plan['admission']['admission'])
     write_once(pathlib.Path(trial['caseArchivePath']), packet.files[packet.case_name], raw=True)
+    write_once(root / 'controller-started.json', {'jobId': plan['jobId'], 'kind': 'reviewed_controller'})
     result = capture([sys.executable, '-I', '-B', str(control)], timeout=2100, limit=1024 * 1024, grace=620)
     return controller_result(plan, packet, result['exit'])
 
@@ -229,9 +201,8 @@ def controller_result(plan, packet, exit_code):
     driver_path = pathlib.Path(trial['driverReceiptPath'])
     if not driver_path.exists():
         return {'status': 'unknown', 'kind': 'reviewed_controller', 'code': 'controller_receipt_missing', 'exit': exit_code}
+    driver = read_json(driver_path)
     raw = driver_path.read_bytes()
-    require(len(raw) <= 128 * 1024, 'controller_receipt_too_large')
-    driver = closed_json(raw)
     require(driver['wholePacketSha256'] == plan['request']['packetSha256'] and
             driver['continuationId'] == trial['continuationId'] and driver['attempt'] == driver['maxAttempts'] == 1,
             'controller_receipt_binding_failed')
@@ -264,7 +235,7 @@ def artifact(identity, sha):
     trusted_root(root)
     plan = read_json(root / 'plan.json', 2 * 1024 * 1024)
     require(plan['request']['kind'] == 'reviewed_controller', 'artifact_kind_invalid')
-    packet = Packet((root / 'packet.tar.gz').read_bytes(), plan['request']['packetSha256'], plan['profile'])
+    packet = Packet((root / 'packet.tar.gz').read_bytes(), plan['request']['packetSha256'], plan['profile'], privileged=plan['request']['kind'] == 'reviewed_controller')
     driver = read_json(pathlib.Path(packet.trial['driverReceiptPath']))
     require(driver['wholePacketSha256'] == plan['request']['packetSha256'] and
             driver['continuationId'] == packet.trial['continuationId'], 'artifact_job_binding_changed')
@@ -283,7 +254,7 @@ def run(identity):
     except FileExistsError:
         return inspect(identity)
     plan = read_json(root / 'plan.json', 2 * 1024 * 1024)
-    packet = Packet((root / 'packet.tar.gz').read_bytes(), plan['request']['packetSha256'], plan['profile'])
+    packet = Packet((root / 'packet.tar.gz').read_bytes(), plan['request']['packetSha256'], plan['profile'], privileged=plan['request']['kind'] == 'reviewed_controller')
     def cancelled(*_):
         raise InterruptedError('job_cancelled')
     previous = signal.signal(signal.SIGTERM, cancelled)
@@ -293,7 +264,9 @@ def run(identity):
         outcome = controller_result(plan, packet, 130) if plan['request']['kind'] == 'reviewed_controller' else {
             'status': 'cancelled', 'kind': 'control_checks', 'cleanupComplete': True}
     except Refusal as error:
-        outcome = {'status': 'unknown', 'code': error.code, 'kind': plan['request']['kind']}
+        unstarted = plan['request']['kind'] == 'reviewed_controller' and not (root / 'controller-started.json').exists()
+        outcome = {'status': 'failed' if unstarted else 'unknown', 'code': error.code, 'kind': plan['request']['kind'],
+                   'executionStarted': not unstarted, 'cleanupComplete': unstarted, 'auditComplete': unstarted}
     except Exception:
         # A launch or cleanup uncertainty must never become a clean failure
         # eligible for an automatic repeat of the same execution.
@@ -311,8 +284,7 @@ def cancel(identity):
         return inspect(identity)
     # Terminate only the unit owned by this job. The controller owns its
     # cleanup; a forced or unconfirmed termination remains unknown.
-    result = subprocess.run(['systemctl', 'kill', '--kill-whom=main', '--signal=SIGTERM',
-                             'paperclip-runner-job-' + identity], capture_output=True, timeout=15)
+    result = subprocess.run(['systemctl', 'stop', '--no-block', 'paperclip-runner-job-' + identity], capture_output=True, timeout=15)
     return {'cancellationRequested': result.returncode == 0}
 
 

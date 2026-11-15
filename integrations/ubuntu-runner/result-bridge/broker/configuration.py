@@ -20,16 +20,17 @@ def private_file(path):
 
 def load(path):
     config = closed_json(private_file(path).read_bytes())
-    require(set(config) == {"stateRoot", "socketPath", "socketGid", "apiBaseUrl", "tokenFile", "databaseContainer",
+    require(set(config) == {"stateRoot", "socketPath", "socketGid", "pluginAuthFile", "apiBaseUrl", "tokenFile", "databaseContainer",
                             "databaseUser", "databaseName", "callbackUrl", "profiles"}, "broker_configuration_invalid")
     url = urlsplit(config["apiBaseUrl"])
     require(url.scheme in ["http", "https"] and url.hostname in ["127.0.0.1", "localhost"] and
             not url.username and not url.password and not url.query and not url.fragment and url.path in ["", "/"], "broker_api_not_loopback")
     for key in ["databaseContainer", "databaseUser", "databaseName"]:
         require(re.fullmatch(r"[a-zA-Z0-9_.-]+", config[key]), "broker_database_binding_invalid")
-    require(type(config["socketGid"]) is int and config["socketGid"] >= 0, "broker_socket_group_invalid")
+    require(type(config["socketGid"]) is int and config["socketGid"] == 0, "broker_socket_group_invalid")
     require(isinstance(config["profiles"], dict) and 1 <= len(config["profiles"]) <= 32, "broker_profiles_invalid")
     private_file(config["tokenFile"])
+    private_file(config["pluginAuthFile"])
     if config["callbackUrl"]:
         target = urlsplit(config["callbackUrl"])
         require((target.scheme, target.netloc) == (url.scheme, url.netloc) and
@@ -47,7 +48,7 @@ def validate_profile(key, profile):
                 'scopeAgentId', 'scopeIssueIds', 'reviewerAgentIds', 'savedSessions', 'candidate',
                 'targetDocumentKey', 'reviewDocumentKey', 'actualAcpDocumentKey', 'allowedModes',
                 'sourceDecisionFingerprints', 'authorityRoot', 'trialRoot', 'continuationPattern',
-                'executionIdPattern', 'authoritySchemaTemplate', 'allowControlChecks', 'controlInputs', 'preparedImage'}
+                'executionIdPattern', 'authoritySchemaTemplate', 'allowReviewedController', 'privilegedCodeDigests', 'privilegedCodeApproval', 'allowControlChecks', 'controlInputs', 'preparedImage'}
     require(isinstance(profile, dict) and set(profile) == required, 'broker_profile_fields_invalid')
     require(KEY.fullmatch(key), 'broker_profile_key_invalid')
     require(type(profile['concurrency']) is int and profile['concurrency'] == 1, 'broker_profile_concurrency_invalid')
@@ -92,3 +93,13 @@ def validate_profile(key, profile):
             profile['fixedTrialFields'].get('runner') == profile['runner'] and
             profile['fixedTrialFields'].get('companyId') == profile['companyId'] and
             profile['fixedTrialFields'].get('harnessIssueId') in profile['taskIds'], 'broker_trial_identity_invalid')
+
+    require(type(profile['allowReviewedController']) is bool, 'broker_controller_policy_invalid')
+    pins = profile['privilegedCodeDigests']
+    require(isinstance(pins, dict) and 1 <= len(pins) <= 128 and
+            all(re.fullmatch(r'[a-z][a-z0-9_.{}-]+\.py', name) and SHA.fullmatch(sha) for name, sha in pins.items()),
+            'broker_privileged_code_manifest_invalid')
+    approval = profile['privilegedCodeApproval']
+    require(isinstance(approval, dict) and set(approval) == {'issueId', 'documentKey', 'reviewerAgentId'} and
+            UUID.fullmatch(approval['issueId']) and UUID.fullmatch(approval['reviewerAgentId']) and KEY.fullmatch(approval['documentKey']),
+            'broker_privileged_code_approval_invalid')

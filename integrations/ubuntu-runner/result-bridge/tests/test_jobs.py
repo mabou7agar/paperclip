@@ -16,11 +16,12 @@ class JobTests(unittest.TestCase):
         pathlib.Path(self.temp.name).chmod(0o700)
         self.repo = JobRepository(self.temp.name)
         self.request = request()
-        self.profile = {'policyDigest': 'policy', 'savedSessions': {self.request['agentId']: 'saved'}, 'allowControlChecks': True,
+        self.profile = {'policyDigest': 'policy', 'sshTarget': 'root@example', 'runner': 'runner', 'allowReviewedController': True, 'savedSessions': {self.request['agentId']: 'saved'}, 'allowControlChecks': True,
                         'controlInputs': ['helper.php'], 'preparedImage': 'sha256:' + 'a' * 64, 'uid': 1001, 'gid': 999}
         self.native, self.remote = Mock(), Mock()
         self.service = JobService({'profiles': {'example': self.profile}}, self.repo, self.native, self.remote)
         self.service.admission = Mock()
+        self.service.admission.controller.return_value = {"nativeBindingsSha256": "f" * 64}
         self.service.source_settled = Mock()
         self.service.load_packet = Mock(return_value=Mock(directory='qualification-new', files={'checks-new.py': b''}, file_sha=lambda _: 'd' * 64))
         self.native.metadata.return_value = [{'agent': self.request['agentId'], 'task': self.request['taskId'],
@@ -31,7 +32,7 @@ class JobTests(unittest.TestCase):
         self.temp.cleanup()
 
     def register(self, value=None):
-        return self.repo.register(value or self.request, 'policy')[0]
+        return self.repo.register(value or self.request, 'policy', self.service.slot(self.profile))[0]
 
     def terminal(self):
         self.remote.inspect.return_value = {'phase': 'terminal', 'result': {'status': 'failed', 'kind': 'reviewed_controller',
@@ -91,3 +92,49 @@ class JobTests(unittest.TestCase):
         self.assertEqual(self.repo.get(identity)['result']['result']['code'], 'job_source_session_unsettled')
         self.remote.launch.assert_not_called()
         self.assertEqual(self.profile['savedSessions'][self.request['agentId']], 'saved')
+
+    def test_transient_native_read_before_staging_remains_queued_without_provider_wake(self):
+        identity = self.register()
+        self.service.source_settled.side_effect = RuntimeError('native_read_unavailable')
+        self.service.execute(identity)
+        self.assertEqual(self.repo.get(identity)['state'], 'queued')
+        self.assertIsNone(self.repo.get(identity)['result'])
+        self.remote.stage.assert_not_called()
+        self.native.notify.assert_not_called()
+
+    def test_source_wait_and_pause_are_nonblocking_preexecution_waits(self):
+        from contracts import AdmissionWait
+        for error in [AdmissionWait('job_source_run_not_settled'), Refusal('job_native_pause_hold')]:
+            value = {**self.request, 'packetSha256': ('b' if isinstance(error, AdmissionWait) else 'c') * 64}
+            identity = self.register(value)
+            self.service.source_settled.side_effect = error
+            self.service.execute(identity)
+            self.assertEqual(self.repo.get(identity)['state'], 'queued')
+        self.remote.launch.assert_not_called()
+        self.native.notify.assert_not_called()
+
+    def test_staged_recovery_revalidates_whole_review_before_launch(self):
+        identity = self.register()
+        self.repo.claim(identity)
+        self.remote.inspect.return_value = {'phase': 'staged'}
+        self.service.admission.controller.side_effect = Refusal('job_review_target_superseded')
+        self.service.execute(identity)
+        self.remote.launch.assert_not_called()
+        self.assertEqual(self.repo.get(identity)['state'], 'terminal')
+        self.assertFalse(self.repo.get(identity)['result']['result']['executionStarted'])
+
+    def test_two_physical_slots_do_not_inherit_each_others_quarantine(self):
+        identity = self.register()
+        self.repo.claim(identity)
+        second = {**self.request, 'profile': 'other', 'packetSha256': 'c' * 64}
+        other = self.repo.register(second, 'policy', 'other-physical-slot')[0]
+        self.assertEqual(self.repo.ownership_holds(other), [])
+
+    def test_active_remote_observation_returns_without_busy_poll_or_new_launch(self):
+        identity = self.register()
+        self.repo.claim(identity)
+        self.remote.inspect.return_value = {'phase': 'attempted'}
+        self.service.execute(identity)
+        self.remote.inspect.assert_called_once()
+        self.remote.launch.assert_not_called()
+        self.assertEqual(self.repo.get(identity)['state'], 'launching')

@@ -1,7 +1,9 @@
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { agentTaskSessions, agents, authUsers, companyMemberships, companies, createDb, heartbeatRuns, agentWakeupRequests, issues, plugins } from "@paperclipai/db";
+import { agentTaskSessions, agents, authUsers, companyMemberships, companies, createDb, heartbeatRuns, heartbeatRunEvents, agentWakeupRequests, issues, plugins } from "@paperclipai/db";
 import { getRecoveryPostgresSupport, startRecoveryPostgres } from "./helpers/recovery-postgres-fixture.js";
 import { createHeartbeatQueueTestDependencies } from "./helpers/heartbeat-queue.js";
 import { createHeartbeatQueue } from "../services/heartbeat/queue.js";
@@ -115,6 +117,42 @@ databaseSuite("durable plugin result wakeups", () => {
     await expect(preparePluginWakeupReceipt(db, f.input)).rejects.toThrow("ambiguous prior delivery");
   });
 
+  it("executes the operator reader SQL against the actual migrated native schema", async () => {
+    const f = await fixture();
+    const runId = randomUUID();
+    await db.insert(heartbeatRuns).values({ id: runId, companyId: f.companyId, agentId: f.agentId, status: "succeeded",
+      sessionIdBefore: "saved-worker-session", sessionIdAfter: "saved-worker-session", finishedAt: new Date(),
+      contextSnapshot: { issueId: f.issueId, aiConnection: { provider: "anthropic" } } });
+    await db.insert(heartbeatRunEvents).values({ companyId: f.companyId, agentId: f.agentId, runId, seq: 1, eventType: "adapter.invoke",
+      payload: { command: "node /controlled/claude-agent-acp/dist/index.js" } });
+    const broker = fileURLToPath(new URL("../../../integrations/ubuntu-runner/result-bridge/broker", import.meta.url));
+    const script = "import sys,json;v=json.load(sys.stdin);sys.path.insert(0,v['broker']);from native_repository import NativeRepository;n=NativeRepository({});print(json.dumps({'metadata':n.metadata_sql(v['company'],[v['run']],[]),'gates':n.admission_gates_sql(v['company'],v['issue'])}))";
+    const queries = JSON.parse(execFileSync("python3", ["-B", "-c", script], { encoding: "utf8",
+      input: JSON.stringify({ broker, company: f.companyId, issue: f.issueId, run: runId }) }));
+    const observations: Array<{ kind: string; id: string; task: string; actualACP: boolean }> = [];
+    for (const query of queries.metadata.split(";").filter((text: string) => text.trim())) {
+      for (const row of await db.$client.unsafe(query)) observations.push(row.json_build_object);
+    }
+    expect(observations).toContainEqual(expect.objectContaining({ kind: "run", id: runId, task: f.issueId, actualACP: true }));
+    expect((await db.$client.unsafe(queries.gates))[0].json_build_object)
+      .toEqual({ companyActive: true, projectActive: true, pauseHeld: false });
+  });
+
+  it("preserves legacy keyed SDK calls when a plugin reuses its parent-child key", async () => {
+    const f = await fixture();
+    await db.insert(plugins).values({ id: f.pluginId, pluginKey: "test.legacy-keys", packageName: "fixture", version: "1", status: "ready", manifestJson: {} });
+    const otherIssueId = randomUUID();
+    await db.insert(issues).values({ id: otherIssueId, companyId: f.companyId, title: "Second child", assigneeAgentId: f.agentId, status: "todo" });
+    runtime.wakeup.mockReset().mockResolvedValueOnce({ id: randomUUID() }).mockResolvedValueOnce({ id: randomUUID() });
+    const { buildHostServices } = await import("../services/plugin-host-services.js");
+    const host = buildHostServices(db, f.pluginId, "test.legacy-keys", { forPlugin: () => ({ emit: async () => {}, subscribe: () => {} }) } as never);
+    const key = `${f.issueId}:child`;
+    await host.issues.requestWakeup({ issueId: f.issueId, companyId: f.companyId, idempotencyKey: key });
+    await host.issues.requestWakeup({ issueId: otherIssueId, companyId: f.companyId, idempotencyKey: key });
+    expect(runtime.wakeup).toHaveBeenCalledTimes(2);
+    expect(runtime.wakeup.mock.calls.every(call => call[1].durablePluginRequest === undefined)).toBe(true);
+  }, 60_000);
+
   it("refuses an SDK result wake addressed to an assignee who no longer owns the task", async () => {
     const f = await fixture();
     await db.insert(plugins).values({ id: f.pluginId, pluginKey: "test.runner-owner", packageName: "fixture", version: "1", status: "ready", manifestJson: {} });
@@ -132,7 +170,7 @@ databaseSuite("durable plugin result wakeups", () => {
     const { buildHostServices } = await import("../services/plugin-host-services.js");
     const eventBus = { forPlugin: () => ({ emit: async () => {}, subscribe: () => {} }) };
     const host = buildHostServices(db, f.pluginId, "test.runner-results", eventBus as never);
-    const request = { issueId: f.issueId, companyId: f.companyId, reason: f.reason,
+    const request = { durable: true, issueId: f.issueId, companyId: f.companyId, reason: f.reason,
       contextSource: f.contextSource, idempotencyKey: f.idempotencyKey };
     const first = await host.issues.requestWakeup(request);
     const second = await host.issues.requestWakeup(request);

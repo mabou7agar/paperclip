@@ -2030,6 +2030,8 @@ export interface WorkerToHostMethods {
     params: {
       issueId: string;
       companyId: string;
+      /** Opt in to one durable delivery per company/plugin/key. Legacy keyed calls are unchanged. */
+      durable?: boolean;
       reason?: string;
       contextSource?: string;
       idempotencyKey?: string | null;
@@ -2044,6 +2046,8 @@ export interface WorkerToHostMethods {
     params: {
       issueIds: string[];
       companyId: string;
+      /** Opt in to one durable delivery per company/plugin/key. Legacy keyed calls are unchanged. */
+      durable?: boolean;
       reason?: string;
       contextSource?: string;
       idempotencyKeyPrefix?: string | null;
