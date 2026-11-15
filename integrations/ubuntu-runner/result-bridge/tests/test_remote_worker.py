@@ -84,3 +84,25 @@ class RemoteWorkerTests(unittest.TestCase):
         self.assertTrue(result['cleanupComplete'])
         self.assertFalse(result['auditComplete'])
         self.assertNotIn('featurePassed', result)
+
+
+    def test_readiness_is_a_read_only_pre_attempt_wait_when_measurements_are_missing(self):
+        self.plan['request']['kind'] = 'reviewed_controller'
+        self.plan['profile']['setupContainment'] = {'required': True}
+        (self.root / 'plan.json').write_text(json.dumps(self.plan))
+        with patch.object(worker, 'Packet'), patch('supervision_policy.SetupOwnership.from_plan'), \
+             patch('ownership_ledger.measurement', side_effect=FileNotFoundError):
+            self.assertFalse(worker.readiness(self.identity)['ready'])
+        self.assertFalse((self.root / 'attempt.json').exists())
+        self.assertFalse((self.root / 'ownership-lease.json').exists())
+        self.assertEqual(worker.readiness.__name__, 'readiness')
+
+    def test_legacy_profile_still_requires_audit_to_release_reconciliation(self):
+        self.plan['request']['kind'] = 'reviewed_controller'
+        (self.root / 'plan.json').write_text(json.dumps(self.plan))
+        (self.root / 'attempt.json').write_text('{}')
+        outcome = {'status': 'failed', 'cleanupComplete': True, 'auditComplete': False}
+        with patch.object(worker, 'Packet'), patch.object(worker, 'controller_result', return_value=outcome), \
+             patch.object(worker.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout=b'dead')):
+            self.assertEqual(worker.inspect(self.identity)['phase'], 'attempted')
+        self.assertFalse((self.root / 'reconciled.json').exists())

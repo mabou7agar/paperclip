@@ -141,8 +141,9 @@ class SetupSupervisorService:
                    'executionRepeated': False, 'code': 'setup_cleanup_unconfirmed'}
         try:
             self.stop_host_work()
-            require(not self.resources.processes(cancel=True), 'setup_container_work_still_active')
+            remaining = self.resources.processes(cancel=True)
             self.resources.cancel_sessions()
+            require(not remaining, 'setup_container_work_still_active')
             owner = pathlib.Path(self.spec.owner_root)
             template_audited = False
             if (owner / 'ledger.json').exists():
@@ -159,8 +160,9 @@ class SetupSupervisorService:
             # A partial fixture can die before its own cleanup metadata is
             # complete. The independent lease proved exact initial absence and
             # holds cleanup authority for these resources even in that case.
-            require(not self.resources.processes(cancel=True), 'setup_container_work_still_active')
+            remaining = self.resources.processes(cancel=True)
             self.resources.cancel_sessions()
+            require(not remaining, 'setup_container_work_still_active')
             self.resources.remove_databases(ManagedMysqlService(self.resources, self.resources.registry))
             self.resources.private_runtime(erase=True)
             connection = owner / 'private-connection.json'
@@ -170,6 +172,8 @@ class SetupSupervisorService:
             self.resources.private_absence()
             outcome['auditComplete'] = template_audited or not (owner / 'ledger.json').exists()
             outcome.update(cleanupComplete=True, code='setup_owned_resources_absent')
+        except Refusal as error:
+            outcome['code'] = error.code
         except Exception:
             # One cleanup attempt, retained closed result, no resource/job reset.
             pass

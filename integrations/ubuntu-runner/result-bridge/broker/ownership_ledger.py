@@ -73,7 +73,7 @@ class OwnershipLedger:
     def admit(self, spec, admission, code, containers):
         value = {'spec': dataclasses.asdict(spec), 'containers': containers, 'admissionCoreSha256': digest(admission),
                  'driverPid': os.getpid(), 'driverStartTicks': process_identity(os.getpid()),
-                 'startedUnix': time.time(), **code}
+                 'startedUnix': time.time(), 'containerProcessStartTicks': int(time.clock_gettime(time.CLOCK_BOOTTIME) * os.sysconf('SC_CLK_TCK')), **code}
         value['expiresUnix'] = value['startedUnix'] + spec.lease_seconds
         self.once('ownership-lease.json', value)
         return value

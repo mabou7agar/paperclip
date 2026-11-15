@@ -13,6 +13,7 @@ class SshTests(unittest.TestCase):
         prefix = 'python3 -I -B ' + INSTALL + '/remote_worker.py '
         self.assertEqual(arguments(prefix + '--inspect ' + job)[-2:], ['--inspect', job])
         self.assertEqual(arguments(prefix + '--stage')[-1], '--stage')
+        self.assertEqual(arguments(prefix + '--readiness ' + job)[-2:], ['--readiness', job])
         for command in ['sh', prefix + '--run ' + job, prefix + '--inspect ' + job + '; id',
                         prefix + '--artifact ' + job + ' ../../secret', prefix + '--stage anything',
                         prefix.replace(INSTALL, '/tmp/replacement') + '--inspect ' + job]:

@@ -138,7 +138,7 @@ def inspect(identity):
                 if current is None:return {'phase': 'attempted', 'cleanupPending': True}
             else:
                 current = reconcile_control(root, plan, write_once)
-            if current.get('cleanupComplete'):
+            if current.get('cleanupComplete') and (current.get('auditComplete') or plan['profile'].get('setupContainment')):
                 # Positive resource absence releases execution ownership even
                 # when evidence audit is a recorded failure. Native review and
                 # acceptance still see failed/auditComplete=false, never pass.
@@ -159,6 +159,21 @@ def inspect(identity):
                 'code': 'remote_unit_did_not_start', 'executionStarted': False, 'cleanupComplete': True}}
         return {'phase': 'submitted'}
     return {'phase': 'attempted'}
+
+
+def readiness(identity):
+    root = root_for(identity);trusted_root(root)
+    plan = read_json(root / 'plan.json', 2 * 1024 * 1024)
+    if plan['request']['kind'] != 'reviewed_controller' or not plan['profile'].get('setupContainment'):
+        return {'ready': True}
+    try:
+        from supervision_policy import SetupOwnership
+        from ownership_ledger import measurement
+        packet = Packet((root / 'packet.tar.gz').read_bytes(), plan['request']['packetSha256'], plan['profile'], privileged=True)
+        measurement(SetupOwnership.from_plan(plan, packet), _HERE)
+    except (Refusal, FileNotFoundError, KeyError, ValueError, TypeError):
+        return {'ready': False, 'code': 'setup_readiness_not_accepted'}
+    return {'ready': True}
 
 
 def launch(identity):
@@ -332,6 +347,8 @@ if __name__ == '__main__':
         result = stage(closed_json(sys.stdin.buffer.read(24 * 1024 * 1024 + 1)))
     elif operation == '--run':
         result = run(sys.argv[2])
+    elif operation == '--readiness':
+        result = readiness(sys.argv[2])
     elif operation == '--launch':
         result = launch(sys.argv[2])
     elif operation == '--inspect':

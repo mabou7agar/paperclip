@@ -100,7 +100,7 @@ else:time.sleep(60)
             pid = int(run(['systemctl', 'show', '--property=MainPID', '--value', unit], text=True).stdout.strip())
             lease = {'spec': dataclasses.asdict(spec), 'admissionCoreSha256': digest(plan['admission']['admission']),
                 'containers': resources.bindings, 'driverPid': pid, 'driverStartTicks': process_identity(pid),
-                'startedUnix': time.time() - (1801 if expired else 0), 'expiresUnix': time.time() - 1 if expired else time.time() + 1800}
+                'containerProcessStartTicks': int(time.clock_gettime(time.CLOCK_BOOTTIME) * os.sysconf('SC_CLK_TCK')) - 1500, 'startedUnix': time.time() - (1801 if expired else 0), 'expiresUnix': time.time() - 1 if expired else time.time() + 1800}
             ledger = OwnershipLedger(root);ledger.once('ownership-lease.json', lease)
             service = object.__new__(SetupSupervisorService)
             service.root, service.plan, service.packet, service.spec = root, plan, SimpleNamespace(directory='absent-qualification-packet'), spec

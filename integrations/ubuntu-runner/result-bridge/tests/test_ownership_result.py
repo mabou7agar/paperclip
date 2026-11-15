@@ -42,3 +42,16 @@ class OwnershipResultTests(unittest.TestCase):
             self.assertTrue(outcome['cleanupComplete'])
             self.assertFalse(outcome['auditComplete'])
             self.assertNotIn('featurePassed',outcome)
+
+
+    def test_failed_cleanup_retains_a_closed_actionable_reason(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = pathlib.Path(directory)
+            (root / 'ownership-lease.json').write_text('{}')
+            final = {'jobId': 'job', 'cleanupComplete': False, 'auditComplete': False,
+                     'executionRepeated': False, 'code': 'setup_container_work_still_active'}
+            path = root / 'ownership-final.json';path.write_text(json.dumps(final))
+            with patch('ownership_result.private_file', side_effect=lambda p: p):
+                result = settle(root, {'jobId': 'job', 'profile': {'setupContainment': {'required': True}}}, {'status': 'unknown'})
+            self.assertEqual(result['ownerFailureCode'], 'setup_container_work_still_active')
+            self.assertFalse(result['cleanupComplete'])

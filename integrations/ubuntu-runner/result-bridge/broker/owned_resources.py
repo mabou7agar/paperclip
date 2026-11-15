@@ -19,6 +19,7 @@ from contracts import require
 PROCESS_READER = r'''
 import os,pathlib,signal,sys,time,json
 uid,gid,tag,action=int(sys.argv[1]),int(sys.argv[2]),sys.argv[3],sys.argv[4]
+cutoff=None if sys.argv[7]=='none' else int(sys.argv[7])
 allowed=set(json.loads(sys.argv[5]));container=sys.argv[6]
 def read(pid):
  p=pathlib.Path('/proc')/str(pid)
@@ -28,8 +29,9 @@ def read(pid):
   ids={line.split(':',1)[0]:line.split(':',1)[1].split() for line in status if line.startswith(('Uid:','Gid:'))}
   if int(ids['Uid'][1])!=uid or int(ids['Gid'][1])!=gid or fields[0]=='Z':return None
   env=(p/'environ').read_bytes().split(bytes([0]))
-  if ('PAPERCLIP_RUNNER_JOB='+tag).encode() not in env:return None
-  return {'pid':int(pid),'startTicks':fields[19],'pgid':int(fields[2]),'state':fields[0]}
+  owned=('PAPERCLIP_RUNNER_JOB='+tag).encode() in env
+  if not owned and (cutoff is None or int(fields[19])<cutoff):return None
+  return {'pid':int(pid),'startTicks':fields[19],'pgid':int(fields[2]),'state':fields[0],'ownership':'owned' if owned else 'unconfirmed'}
  except (FileNotFoundError,ProcessLookupError):return None
 def scan():
  out=[r for p in pathlib.Path('/proc').iterdir() if p.name.isdigit() for r in [read(p.name)] if r]
@@ -42,21 +44,21 @@ if action=='cancel':
   for _ in range(8):
    rows=scan()
    for row in rows:
-    if row['pid'] in frozen:continue
+    if row['ownership']!='owned' or row['pid'] in frozen:continue
     try:
      fd=os.pidfd_open(row['pid']);fresh=read(row['pid'])
-     if not fresh or fresh['startTicks']!=row['startTicks']:os.close(fd);continue
+     if not fresh or fresh['ownership']!='owned' or fresh['startTicks']!=row['startTicks']:os.close(fd);continue
      signal.pidfd_send_signal(fd,signal.SIGSTOP);frozen[row['pid']]=fd
     except ProcessLookupError:pass
    time.sleep(.025)
-   if all(x['state'] in ['T','t'] for x in scan()):break
+   if all(x['ownership']!='owned' or x['state'] in ['T','t'] for x in scan()):break
   for fd in frozen.values():
    try:signal.pidfd_send_signal(fd,signal.SIGKILL)
    except ProcessLookupError:pass
  finally:
   for fd in frozen.values():os.close(fd)
  for _ in range(40):
-  if not scan():break
+  if not any(x['ownership']=='owned' for x in scan()):break
   time.sleep(.05)
 elif action!='inspect':raise RuntimeError('unknown action')
 print(json.dumps({'processes':scan()}))
@@ -93,6 +95,17 @@ class OwnedResourceRepository:
             require(len(matches) == 1 and matches[0][1] + identity - matches[0][0] == identity,
                     'setup_user_namespace_mapping_unsupported')
 
+    def process_cutoff(self):
+        if self.registry is None:return None
+        path = self.registry.root / 'ownership-lease.json'
+        if not path.exists():return None
+        from contracts import closed_json
+        from configuration import private_file
+        lease = closed_json(private_file(path).read_bytes())
+        value = lease.get('containerProcessStartTicks')
+        require(type(value) is int and value >= 0, 'setup_process_lease_cutoff_missing')
+        return value
+
     def processes(self, cancel=False):
         self.unchanged(self.spec.runner)
         self.direct_principal_mapping()
@@ -108,7 +121,7 @@ class OwnedResourceRepository:
         require(len(pids) <= 512, 'setup_container_process_bound_exceeded')
         result = subprocess.run([sys.executable, '-I', '-B', '-c', PROCESS_READER,
             str(self.spec.uid), str(self.spec.gid), self.spec.run_id, 'cancel' if cancel else 'inspect',
-            json.dumps(pids), self.bindings[self.spec.runner][0]], capture_output=True, timeout=20)
+            json.dumps(pids), self.bindings[self.spec.runner][0], str(self.process_cutoff()) if self.process_cutoff() is not None else 'none'], capture_output=True, timeout=20)
         require(result.returncode == 0 and len(result.stdout) <= 128 * 1024, 'setup_process_observation_unconfirmed')
         self.unchanged(self.spec.runner)
         value = json.loads(result.stdout)

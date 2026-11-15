@@ -3,8 +3,11 @@ import pathlib
 import sys
 import unittest
 import uuid
+import json
+from unittest.mock import Mock, patch
 from types import SimpleNamespace
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'broker'))
+from configuration import load
 from supervision_policy import SetupOwnership
 from contracts import Refusal
 
@@ -46,3 +49,21 @@ class SupervisionPolicyTests(unittest.TestCase):
         second_packet.trial['operatorExecutionId'] = 'operator-run02'
         second = SetupOwnership.from_plan(second_plan, second_packet)
         self.assertNotEqual(first.resource_digest, second.resource_digest)
+
+
+    def test_same_mysql_namespace_cannot_be_claimed_by_different_runner_profiles(self):
+        def configuration(second_mysql):
+            first = {'sshTarget': 'registered-host', 'fixedTrialFields': {'mysql': 'mysql-one'},
+                     'setupContainment': {'databases': ['exactdb'], 'account': 'exact_account'}}
+            second = {'sshTarget': 'registered-host', 'fixedTrialFields': {'mysql': second_mysql},
+                      'setupContainment': {'databases': ['exactdb'], 'account': 'different_account'}}
+            return {'stateRoot': '/private/state', 'socketPath': '/private/socket', 'socketGid': 0,
+                    'pluginAuthFile': '/private/auth', 'apiBaseUrl': 'http://127.0.0.1:3100',
+                    'tokenFile': '/private/token', 'databaseContainer': 'database', 'databaseUser': 'user',
+                    'databaseName': 'native', 'callbackUrl': '', 'profiles': {'first': first, 'second': second}}
+        for second_mysql in ['mysql-one', 'mysql-two']:
+            file = Mock();file.read_bytes.return_value = json.dumps(configuration(second_mysql)).encode()
+            with patch('configuration.private_file', return_value=file), patch('configuration.validate_profile'):
+                if second_mysql == 'mysql-one':
+                    with self.assertRaisesRegex(Refusal, 'broker_setup_namespace_overlap'):load('/private/config')
+                else:self.assertEqual(len(load('/private/config')['profiles']), 2)

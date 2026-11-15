@@ -36,8 +36,15 @@ def load(path):
         require((target.scheme, target.netloc) == (url.scheme, url.netloc) and
                 re.fullmatch(r"/api/plugins/[a-f0-9-]{36}/webhooks/terminal", target.path) and
                 not target.username and not target.password and not target.query and not target.fragment, "broker_callback_invalid")
+    owned_namespaces = {}
     for key, profile in config['profiles'].items():
         validate_profile(key, profile)
+        if profile.get('setupContainment'):
+            value = profile['setupContainment']
+            scope = (profile['sshTarget'], profile['fixedTrialFields'].get('mysql'))
+            names = {'schema:' + name for name in value['databases']} | {'account:' + value['account']}
+            require(not names & owned_namespaces.get(scope, set()), 'broker_setup_namespace_overlap')
+            owned_namespaces.setdefault(scope, set()).update(names)
         profile['policyDigest'] = digest(profile)
     return config
 

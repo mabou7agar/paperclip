@@ -38,6 +38,25 @@ class LinuxOwnershipTests(unittest.TestCase):
             with self.assertRaises(FileExistsError):ledger.once('ownership-lease.json', {'startedUnix': 200, 'expiresUnix': 2000})
             self.assertEqual(ledger.read('ownership-lease.json'), {'startedUnix': 100, 'expiresUnix': 1900})
 
+    def test_unknown_process_ownership_cancels_known_sql_but_never_drops_resources(self):
+        plan, packet = fixture()
+        with tempfile.TemporaryDirectory() as root:
+            root = pathlib.Path(root);root.chmod(0o700)
+            service = object.__new__(SetupSupervisorService)
+            service.root, service.plan, service.packet = root, plan, packet
+            service.spec = SetupOwnership.from_plan(plan, packet)
+            service.ledger = OwnershipLedger(root)
+            service.resources = Mock();service.resources.processes.return_value = [{'ownership': 'unconfirmed'}]
+            service.stop_host_work = Mock()
+            outcome = service.cleanup()
+            self.assertFalse(outcome['cleanupComplete'])
+            self.assertEqual(outcome['code'], 'setup_container_work_still_active')
+            service.resources.cancel_sessions.assert_called_once()
+            service.resources.remove_databases.assert_not_called()
+            service.resources.private_runtime.assert_not_called()
+            self.assertEqual(service.cleanup(), outcome)
+            service.resources.cancel_sessions.assert_called_once()
+
     def test_template_failure_still_cancels_and_cleans_owned_partial_setup(self):
         plan, packet = fixture()
         with tempfile.TemporaryDirectory() as root:

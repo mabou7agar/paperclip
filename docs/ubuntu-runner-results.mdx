@@ -317,3 +317,23 @@ still recorded as failed; positive resource cleanup cannot invent test or featur
 success. Delivery waits while the independent supervisor is actively settling
 ownership, then records one measured result. A later verified cleanup/audit gate
 is actual progress; another timestamp, attempt or arbitrary commit is not.
+
+Setup policy is validated by the broker before staging. A read-only forced-command
+readiness check confirms the pinned installed measurement before the broker claims
+its execution slot. Missing readiness is a system-owned admission wait: it creates
+no remote attempt, result or provider wake. The execution host checks the same
+measurement again before setup.
+
+The process tag is not sufficient absence evidence. The lease records the host
+boot-clock process-start tick before candidate work. Any effective UID/GID-matching
+process that began at or after that tick without the exact job tag makes cleanup
+unconfirmed. It is never killed as guessed ownership, and database/private-path
+drops do not proceed while it remains. This covers children with scrubbed
+environments and execs that drop the variable. Unknown ownership stays visible
+without a proof retry or repeated agent wake.
+
+For supervised profiles the 1,800-second lease is the effective work deadline.
+At expiry the owner stops the original host unit, fences it after 20 seconds if
+necessary, and performs independent cleanup. This takes precedence over the
+controller's longer graceful-cleanup allowance. Profiles without supervision
+retain their prior audit/quarantine and failure-fingerprint behavior.

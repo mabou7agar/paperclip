@@ -34,7 +34,8 @@ def settle(root, plan, outcome):
     result = {**outcome, 'supervisorReceiptSha256': hashlib.sha256(raw).hexdigest()}
     if final.get('cleanupComplete') is not True:
         return {**result, 'status': 'unknown', 'cleanupComplete': False,
-                'code': 'independent_setup_cleanup_unconfirmed'}
+                'code': 'independent_setup_cleanup_unconfirmed',
+                'ownerFailureCode': final.get('code', 'setup_cleanup_unconfirmed')}
     result['cleanupComplete'] = True
     if outcome.get('status') == 'unknown':
         result.update(status='failed', code='controller_terminated_with_owned_cleanup')
