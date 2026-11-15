@@ -50,6 +50,7 @@ import {
 } from "./constants.js";
 import { sessionCodec } from "./session-codec.js";
 import { runChildProcess } from "../server-utils.js";
+import * as localLaunchPolicy from "../local-agent-launch-policy.js";
 import { createPromptContextFixture } from "../test-fixtures/prompt-context.js";
 import { managedAiHomeEnvironment } from "../managed-ai-session-fingerprint.js";
 import { setExpensiveWorkspaceGitExecutor } from "../git-workspace-sync.js";
@@ -193,6 +194,8 @@ async function runExecutor(
     runtimeMcp?: AdapterRuntimeMcpAccess;
     prepareRemoteManagedHome?: AcpxEngineExecutorOptions["prepareRemoteManagedHome"];
     startupTraceContext?: AdapterExecutionContext["startupTraceContext"];
+    ensureSessionError?: Error;
+    expectedExitCode?: number;
   } = {},
 ) {
   // Skill reconciliation must never inspect or modify the developer's real
@@ -210,6 +213,7 @@ async function runExecutor(
   const logs: Array<{ stream: string; text: string }> = [];
   const events: Array<{ eventType: string; payload?: Record<string, unknown> }> = [];
   const receipts: unknown[] = [];
+  const ensureSessionError = options.ensureSessionError;
   const execute = createAcpxEngineExecutor({
     ...(options.prepareRemoteManagedHome
       ? { prepareRemoteManagedHome: options.prepareRemoteManagedHome }
@@ -218,7 +222,7 @@ async function runExecutor(
       runtimeOptions.push(options as unknown as Record<string, unknown>);
       return buildRuntime(
         ({ key, value }) => configOptions.push({ key, value }),
-        (input) => sessionInputs.push(input),
+        (input) => { sessionInputs.push(input); if (ensureSessionError) throw ensureSessionError; },
         (input) => turnInputs.push(input),
       ) as never;
     },
@@ -253,7 +257,7 @@ async function runExecutor(
     onUsage: async (receipt: unknown) => { receipts.push(receipt); },
   } as never);
 
-  expect(result.exitCode, result.errorMessage ?? result.summary ?? undefined).toBe(0);
+  expect(result.exitCode, result.errorMessage ?? result.summary ?? undefined).toBe(options.expectedExitCode ?? 0);
   return { logs, meta, events, receipts, runtimeOptions, configOptions, sessionInputs, turnInputs, result };
 }
 
@@ -409,6 +413,49 @@ const ALLOWED_TURN_SPAN_ATTRIBUTE_KEYS = new Set<string>([
 ]);
 
 describe("shared ACPX engine runtime behavior", () => {
+  it("confines the physical local ACP child while resuming the same logical session and prompt", async () => {
+    const root = await makeTempRoot();
+    const config = { agent: "custom", agentCommand: "node ./fake-acp.js", cwd: root,
+      stateDir: path.join(root, "state"), warmHandleIdleMs: 0, mode: "persistent" };
+    const policy = vi.spyOn(localLaunchPolicy, "readLocalAgentLaunchPolicy").mockReturnValue(null);
+    try {
+      const context = createPromptContextFixture();
+      const first = await runExecutor(config, { context });
+      vi.stubEnv("PAPERCLIP_LOCAL_AGENT_LAUNCH_POLICY", "/opt/operator/policy.json");
+      policy.mockReturnValue({ kind: "apparmor", executable: "/opt/operator/aa-exec", profile: "paperclip-agent" });
+      const second = await runExecutor(config, { runtime: { sessionParams: first.result.sessionParams },
+        context: { ...context, wakeReason: "runner_result_received" } });
+      expect(first.runtimeOptions[0]?.spawnAgent).toBeUndefined();
+      expect(second.runtimeOptions[0]?.spawnAgent).toBeTypeOf("function");
+      expect(second.runtimeOptions[0]?.protocolGuardFactory).toBeTypeOf("function");
+      expect(second.result.sessionParams?.configFingerprint).toBe(first.result.sessionParams?.configFingerprint);
+      expect(first.result.sessionId).toBeTruthy();
+      expect(second.result.sessionId).toBe(first.result.sessionId);
+      expect(second.sessionInputs[0]?.resumeSessionId).toBe(first.result.sessionId);
+      expect((second.runtimeOptions[0]?.agentRegistry as { resolve(name:string):unknown }).resolve("custom")).toBe("node ./fake-acp.js");
+      expect(second.turnInputs).toHaveLength(1);
+      expect(String(second.turnInputs[0]?.text)).toContain(context.paperclipTaskMarkdownAssignmentCompact);
+    } finally { policy.mockRestore(); vi.unstubAllEnvs(); }
+  });
+
+  it("required local confinement preserves the saved conversation on a resume refusal without a fresh retry", async () => {
+    const root = await makeTempRoot();
+    const config = { agent:"custom", agentCommand:"node ./fake-acp.js", cwd:root, mode:"persistent",
+      stateDir:path.join(root,"state"), warmHandleIdleMs:0 };
+    const policy = vi.spyOn(localLaunchPolicy,"readLocalAgentLaunchPolicy").mockReturnValue(null);
+    try {
+      const first = await runExecutor(config);
+      policy.mockReturnValue({kind:"apparmor",executable:"/opt/operator/aa-exec",profile:"paperclip-agent"});
+      const resumed = await runExecutor(config,{runtime:{sessionParams:first.result.sessionParams},
+        ensureSessionError:new Error("load refused by required isolation"),expectedExitCode:1});
+      expect(resumed.sessionInputs).toHaveLength(1);
+      expect(resumed.sessionInputs[0]?.resumeSessionId).toBe(first.result.sessionId);
+      expect(resumed.result.clearSession).not.toBe(true);
+      expect(resumed.turnInputs).toHaveLength(0);
+      expect(resumed.logs.map(row=>row.text).join()).not.toContain("retrying with a fresh session");
+    } finally {policy.mockRestore();}
+  });
+
   it("passes the current prompt, session, cancellation and diagnostic inputs to the runtime turn", async () => {
     const root = await makeTempRoot();
     const { result, turnInputs, meta } = await runExecutor({

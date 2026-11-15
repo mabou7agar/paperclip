@@ -38,6 +38,20 @@ class NativeRepository:
         require(UUID.fullmatch(issue_id) and UUID.fullmatch(comment_id), "native_comment_id_invalid")
         return self.read(f"/api/issues/{issue_id}/comments/{comment_id}")
 
+    def action(self, plugin_id, action, company_id, params):
+        require(UUID.fullmatch(plugin_id) and UUID.fullmatch(company_id) and action=='receive-broker-envelope', 'native_action_scope_invalid')
+        from contracts import canonical
+        body = canonical({'companyId':company_id,'params':params})
+        require(len(body)<=192*1024, 'native_action_too_large')
+        token = private_file(self.config['tokenFile']).read_text().strip()
+        request = urllib.request.Request(self.config['apiBaseUrl'].rstrip('/')+'/api/plugins/'+plugin_id+'/actions/'+action,
+            data=body,headers={'Authorization':'Bearer '+token,'Content-Type':'application/json'})
+        with self.opener.open(request,timeout=25) as response:
+            require(response.status==200, 'native_action_unconfirmed')
+            raw = response.read(16385)
+            require(len(raw)<=16384, 'native_action_response_too_large')
+            return closed_json(raw)
+
     def admission_gates_sql(self, company_id, task_id):
         require(UUID.fullmatch(company_id) and UUID.fullmatch(task_id), 'native_gate_ids_invalid')
         sql = f"""SELECT json_build_object('companyActive',c.status='active' AND c.paused_at IS NULL,

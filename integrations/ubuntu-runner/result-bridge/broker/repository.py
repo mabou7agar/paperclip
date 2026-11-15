@@ -68,6 +68,12 @@ class JobRepository:
         value["result"] = json.loads(raw_result) if raw_result else None
         return value
 
+    def delivery_sequence(self, identity, receipt_sha):
+        with self.connection() as db:
+            row=db.execute('SELECT rowid FROM deliveries WHERE job_id=? AND receipt_sha=?',(identity,receipt_sha)).fetchone()
+        require(row is not None,'job_delivery_missing')
+        return row[0]
+
     def claim(self, identity):
         with self.connection() as db:
             return db.execute("UPDATE jobs SET state='launching',wait_code=NULL WHERE id=? AND state='queued'", (identity,)).rowcount == 1

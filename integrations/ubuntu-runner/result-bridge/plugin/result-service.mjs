@@ -36,7 +36,18 @@ export class ResultService {
   async deliverOnce(jobId) {
     // The webhook is only a hint. The root-owned broker supplies the actual
     // immutable outcome; no inbound body can invent evidence or select a task.
-    const result = delivery(await this.broker.call('result', { jobId }));
+    return this.deliverResult(delivery(await this.broker.call('result', { jobId })));
+  }
+
+  async deliverResult(value) {
+    const result = delivery(value), key = `${result.jobId}:${result.receiptSha256}`;
+    if (this.pending.has(key)) return this.pending.get(key);
+    const work = this.writeResult(result).finally(() => this.pending.delete(key));
+    this.pending.set(key, work); return work;
+  }
+
+  async writeResult(result) {
+    const jobId = result.jobId;
     if (!profiles(await this.ctx.config.get(result.companyId)).has(result.profile)) throw new Error('runner_profile_not_enabled');
     const issue = await this.ctx.issues.get(result.issueId, result.companyId);
     if (!issue || issue.companyId !== result.companyId || issue.projectId !== result.projectId) throw new Error('runner_result_scope_changed');

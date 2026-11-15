@@ -84,6 +84,13 @@ class Server(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
 def serve(config):
     repository = JobRepository(config['stateRoot'])
     service = JobService(config, repository, NativeRepository(config), RemoteRepository())
+    # Both transports own the same durable jobs. A mode switch must never run
+    # two recovery loops against a shared execution ledger.
+    lock_path = pathlib.Path(config['stateRoot'])/'broker.lock'
+    lock = lock_path.open('a+b');lock_path.chmod(0o600)
+    fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    if config.get('nativeQueue'):
+        return serve_native(config,service)
     path = pathlib.Path(config['socketPath'])
     for parent in [path.parent, *path.parent.parents]:
         st = parent.lstat()
@@ -117,6 +124,16 @@ def serve(config):
         finally:
             stop.set()
             thread.join(timeout=20)
+
+
+def serve_native(config,service):
+    """No plugin-facing socket or credential. Native host owns IPC provenance."""
+    from native_transport import NativeTransport
+    from native_work_loop import NativeHintInbox, NativeWorkLoop
+    transport = NativeTransport(config,service,service.native)
+    inbox=NativeHintInbox()
+    try:NativeWorkLoop(transport,service).run(inbox)
+    finally:inbox.close()
 
 
 if __name__ == '__main__':

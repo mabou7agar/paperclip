@@ -20,8 +20,14 @@ def private_file(path):
 
 def load(path):
     config = closed_json(private_file(path).read_bytes())
-    require(set(config) == {"stateRoot", "socketPath", "socketGid", "pluginAuthFile", "apiBaseUrl", "tokenFile", "databaseContainer",
-                            "databaseUser", "databaseName", "callbackUrl", "profiles"}, "broker_configuration_invalid")
+    base = {"stateRoot", "socketPath", "socketGid", "pluginAuthFile", "apiBaseUrl", "tokenFile", "databaseContainer",
+            "databaseUser", "databaseName", "callbackUrl", "profiles"}
+    require(base <= set(config) <= base | {'nativeQueue'}, "broker_configuration_invalid")
+    if 'nativeQueue' in config:
+        value = config['nativeQueue']
+        require(isinstance(value,dict) and set(value)=={'pluginId','signingKeyFile','isolationReceiptFile','isolationReceiptSha256'} and
+                UUID.fullmatch(value['pluginId']) and SHA.fullmatch(value['isolationReceiptSha256']), 'native_queue_configuration_invalid')
+        private_file(value['signingKeyFile']); private_file(value['isolationReceiptFile'])
     url = urlsplit(config["apiBaseUrl"])
     require(url.scheme in ["http", "https"] and url.hostname in ["127.0.0.1", "localhost"] and
             not url.username and not url.password and not url.query and not url.fragment and url.path in ["", "/"], "broker_api_not_loopback")
