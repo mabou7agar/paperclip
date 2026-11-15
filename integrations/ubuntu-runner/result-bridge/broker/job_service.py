@@ -191,7 +191,7 @@ class JobService:
     def finish(self, identity, request, outcome):
         # Exclude timestamps, process IDs, output hashes, packet identities and
         # counters from failure progress. A new attempt alone is not progress.
-        meaningful = {k: outcome.get(k) for k in ['status', 'code', 'kind', 'diagnostic', 'steps', 'checks', 'recipeSha256'] if k in outcome}
+        meaningful = {k: outcome.get(k) for k in ['status', 'code', 'kind', 'diagnostic', 'steps', 'checks', 'recipeSha256', 'cleanupComplete', 'auditComplete'] if k in outcome}
         if outcome.get('kind') == 'control_checks':
             meaningful['facts'] = outcome.get('facts', {}).get('checks')
         result = {'jobId': identity, 'companyId': request['companyId'], 'projectId': request['projectId'],

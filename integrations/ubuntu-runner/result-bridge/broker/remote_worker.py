@@ -118,6 +118,11 @@ def inspect(identity):
     if (root / 'reconciled.json').exists():
         return {'phase': 'terminal', 'result': read_json(root / 'reconciled.json')}
     saved = read_json(root / 'result.json') if (root / 'result.json').exists() else None
+    if saved:
+        plan = read_json(root / 'plan.json', 2 * 1024 * 1024)
+        from ownership_result import settle
+        saved = settle(root, plan, saved)
+        if saved is None:return {'phase': 'attempted', 'cleanupPending': True}
     if (root / 'attempt.json').exists() and (not saved or saved.get('status') == 'unknown' or saved.get('cleanupComplete') is False):
         # Read-only reconciliation after an interrupted connection/process.
         # Never run a controller, test, cleanup script or new systemd unit here.
@@ -128,9 +133,15 @@ def inspect(identity):
             if plan['request']['kind'] == 'reviewed_controller':
                 packet = Packet((root / 'packet.tar.gz').read_bytes(), plan['request']['packetSha256'], plan['profile'], privileged=True)
                 current = controller_result(plan, packet, None)
+                from ownership_result import settle
+                current = settle(root, plan, current)
+                if current is None:return {'phase': 'attempted', 'cleanupPending': True}
             else:
                 current = reconcile_control(root, plan, write_once)
-            if current.get('cleanupComplete') and (plan['request']['kind'] != 'reviewed_controller' or current.get('auditComplete')):
+            if current.get('cleanupComplete'):
+                # Positive resource absence releases execution ownership even
+                # when evidence audit is a recorded failure. Native review and
+                # acceptance still see failed/auditComplete=false, never pass.
                 try: write_once(root / 'reconciled.json', current)
                 except FileExistsError: pass
                 return {'phase': 'terminal', 'result': read_json(root / 'reconciled.json')}
@@ -188,8 +199,13 @@ def reviewed_controller(root, plan, packet):
             not preflight['stdout']['overflow'] and not preflight['stderr']['overflow'], 'reviewed_preflight_failed')
     # The independently verified native records are written once outside
     # Phase A. None is fabricated from a package's own asserted permission.
+    effective_admission = dict(plan['admission']['admission'])
+    if plan['profile'].get('setupContainment'):
+        from setup_supervisor import SetupSupervisorService
+        effective_admission['setupContainment'] = SetupSupervisorService(root, plan, packet).start()
+    write_once(root / 'effective-admission.json', effective_admission)
     write_once(pathlib.Path(trial['externalAuthorityPath']), plan['admission']['authority'])
-    write_once(pathlib.Path(trial['preexecutionAdmissionPath']), plan['admission']['admission'])
+    write_once(pathlib.Path(trial['preexecutionAdmissionPath']), effective_admission)
     write_once(pathlib.Path(trial['caseArchivePath']), packet.files[packet.case_name], raw=True)
     write_once(root / 'controller-started.json', {'jobId': plan['jobId'], 'kind': 'reviewed_controller'})
     result = capture([sys.executable, '-I', '-B', str(control)], timeout=2100, limit=1024 * 1024, grace=620)
@@ -199,7 +215,17 @@ def reviewed_controller(root, plan, packet):
 def controller_result(plan, packet, exit_code):
     trial = packet.trial
     driver_path = pathlib.Path(trial['driverReceiptPath'])
+    job_root = root_for(plan['jobId'])
+    ownership_path = job_root / 'ownership-final.json'
+    ownership = read_json(ownership_path) if ownership_path.exists() else None
+    if ownership:
+        require(ownership['jobId'] == plan['jobId'] and ownership.get('executionRepeated') is False,
+                'controller_ownership_receipt_mismatch')
     if not driver_path.exists():
+        if ownership and ownership.get('cleanupComplete') is True:
+            return {'status': 'failed', 'kind': 'reviewed_controller', 'code': 'controller_terminated_with_owned_cleanup',
+                    'exit': exit_code, 'cleanupComplete': True, 'auditComplete': ownership.get('auditComplete') is True,
+                    'supervisorReceiptSha256': hashlib.sha256(ownership_path.read_bytes()).hexdigest()}
         return {'status': 'unknown', 'kind': 'reviewed_controller', 'code': 'controller_receipt_missing', 'exit': exit_code}
     driver = read_json(driver_path)
     raw = driver_path.read_bytes()
@@ -218,13 +244,20 @@ def controller_result(plan, packet, exit_code):
     failure = pathlib.Path(trial['runtimeReceiptRoot']) / 'auth-failure-receipt.json'
     if failure.exists():
         value = read_json(failure)
-        expected = hashlib.sha256(canonical(plan['admission']['admission'])).hexdigest()
+        job_root = root_for(plan['jobId'])
+        effective = read_json(job_root / 'effective-admission.json') if (job_root / 'effective-admission.json').exists() else plan['admission']['admission']
+        expected = hashlib.sha256(canonical(effective)).hexdigest()
         require(value['caseAdmissionSha256'] == expected and value['candidate'] == plan['profile']['candidate'] and
                 value['continuationId'] == trial['continuationId'], 'failure_receipt_binding_failed')
         try:
             outcome['diagnostic'] = closed_diagnostic(value['inner']['diagnostic'])
         except Refusal:
             outcome['diagnostic'] = {'status': 'diagnostic_unavailable', 'receipt': None}
+    if ownership and ownership.get('cleanupComplete') is True and not outcome['cleanupComplete']:
+        # Positive independent cleanup may settle ownership, but cannot invent
+        # a passing test/feature verdict from an interrupted driver.
+        outcome.update(status='failed', cleanupComplete=True, auditComplete=ownership.get('auditComplete') is True,
+                       supervisorReceiptSha256=hashlib.sha256(ownership_path.read_bytes()).hexdigest())
     outcome['artifacts'] = descriptors(inventory(packet, driver))
     return outcome
 

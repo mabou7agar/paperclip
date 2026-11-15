@@ -195,3 +195,16 @@ class JobTests(unittest.TestCase):
             self.assertIsNone(self.repo.get(identity)['result'])
             self.native.notify.assert_not_called()
             self.remote.launch.assert_not_called()
+
+    def test_positive_cleanup_and_audit_are_real_gate_progress_not_duplicate_failure(self):
+        identity = self.register()
+        first = {'status': 'failed', 'kind': 'reviewed_controller', 'code': 'fixture_failed',
+                 'cleanupComplete': False, 'auditComplete': False}
+        self.service.finish(identity, self.request, first)
+        original = self.repo.get(identity)['result']
+        self.service.finish(identity, self.request, {**first, 'cleanupComplete': True, 'auditComplete': True})
+        updated = self.repo.get(identity)['result']
+        self.assertNotEqual(original['fingerprint'], updated['fingerprint'])
+        self.assertTrue(updated['newEvidence'])
+        self.assertEqual(self.repo.get(identity)['state'], 'terminal')
+        self.remote.launch.assert_not_called()

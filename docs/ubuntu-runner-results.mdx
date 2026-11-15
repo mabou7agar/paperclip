@@ -241,3 +241,79 @@ provider. Confirmed stops are not reissued. Current native pause, reassignment,
 cancellation or execution holds intentionally request cancellation of admitted
 work. Artifact transfer failures retain their internal evidence-delivery wait,
 including when cleanup is incomplete; they do not invent another unknown result.
+
+## Optional pre-setup ownership lease
+
+A registered `reviewed_controller` profile may configure `setupContainment`.
+It binds an independent root supervisor, exact initially absent synthetic schema
+and account names, and initially absent private runtime paths. Application code
+continues under its registered non-root UID/GID; no Docker socket, host key,
+broker credential or ptrace capability is given to an agent or container.
+
+```json
+{
+  "setupContainment": {
+    "schema": "registered-preview-setup.v1",
+    "databases": ["previewcentral01", "previewprimary01", "previewisolation01"],
+    "account": "preview_account01",
+    "receiptName": "q1-bridge-setup-containment.json",
+    "privateRoot": "/tmp/registered-preview-workspace",
+    "privatePaths": ["source/.env", "home", "runtime"],
+    "evidencePath": "/etc/paperclip-runner-results/setup-measurements.json",
+    "evidenceSha256": "OPERATOR_PINNED_SHA256"
+  }
+}
+```
+
+All schema names are exact lowercase alphanumeric identifiers, without MySQL
+wildcard characters. The trial must name that same list and account. The
+registered private root contains the source root; private paths must be relative,
+without traversal, and absent before admission. Existing source files therefore
+cannot be selected for erasure. Runtime credentials, generated sessions and
+private home paths may be removed after owned work stops; ledgers, native plans,
+sessions and retained evidence are preserved.
+
+Before the first setup phase, the execution adapter starts one separate retained
+`paperclip-runner-owner-JOB_ID` systemd unit. It publishes a root-private startup
+receipt only after the immutable lease and its PID/start ticks are established.
+The original lease is at most 1,800 seconds and never resets or extends. Its
+receipt is bound into the effective admission, while the digest of the admission
+core excludes that new field to avoid a circular hash.
+
+The external accepted measurement file must have schema
+`paperclip.runner.setup-readiness.v1`, the exact installed broker code digest,
+`measured: true`, and accepted receipts for pre-setup driver death, container
+children outliving the host command, owned SQL cancellation, partial-DDL cleanup,
+stale lease/PID rejection and effective execution identity. Mocks or unchecked
+booleans cannot establish readiness. Missing or changed measurements fail closed.
+Code/source review alone is not a substitute for these measurements or the
+independent native template/packet/CTO/worker gates.
+
+The application adapter must put `PAPERCLIP_RUNNER_JOB`, equal to the trial's
+validated execution identity, on every application exec and retain it in child
+processes. The protected host restricts inspection to the registered container's
+actual process list and cgroup, effective UID/GID and exact tag. PID file
+descriptors prevent a reused numeric PID from receiving a cancellation signal.
+Current direct host UID/GID mapping is required; shifted user namespaces fail
+closed until another mapping adapter is registered. Raw environments are never
+returned or retained.
+
+Administrative SQL uses the installed root-only `managed_mysql.py` transport,
+which accepts SQL on stdin only inside the original job or owner unit. It first
+obtains a connection ID without sending any mutating SQL, fsyncs a root-private
+ownership record, then sends the original input. It returns the original query
+output without the handshake row. Reconnection is disabled. This works when
+`performance_schema` is disabled and does not change shared MySQL settings.
+Cleanup in the original unit after expiry uses its explicit `--cleanup` mode;
+the independent owner unit retains cleanup authority after the work lease ends.
+Application/scoped SQL remains the exact unique synthetic account, with
+reconnection disabled and no root credential access.
+
+The supervisor stops the exact original host unit before terminating owned
+container work and SQL. It revokes only the recorded synthetic account and
+removes only the exact initially absent schema names. A template cleanup failure
+does not prevent independent partial-setup cleanup. Missing evidence audit is
+still recorded as failed; positive resource cleanup cannot invent test or feature
+success. Delivery waits while the independent supervisor is actively settling
+ownership, then records one measured result. A later verified cleanup/audit gate
+is actual progress; another timestamp, attempt or arbitrary commit is not.

@@ -74,3 +74,13 @@ class RemoteWorkerTests(unittest.TestCase):
         with patch.object(worker, 'inspect', return_value={'phase': 'submitted'}), patch.object(worker.subprocess, 'run') as call:
             self.assertEqual(worker.launch(self.identity)['phase'], 'submitted')
             call.assert_not_called()
+
+    def test_positive_independent_setup_cleanup_settles_missing_driver_without_inventing_pass(self):
+        value = {'jobId': self.identity, 'cleanupComplete': True, 'auditComplete': False, 'executionRepeated': False}
+        (self.root / 'ownership-final.json').write_text(json.dumps(value))
+        packet = SimpleNamespace(trial={'driverReceiptPath': str(self.state / 'missing-driver.json')})
+        result = worker.controller_result({'jobId': self.identity}, packet, None)
+        self.assertEqual(result['status'], 'failed')
+        self.assertTrue(result['cleanupComplete'])
+        self.assertFalse(result['auditComplete'])
+        self.assertNotIn('featurePassed', result)
