@@ -16,8 +16,6 @@ return definePlugin({
       catch (error) { if (error?.code !== 'ENOENT') throw error; broker = new BrokerClient(); }
     }
     service = new ResultService(ctx, broker);
-    if (typeof broker.receive === 'function') ctx.actions.register('receive-broker-envelope',
-      (params, context) => broker.receive(params, context, service));
     for (const tool of tools) ctx.tools.register(tool.name, tool, async (args, run) => {
       try { const data = tool.name === 'submit-runner-job'
         ? await service.submit(args, run) : await service.status(args.jobId, run);
@@ -37,12 +35,17 @@ return definePlugin({
     if (typeof broker.startup === 'function') await broker.startup();
   },
   async onWebhook(input) {
+    if (typeof broker.receiveWebhook === 'function') {
+      if(input.endpointKey!=='terminal'||typeof input.rawBody!=='string'||Buffer.byteLength(input.rawBody)>192*1024)throw new Error('runner_envelope_invalid');
+      await broker.receiveWebhook(JSON.parse(input.rawBody),service);
+      return;
+    }
     if (input.endpointKey !== 'terminal' || Buffer.byteLength(input.rawBody) > 256) throw new Error('runner_hint_invalid');
     const value = JSON.parse(input.rawBody);
     if (!value || Object.keys(value).length !== 1) throw new Error('runner_hint_invalid');
     await service.deliver(value.jobId);
   },
-  async onHealth() { return { status: 'ok', message: `Runner transport: ${typeof broker?.receive === 'function' ? 'native' : 'root_ipc'}. Native task admission remains authoritative.` }; },
+  async onHealth() { return { status: 'ok', message: `Runner transport: ${typeof broker?.receiveWebhook === 'function' ? 'native_webhook' : 'root_ipc'}. Native task admission remains authoritative.` }; },
 });
 }
 const plugin = createRunnerPlugin();

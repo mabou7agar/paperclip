@@ -3,7 +3,7 @@
 The optional Ubuntu result integration can run with an unprivileged Paperclip
 server. The plugin writes an intent through native plugin state; the root broker
 verifies that intent against the original run and the existing admission gates.
-Root-signed envelopes return through the native plugin action API. Native task
+Root-signed envelopes return through the existing native plugin webhook over loopback. Native task
 checkout, session preparation, execution guards, review and handoff still belong
 to Paperclip.
 
@@ -99,14 +99,17 @@ Keep the broker's Ed25519 private key in a root-only host file. Bind only the
 public trust description at `/opt/paperclip-runner-trust/broker.json`:
 
 ```json
-{"pluginId":"<native-plugin-id>","brokerUserId":"<broker-board-user-id>","publicKey":"<Ed25519-public-PEM>"}
+{"pluginId":"<native-plugin-id>","publicKey":"<Ed25519-public-PEM>"}
 ```
 
 This sealed public file selects native transport at plugin setup. Company config
 continues to contain only allowed profile names. Without the public binding,
 legacy root IPC remains available with its original root-peer/HMAC checks; those
 checks have not been relaxed. A malformed binding fails setup. Native mode
-requires an empty `callbackUrl`; the legacy webhook is not a native delivery path.
+requires an empty legacy `callbackUrl`; native delivery derives the fixed loopback
+`/api/plugins/:pluginId/webhooks/terminal` route from `apiBaseUrl`. No board
+credential is sent to that endpoint. The native webhook accepts only a signed
+envelope, never the legacy job-ID hint.
 Stop the old broker before switching transport. Both modes now share a
 state-directory lifetime lock; do not run an older release against that same
 ledger during migration.
@@ -151,7 +154,7 @@ inspection cannot prevent durable acknowledgement.
 Mount
 the plugin outside the application home so a standard home-ownership entrypoint
 does not try to chown read-only integration files. Check that the native health
-response identifies the `native` transport before starting the broker. A changed
+response identifies the `native_webhook` transport before starting the broker. A changed
 plugin installation ID holds delivery; it is never silently retargeted.
 
 ## Durable intent, result and acknowledgement
@@ -181,8 +184,8 @@ A late refusal produces one native admission document and one durable
 continuation to diagnose that precise failure; it starts no test or attempt.
 
 The broker signs domain-separated canonical bytes using OpenSSL Ed25519. The
-plugin checks the immutable native user/company actor, pinned public key,
-plugin ID, request digest and exact result scope before using the existing
+plugin checks the pinned root public key, signed company/plugin ID, request
+digest and exact retained request/result scope before using the existing
 result service. Result evidence is saved before `requestWakeup` with the same
 native durable key. A passed reused result remains deliverable. An unchanged
 failure is recorded without another provider wake. Reassignment or closed tasks
@@ -196,7 +199,8 @@ than a stale queued admission.
 
 The root broker independently verifies the deterministic native wake receipt,
 including company, agent, issue, plugin, reason and payload digest. It never
-trusts the plugin action response as a result ACK. After a lost HTTP response or
+trusts the webhook HTTP response as a result ACK. An accepted admission also
+requires independently reading its exact retained signed state before ledger ACK. After a lost HTTP response or
 broker restart it reads that native receipt before sending again. A
 `recorded_only` disposition requires the real issue condition and matching result
 document. Different task/company failures remain isolated. Passive transport
@@ -236,3 +240,21 @@ separate independently reviewed profile for those needs. Do not loosen the
 transport activation boundary as a workaround. Agent resume failures retain the
 existing conversation and fail visibly; confinement never fabricates a new
 session to hide a lost provider history.
+
+## Why the existing broker remains
+
+The main-host root broker owns the primary admission/job ledger and passed-input
+cache. The execution host trusts the immutable plan admitted there. Its forced
+command SSH key must remain root-only: giving it to an agent or unprivileged
+relay would transfer plan-staging authority. Retain the already reviewed Ubuntu
+supervisor and code digest; a timeout alone does not replace ownership-aware
+fixture cancellation and cleanup. The existing native intent state is a delivery
+record, not a second assignment, review, budget or provider-session engine.
+
+The result path reuses the native webhook and `ResultService`, with the existing
+root outbox providing redelivery after HTTP loss or restart. Native webhook rows
+are audit records; the route does not itself promise automatic replay. Signature
+verification happens before result effects. Only the original native request can
+bind the signed result to a task, and only the independently checked saved
+admission or document/wake settles the root outbox. Transport recovery repeats
+delivery only, never the execution or a passed check.

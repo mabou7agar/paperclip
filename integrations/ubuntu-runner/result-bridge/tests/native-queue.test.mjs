@@ -159,3 +159,18 @@ test('unknown execution stays in reconciliation even when cleanup is measured co
  const status=await f.client.call('status',{jobId:jobId(f.request),companyId:f.request.companyId,agentId:f.request.agentId});
  assert.equal(status.state,'reconciliation_required');assert.equal((await f.client.call('submit',f.request)).state,'reconciliation_required');
 });
+
+
+test('public native webhook needs no board actor but binds signature, company, task and retained request',async()=>{
+  const f=fixture();await f.client.call('submit',f.request);
+  const result=f.envelope('result',f.result);
+  await assert.rejects(f.client.receiveWebhook({...result,signature:'A'.repeat(86)+'=='},f.service));
+  await assert.rejects(f.client.receiveWebhook(f.envelope('result',f.result,{companyId:randomUUID()}),f.service));
+  await assert.rejects(f.client.receiveWebhook(f.envelope('result',f.result,{issueId:randomUUID()}),f.service));
+  await assert.rejects(f.client.receiveWebhook({...result,companyId:f.request.companyId},f.service));
+  assert.equal(f.docs.size,0);assert.equal(f.physicalWakes,0);
+  await f.client.receiveWebhook(f.envelope('admission',{jobId:f.result.jobId,state:'queued'}),f.service);
+  await Promise.all([f.client.receiveWebhook(result,f.service),f.client.receiveWebhook(result,f.service)]);
+  await f.client.receiveWebhook(result,new ResultService(f.ctx,f.client));
+  assert.equal(f.docs.size,1);assert.equal(f.physicalWakes,1);
+});

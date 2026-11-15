@@ -18,21 +18,23 @@ class NativeFixture:
     def __init__(self,request,plugin):
         self.request,self.plugin=request,plugin
         self.rows=[{'key':job_id(request),'issue':request['taskId'],'value':request,'withinRun':True,'sourceMatches':True}]
-        self.actions=[];self.wake=False;self.lose_result_response=False
+        self.actions=[];self.admissions={};self.http_only=False;self.wake=False;self.lose_result_response=False
         self.issue={'companyId':request['companyId'],'projectId':request['projectId'],'assigneeAgentId':request['agentId'],'status':'in_progress'}
         self.document=None
 
     def query(self,sql):
         if 'FROM plugins ' in sql:return [{'id':self.plugin,'status':'ready','key':'paperclip.ubuntu-runner-results'}]
         if 'FROM plugin_state s LEFT' in sql:return self.rows
+        if "namespace='runner-admissions'" in sql:return [{'matches':bool(self.admissions)}] if self.admissions else []
         if 'FROM agent_wakeup_requests' in sql:return [{'matches':self.wake}] if self.wake else []
         return []
 
-    def action(self,plugin,action,company,envelope):
+    def deliver_envelope(self,plugin,envelope):
         value=json.loads(base64.b64decode(envelope['payload']))
-        assert plugin==self.plugin and action=='receive-broker-envelope' and company==self.request['companyId']
+        assert plugin==self.plugin
+        if self.http_only:return {'status':'success'}
         self.actions.append(value)
-        if value['kind']=='admission':self.rows=[]
+        if value['kind']=='admission':self.rows=[];self.admissions[value['jobId']]=envelope
         else:
             self.wake=True
             if self.lose_result_response:raise OSError('lost response after native receipt commit')
@@ -104,6 +106,19 @@ class NativeTransportTest(unittest.TestCase):
         restarted=NativeTransport(self.config,self.service,self.native);restarted.deliver()
         self.assertEqual(len([x for x in self.native.actions if x['kind']=='result']),1)
         self.assertEqual(self.repo.pending(),[]);self.assertEqual(self.created,1)
+
+    def test_webhook_http_success_alone_cannot_ack_admission_or_result(self):
+        self.transport.receive();self.native.http_only=True
+        self.transport.deliver()
+        self.assertEqual(len(self.transport.ledger.pending_admissions()),1)
+        identity=job_id(self.request)
+        self.repo.terminal(identity,{'jobId':identity,'companyId':self.request['companyId'],'projectId':self.request['projectId'],
+            'issueId':self.request['taskId'],'agentId':self.request['agentId'],'profile':'fixture','status':'passed',
+            'receiptSha256':'b'*64,'fingerprint':'c'*64,'result':{'status':'passed','cleanupComplete':True}})
+        self.transport.deliver()
+        self.assertEqual(self.repo.pending(),[identity]);self.assertEqual(self.created,1)
+        self.native.http_only=False;self.transport.deliver()
+        self.assertEqual(self.repo.pending(),[]);self.assertEqual(self.transport.ledger.pending_admissions(),[])
 
     def test_native_plugin_reinstall_or_changed_isolation_receipt_fails_closed(self):
         self.native.query=Mock(return_value=[])

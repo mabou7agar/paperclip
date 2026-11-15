@@ -1,9 +1,9 @@
 import { uuid, delivery } from './contracts.mjs';
 import { digest, stableInput, jobId, requestKey, ADMISSION_NAMESPACE } from './native-contracts.mjs';
-import { loadTrust, verifyEnvelope } from './native-envelope.mjs';
+import { loadTrust, verifyEnvelope, verifyBrokerEnvelope } from './native-envelope.mjs';
 import { notifyNativeBroker } from './native-wake.mjs';
 
-/** Intent uses host-owned state; signed responses use native actions. No IPC secret. */
+/** Intent uses host-owned state; signed broker output uses native webhooks. No IPC secret. */
 export class NativeQueueClient {
   constructor(ctx, trustLoader = loadTrust, notify = notifyNativeBroker) {
     this.ctx = ctx; this.trustLoader = trustLoader; this.notify = notify; this.serial = Promise.resolve(); this.resultLocks=new Map();
@@ -19,7 +19,9 @@ export class NativeQueueClient {
   }
   async verified(envelope, companyId) {
     const trust = await this.trustLoader();
-    return verifyEnvelope(envelope, { companyId, actor: { type: 'user', userId: trust.brokerUserId, companyId } }, trust);
+    const value=verifyBrokerEnvelope(envelope,trust);
+    if(value.companyId!==companyId)throw new Error('runner_native_envelope_scope_invalid');
+    return value;
   }
   async call(operation, input) {
     if (operation === 'submit') return this.locked(async () => {
@@ -96,6 +98,13 @@ export class NativeQueueClient {
       const { companyId: _companyId, ...signed } = envelope; envelope = signed;
     }
     const trust = await this.trustLoader(), value = verifyEnvelope(envelope, context, trust);
+    return this.receiveVerified(envelope,value,service);
+  }
+  async receiveWebhook(envelope, service) {
+    const trust=await this.trustLoader();
+    return this.receiveVerified(envelope,verifyBrokerEnvelope(envelope,trust),service);
+  }
+  async receiveVerified(envelope,value,service) {
     const key = requestKey(value.issueId, value.jobId);
     const request = await this.ctx.state.get(key);
     const previous = await this.ctx.state.get(requestKey(value.issueId, value.jobId, ADMISSION_NAMESPACE));

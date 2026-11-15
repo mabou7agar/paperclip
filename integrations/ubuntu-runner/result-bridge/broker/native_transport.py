@@ -1,4 +1,4 @@
-"""Native plugin intent → existing admission; signed action → native receipt ACK.
+"""Native plugin intent → existing admission; signed webhook → native receipt ACK.
 
 No candidate controls this transport, and it never assigns a task or manages a
 provider session. A failed native read is a delivery wait, not an execution retry.
@@ -82,7 +82,7 @@ class NativeTransport:
         require(not unread,'native_intent_scan_pending')
 
     def push(self, request, kind, data):
-        return self.native.action(self.plugin_id,'receive-broker-envelope',request['companyId'],self.envelope(request,kind,data))
+        return self.native.deliver_envelope(self.plugin_id,self.envelope(request,kind,data))
 
     def native_wake_ack(self, request, key, reason, source):
         identity, binding = wake_receipt(request['companyId'],self.plugin_id,key,request['taskId'],request['agentId'],reason,source)
@@ -111,11 +111,14 @@ class NativeTransport:
         for row in self.ledger.pending_admissions():
             try:
                 request,response = row['request'],row['admission']
+                envelope=self.envelope(request,'admission',response)
+                if response['state']!='not_admitted' and self.reader.admission_matches(request,row['job_id'],envelope):
+                    self.ledger.acknowledge_admission(row['job_id']);continue
                 if response['state']=='not_admitted' and self.native_wake_ack(request,'runner-admission:'+row['job_id'],
                         'runner_admission_refused','ubuntu.runner.admission'):
                     self.ledger.acknowledge_admission(row['job_id']);continue
                 self.push(request,'admission',response)
-                if response['state']!='not_admitted' or self.native_wake_ack(request,'runner-admission:'+row['job_id'],
+                if (response['state']!='not_admitted' and self.reader.admission_matches(request,row['job_id'],envelope)) or self.native_wake_ack(request,'runner-admission:'+row['job_id'],
                         'runner_admission_refused','ubuntu.runner.admission') or self.closed_admission_ack(request,response):
                     self.ledger.acknowledge_admission(row['job_id'])
             except Exception:
