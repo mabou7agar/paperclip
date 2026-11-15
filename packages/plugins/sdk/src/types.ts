@@ -1559,6 +1559,8 @@ export interface PluginIssuesClient {
       reason?: string;
       contextSource?: string;
       idempotencyKey?: string | null;
+      /** Refuse delivery if task ownership changed since the result was produced. */
+      expectedAssigneeAgentId?: string;
     } & PluginIssueMutationActor,
   ): Promise<PluginIssueWakeupResult>;
   requestWakeups(

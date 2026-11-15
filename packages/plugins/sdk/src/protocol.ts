@@ -2033,6 +2033,7 @@ export interface WorkerToHostMethods {
       reason?: string;
       contextSource?: string;
       idempotencyKey?: string | null;
+      expectedAssigneeAgentId?: string;
       actorAgentId?: string | null;
       actorUserId?: string | null;
       actorRunId?: string | null;

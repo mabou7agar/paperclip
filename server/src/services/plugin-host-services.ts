@@ -1,4 +1,6 @@
+import { conflict } from "../errors.js";
 import { projectGitAuthorizationService } from "./project-git-authorization.js";
+import { preparePluginWakeupReceipt } from "./plugin-wakeup-receipts.js";
 import { createLiveEventDelivery } from "../realtime/live-event-delivery.js";
 import { createLiveRunEventRedactor } from "./live-run-event-redaction.js";
 import { projectInstanceSecretService } from "./project-instance-secrets.js";
@@ -2422,6 +2424,16 @@ export function buildHostServices(
         if (!issue.assigneeAgentId) {
           throw new Error("Issue has no assigned agent to wake");
         }
+        if (params.expectedAssigneeAgentId !== undefined && params.expectedAssigneeAgentId !== issue.assigneeAgentId) {
+          throw conflict("Issue assignee changed before plugin delivery", { code: "plugin_wakeup_assignee_changed" });
+        }
+        const contextSource = params.contextSource ?? "plugin.issue.requestWakeup";
+        const reason = params.reason ?? "plugin_issue_wakeup_requested";
+        const delivery = params.idempotencyKey ? await preparePluginWakeupReceipt(db, {
+          companyId, pluginId, issueId: issue.id, agentId: issue.assigneeAgentId,
+          idempotencyKey: params.idempotencyKey, contextSource, reason,
+        }) : null;
+        if (delivery?.prior) return { queued: false, runId: delivery.prior.runId };
         if (["backlog", "done", "cancelled"].includes(issue.status)) {
           throw new Error(`Issue is not wakeable in status: ${issue.status}`);
         }
@@ -2437,7 +2449,6 @@ export function buildHostServices(
         if (budgetBlock) {
           throw new Error(budgetBlock.reason);
         }
-        const contextSource = params.contextSource ?? "plugin.issue.requestWakeup";
         const run = await heartbeat.wakeup(issue.assigneeAgentId, {
           source: "assignment",
           triggerDetail: "system",
@@ -2448,8 +2459,10 @@ export function buildHostServices(
             pluginId,
             pluginKey,
             contextSource,
+            ...(delivery ? { pluginWakeupDigest: delivery.intent.digest } : {}),
           },
           idempotencyKey: params.idempotencyKey ?? null,
+          durablePluginRequest: delivery?.intent,
           requestedByActorType: "system",
           requestedByActorId: pluginId,
           contextSnapshot: {
@@ -2490,6 +2503,16 @@ export function buildHostServices(
           if (!issue.assigneeAgentId) {
             throw new Error("Issue has no assigned agent to wake");
           }
+          const contextSource = params.contextSource ?? "plugin.issue.requestWakeups";
+          const reason = params.reason ?? "plugin_issue_wakeup_requested";
+          const delivery = params.idempotencyKeyPrefix ? await preparePluginWakeupReceipt(db, {
+            companyId, pluginId, issueId: issue.id, agentId: issue.assigneeAgentId,
+            idempotencyKey: `${params.idempotencyKeyPrefix}:${issue.id}`, contextSource, reason,
+          }) : null;
+          if (delivery?.prior) {
+            results.push({ issueId: issue.id, queued: false, runId: delivery.prior.runId });
+            continue;
+          }
           if (["backlog", "done", "cancelled"].includes(issue.status)) {
             throw new Error(`Issue is not wakeable in status: ${issue.status}`);
           }
@@ -2505,7 +2528,6 @@ export function buildHostServices(
           if (budgetBlock) {
             throw new Error(budgetBlock.reason);
           }
-          const contextSource = params.contextSource ?? "plugin.issue.requestWakeups";
           const run = await heartbeat.wakeup(issue.assigneeAgentId, {
             source: "assignment",
             triggerDetail: "system",
@@ -2516,8 +2538,10 @@ export function buildHostServices(
               pluginId,
               pluginKey,
               contextSource,
+              ...(delivery ? { pluginWakeupDigest: delivery.intent.digest } : {}),
             },
             idempotencyKey: params.idempotencyKeyPrefix ? `${params.idempotencyKeyPrefix}:${issue.id}` : null,
+            durablePluginRequest: delivery?.intent,
             requestedByActorType: "system",
             requestedByActorId: pluginId,
             contextSnapshot: {

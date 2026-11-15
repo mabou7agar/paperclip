@@ -1,0 +1,130 @@
+"""Read-only independent admission adapter for reviewed-controller.v2 packets.
+
+This adapter recognizes native comment, document, interaction and execution-
+decision identities separately. No package-provided permission is sufficient.
+"""
+import copy
+import datetime
+import re
+from contracts import require, closed_json, canonical, digest
+
+
+def first_json(body):
+    match = re.search(r"```json\s*(.*?)\s*```", body, re.S)
+    require(match is not None, "native_structured_record_missing")
+    return closed_json(match[1])
+
+
+def instant(value):
+    result = datetime.datetime.fromisoformat(value.replace('Z', '+00:00'))
+    require(result.tzinfo is not None, 'native_timestamp_without_zone')
+    return result
+
+
+class ReviewAdmissionService:
+    def __init__(self, native):
+        self.native = native
+
+    def binding(self, job, profile):
+        require(job["companyId"] == profile["companyId"] and job["projectId"] == profile["projectId"] and
+                job["taskId"] in profile["taskIds"] and job["agentId"] == profile["agentId"], "job_profile_scope_mismatch")
+        issue = self.native.read("/api/issues/" + job["taskId"])
+        require(issue["companyId"] == job["companyId"] and issue["projectId"] == job["projectId"] and
+                issue["assigneeAgentId"] == job["agentId"] and issue["status"] not in ["done", "cancelled", "backlog"],
+                "job_task_ownership_changed")
+        agent = self.native.read("/api/agents/" + job["agentId"])
+        require(agent["companyId"] == job["companyId"] and agent["status"] not in ["paused", "terminated"], "job_agent_unavailable")
+        gates = self.native.admission_gates(job['companyId'], job['taskId'])
+        require(gates['companyActive'] is True and gates['projectActive'] is True and gates['pauseHeld'] is False,
+                'job_native_pause_hold')
+        require(not issue.get('executionBlocker') and not any(x['status'] != 'done' for x in issue.get('blockedBy', [])),
+                'job_native_execution_hold')
+        return issue
+
+    def controller(self, job, profile, packet):
+        self.binding(job, profile)
+        scope = self.native.comment(job["scopeIssueId"], job["scopeCommentId"])
+        ack = self.native.comment(job["taskId"], job["ackCommentId"])
+        require(scope["companyId"] == ack["companyId"] == job["companyId"] and
+                scope["authorAgentId"] == profile["scopeAgentId"] and ack["authorAgentId"] == job["agentId"] and
+                scope["deletedAt"] is ack["deletedAt"] is None and instant(scope["createdAt"]) < instant(ack["createdAt"]), "job_native_scope_invalid")
+        require(scope["issueId"] in profile["scopeIssueIds"], "job_scope_issue_not_registered")
+        target = self.native.read(f'/api/issues/{job["taskId"]}/documents/{profile["targetDocumentKey"]}')
+        acp = self.native.read(f'/api/issues/{job["taskId"]}/documents/{profile["actualAcpDocumentKey"]}')
+        S, A, C = first_json(scope["body"]), first_json(ack["body"]), first_json(acp["body"])
+        expected_scope = {**S, "kind": "issue_comment", "issueId": scope["issueId"],
+                          "commentId": scope["id"], "authorAgentId": profile["scopeAgentId"]}
+        require(A["continuationScope"] == expected_scope and
+                C == {k: v for k, v in A["actualAcpReview"].items() if k != "documentRevisionId"} and
+                A["actualAcpReview"]["documentRevisionId"] == acp["latestRevisionId"] == S["actualAcpDocumentRevisionId"],
+                "job_scope_ack_acp_mismatch")
+        require(acp["updatedByAgentId"] == profile["scopeAgentId"], "job_acp_receipt_provenance_invalid")
+        for value in [S, A, C, A["nativeReview"]]:
+            require(value["wholePacketSha256"] == job["packetSha256"], "job_review_packet_mismatch")
+        contract = packet.contract
+        require(A["candidate"] == profile["candidate"] and A["continuationId"] == packet.trial["continuationId"] and
+                A["attempt"] == A["maxAttempts"] == 1 and
+                A["mode"] == S["mode"] == C["mode"] == contract["mode"] and
+                contract["mode"] in profile["allowedModes"] and
+                S["decision"] == contract["remainingScopeDecision"] and
+                A["phaseOrder"] == contract["phaseOrder"], "job_execution_scope_mismatch")
+        require(A["scopeContractSha256"] == packet.file_sha(packet.directory + "/scope-contract.json") and
+                A["recipeManifestSha256"] == packet.file_sha(packet.directory + "/reviewed-manifest.json") and
+                A["casePackageSha256"] == packet.file_sha(packet.case_name), "job_execution_hash_mismatch")
+        require(S["targetDocumentRevisionId"] == C["targetDocumentRevisionId"] ==
+                A["nativeReview"]["targetDocumentRevisionId"] == target["latestRevisionId"], "job_review_target_superseded")
+        require(S["verdictDocumentRevisionId"] == C["verdictDocumentRevisionId"] ==
+                A["nativeReview"]["documentRevisionId"], "job_verdict_identity_mismatch")
+        verdict = self.native.read(f'/api/issues/{job["taskId"]}/documents/{profile["reviewDocumentKey"]}')
+        require(verdict["latestRevisionId"] == C["verdictDocumentRevisionId"], "job_verdict_superseded")
+        interactions = self.native.read(f'/api/issues/{job["taskId"]}/interactions')
+        matches = [x for x in interactions if x["id"] == S["nativeReviewInteractionId"] == C["interactionId"]]
+        require(len(matches) == 1, "job_native_review_missing")
+        review = matches[0]
+        require(review["status"] == review["result"]["outcome"] == "accepted" and
+                review["resolvedByRunId"] == C["reviewerRunId"] == A["nativeReview"]["resolvedByRunId"] and
+                review["resolvedByAgentId"] == C["reviewerAgentId"] == A["nativeReview"]["resolvedByAgentId"] and
+                review["resolvedByAgentId"] in profile["reviewerAgentIds"] and
+                review["createdByAgentId"] == job["agentId"] and
+                review["effectiveResolverPolicy"] == "not_creator" and
+                review["payload"]["target"]["revisionId"] == target["latestRevisionId"], "job_independent_review_invalid")
+        source = profile["sourceAuthority"]
+        require(S["acceptedSourceLineage"] == source["sourceLineage"]["contract"] and
+                A["sourceLineageHistoricalEvidence"] == {k: source["sourceLineage"][k] for k in
+                    ["historicalPacketSha256", "documentationErrataSha256"]}, "job_source_lineage_mismatch")
+        authors = packet.json("author-provider-ledger.json")["rows"]
+        ids = {x["runId"] for x in authors} | {C["reviewerRunId"], scope["createdByRunId"], ack["createdByRunId"], job["sourceRunId"]}
+        records = self.native.metadata(job["companyId"], sorted(ids), list(profile["sourceDecisionFingerprints"]))
+        runs = {x["id"]: x for x in records if x["kind"] == "run"}
+        require(set(runs) == ids, "job_run_attestation_missing")
+        actual = runs[C["reviewerRunId"]]
+        require(actual["status"] == "succeeded" and actual["agent"] == C["reviewerAgentId"] and
+                actual["provider"] == C["provider"] == "anthropic" and actual["actualACP"] is True and
+                actual["before"] == actual["after"] == C["sessionId"] == profile['savedSessions'][actual['agent']] and
+                instant(actual["finished"]) < instant(scope["createdAt"]), "job_actual_acp_not_verified")
+        for author in authors:
+            row = runs[author["runId"]]
+            require(row["provider"] == author["aiConnection.provider"] and row["provider"] != actual["provider"] and
+                    row["agent"] != actual["agent"], "job_review_not_independent")
+        for identity, actor in [(scope["createdByRunId"], profile["scopeAgentId"]),
+                                (ack["createdByRunId"], job["agentId"]), (job["sourceRunId"], job["agentId"])]:
+            row = runs[identity]
+            require(row["agent"] == actor and row["status"] == "succeeded" and row["before"] and
+                    row["before"] == row["after"] == profile["savedSessions"][actor], "job_session_or_source_run_not_settled")
+        decisions = {x["id"]: {k: v for k, v in x.items() if k != "kind"} for x in records if x["kind"] == "decision"}
+        require(decisions == profile["sourceDecisionFingerprints"], "job_source_decisions_changed")
+        A["remainingCaseContractSha256"] = A["scopeContractSha256"]
+        A.update(schema=packet.authority_schema, operatorVerifiedAuthorities=True, harnessIssueId=job["taskId"],
+                 underlyingImplementerProvider=authors[-1]["aiConnection.provider"], underlyingReviewerProvider=actual["provider"],
+                 remainingScopeDecision=S["decision"], phpTestCalls=0, sourceCopies=0, dependencyCopies=0,
+                 baselineSourceApproval=copy.deepcopy(source["baselineSourceApproval"]), sourceLineage=copy.deepcopy(source["sourceLineage"]),
+                 qaAcknowledgement={"kind": "issue_comment", "issueId": job["taskId"], "commentId": ack["id"],
+                                    "authorAgentId": job["agentId"], "wholePacketSha256": job["packetSha256"]})
+        keys = ["nativeReview", "continuationScope", "baselineSourceApproval", "sourceLineage", "qaAcknowledgement", "actualAcpReview",
+                "wholePacketSha256", "casePackageSha256", "recipeManifestSha256", "remainingCaseContractSha256", "remainingScopeDecision",
+                "continuationId", "harnessIssueId", "attempt", "maxAttempts", "phpTestCalls", "sourceCopies", "dependencyCopies"]
+        B = {k: A[k] for k in keys}
+        B.update(mode=A["mode"], functionalCasesStarted=A["functionalCasesStarted"], featurePassed=A["featurePassed"],
+                 nativeScopeCommentId=scope["id"], trialId=packet.trial["trialId"], candidate=profile["candidate"], approved=True)
+        require(len(canonical(A)) < 32768 and len(canonical(B)) < 32768, "job_authority_record_too_large")
+        return {"authority": A, "admission": B, "nativeBindingsSha256": digest([S, A["actualAcpReview"], decisions])}
