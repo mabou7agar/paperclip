@@ -1,0 +1,22 @@
+meta {
+  name: Runner completion hint
+  type: http
+  seq: 1
+}
+post {
+  url: {{baseUrl}}/api/plugins/{{pluginId}}/webhooks/terminal
+  body: json
+  auth: none
+}
+body:json {
+  { "jobId": "{{jobId}}" }
+}
+tests {
+  test("Hint is accepted; actual evidence is fetched from the operator broker", function () {
+    expect(res.getStatus()).to.be.within(200, 299);
+  });
+}
+docs {
+  A hint cannot provide outcome, task, command or authority. Use only a retained
+  job; this request does not authorize or start a second execution.
+}

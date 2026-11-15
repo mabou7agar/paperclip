@@ -935,9 +935,11 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
           return callHost("issues.requestWakeup", {
             issueId,
             companyId,
+            durable: options?.durable,
             reason: options?.reason,
             contextSource: options?.contextSource,
             idempotencyKey: options?.idempotencyKey,
+            expectedAssigneeAgentId: options?.expectedAssigneeAgentId,
             actorAgentId: options?.actorAgentId,
             actorUserId: options?.actorUserId,
             actorRunId: options?.actorRunId,
@@ -948,6 +950,7 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
           return callHost("issues.requestWakeups", {
             issueIds,
             companyId,
+            durable: options?.durable,
             reason: options?.reason,
             contextSource: options?.contextSource,
             idempotencyKeyPrefix: options?.idempotencyKeyPrefix,

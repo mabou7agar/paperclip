@@ -1,0 +1,28 @@
+meta {
+  name: Read retained runner job over operator IPC
+  type: http
+  seq: 2
+}
+post {
+  url: {{brokerBaseUrl}}/api/v1/broker
+  body: json
+  auth: none
+}
+headers {
+  X-Paperclip-Runner-Plugin: paperclip.ubuntu-runner-results
+  X-Paperclip-Runner-Signature: {{serviceSignature}}
+}
+body:json {
+  { "operation": "status", "input": { "jobId": "{{jobId}}", "companyId": "{{companyId}}", "agentId": "{{agentId}}" } }
+}
+tests {
+  test("Saved job identity matches", function () {
+    expect(res.getStatus()).to.equal(200);
+    expect(res.getBody().jobId).to.equal(bru.getVar("jobId"));
+  });
+}
+docs {
+  Operator IPC only. The production broker binds a Unix socket, not TCP. Use
+  curl --unix-socket /opt/paperclip-runner-ipc/broker.sock with this body; do not
+  expose a TCP proxy. The tools-only e2e journey retains actual curl receipts.
+}

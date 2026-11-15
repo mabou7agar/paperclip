@@ -1,0 +1,243 @@
+---
+title: Ubuntu runner results
+---
+
+## Flow and ownership
+
+An agent invokes `submit-runner-job` once during its existing task run and ends
+that turn with a concrete runner wait. The operator broker saves immutable
+company/project/task/agent/packet/review bindings before returning a job ID. It
+waits for that source run to settle with its compatible saved session, verifies
+current independent native records and owns one remote execution identity.
+
+The execution host retains an exclusive attempt marker and systemd unit. A lost
+SSH response or broker restart reattaches to that exact job. It never replaces
+the marker or starts the controller again. Uncertain termination/cleanup remains
+quarantined and blocks new admission until positive retained evidence resolves
+it. A new packet, timestamp, job ID or arbitrary commit is not failure progress.
+
+A completion hint contains only `jobId`. The plugin obtains the measured result
+from the operator Unix socket, saves an immutable task document, then requests a
+durable, keyed native wake. Paperclip's normal pause, dependency, budget, execution and
+review guards still apply. An optional `expectedAssigneeAgentId` also prevents a result from waking a new
+owner after a reassignment race. The existing task/provider session and plan remain
+owned by native admission; the plugin never writes assignment, review counters or session rows.
+An unchanged failure uses the native SDK update service to enter a visible
+blocked wait once; it does not wake the worker again. The normal lead/review/CTO handoff remains unchanged.
+
+Duplicate hints and lost acknowledgements reuse the document and the original
+native wake receipt/run. A new closed diagnostic or actual gate result may cause
+one new continuation; the same unresolved failure is recorded without another
+wake. Delivery retries never execute tests or call a provider themselves.
+
+## Configuration and installation
+
+Build the small plugin/Python release with `result-bridge/build.mjs`. Independently
+pin `release-manifest.json` after final review. Run the reviewed `install.py`
+with source directory, that manifest SHA-256 and role `broker` on the Paperclip
+host or `execution` on the existing Ubuntu host. This installs code only; it does
+not build/restart a container, register a plugin, change caps or grant permission
+to run a packet. Never install candidate-provided root code before review.
+
+The execution code is root-owned at `/opt/paperclip-ubuntu-runner-results`; its
+state is root-only `/var/lib/paperclip-ubuntu-runner-results`. Application and
+control/test subprocesses keep their registered non-root UID/GID and existing
+resource/admission boundaries.
+
+Provision a dedicated SSH identity for the broker. Authorize its public key only
+with `restrict,command="/usr/bin/python3 -I -B /opt/paperclip-ubuntu-runner-results/forced_remote.py"`.
+The forced command accepts only stage/launch/inspect/cancel/artifact operations
+and validated identities. It denies interactive shells, arbitrary paths, remote
+`--run`, forwarding and caller commands. Pin the independently verified host key;
+do not disable host verification or reuse an agent's credential.
+
+On the Paperclip host, provision a root-private native operator token file,
+root-private SSH key and known-hosts file, root-only state directory, and
+`/opt/paperclip-runner-ipc` owned by root with no group/world write. Mount that
+IPC directory read-only into the Paperclip container at
+`/paperclip/ubuntu-runner`; keep the IPC socket and a random 64-character hexadecimal `plugin-auth`
+credential file root-owned mode `0600`. The current adapter requires a root
+Paperclip plugin worker and non-root native agents. It checks Linux `SO_PEERCRED`
+and a per-request HMAC bound to the plugin identity and exact body. Shared Unix
+group membership grants no access. Do not add agents to that security principal
+or grant them the credential. Non-root plugin services need a separate isolated
+service-identity adapter; do not weaken these checks. Mount the built `plugin` directory read-only into that container
+and install it through the normal native `/api/plugins/install` management API.
+No agent receives the token, SSH private key or host Docker socket.
+
+The broker config is root-owned mode `0600` at
+`/etc/paperclip-runner-results/config.json`:
+
+```json
+{
+  "stateRoot": "/var/lib/paperclip-ubuntu-runner-results",
+  "socketPath": "/opt/paperclip-runner-ipc/broker.sock",
+  "socketGid": 0,
+  "pluginAuthFile": "/opt/paperclip-runner-ipc/plugin-auth",
+  "apiBaseUrl": "http://127.0.0.1:3100",
+  "tokenFile": "/etc/paperclip-runner-results/native-token",
+  "databaseContainer": "paperclip-database-1",
+  "databaseUser": "paperclip",
+  "databaseName": "paperclip",
+  "callbackUrl": "http://127.0.0.1:3100/api/plugins/PLUGIN_UUID/webhooks/terminal",
+  "profiles": {}
+}
+```
+
+Fill `profiles` with reviewed operator policy; empty profiles are rejected.
+The schema in `broker/configuration.py:validate_profile` is authoritative.
+Each profile binds company/project/task IDs, worker/scope/reviewer IDs and their
+saved sessions, source decision fingerprints and accepted historical source
+lineage, exact document keys, candidate commit, authority/trial roots and
+continuation/execution patterns. Every non-variable trial field must match
+`fixedTrialFields`. Variable paths are derived and independently checked.
+Also configure the fixed remote installation/state paths, dedicated
+`sshIdentityFile`/`sshKnownHostsFile` and target, non-root UID/GID, concurrency
+`1`, allowed modes, prepared image digest, `allowControlChecks` and exact
+`controlInputs`, `allowReviewedController`, `privilegedCodeDigests` and
+`privilegedCodeApproval`. Changing policy cannot silently reinterpret an admitted job.
+
+Enable profile names per company through the native plugin configuration,
+for example `{"profiles":["synthetic-preview"]}`. Company config cannot choose
+hosts, paths, credentials, commands or higher concurrency. Restart the broker
+through its systemd service after validated operator configuration. A paused or
+disabled plugin retains pending deliveries for later recovery. Pre-dispatch
+source, pause and dependency waits remain queued; one passive observation
+returns immediately so another job is not stranded behind a six-minute wait.
+Execution ownership is scoped to the actual registered host/runner slot.
+
+The API URL and completion URL must use the same loopback origin. Current native
+management/webhook routes retain their host API paths for compatibility. The
+private broker transport is versioned `POST /api/v1/broker` over Unix IPC, never a
+public execution endpoint. Bruno examples are in `/bruno/UbuntuRunner`.
+
+## Review, resumption and evidence
+
+On a failed result the native worker diagnoses the retained closed facts, makes
+only an evidence-supported correction, obtains the required independent final
+review and new scope/acknowledgement, then submits only affected failed or unrun
+work. An unchanged submission returns the original job. Passed controls with
+matching recipe, inputs, image and UID/GID are reused; retained application
+proofs are governed by the reviewed packet's explicit reuse contract. This
+integration does not itself decide that arbitrary tests remain valid.
+
+Sanitized PNG, WebM and JSON files are exported only from the exact driver-bound
+root-retained public manifest. Private logs, credentials, raw database values and
+provider reasoning are never exported. Bytes/digests are verified again across
+SSH and native upload; existing matching attachments are reused after response
+loss. Evidence remains inside protected native task attachments. A diagnostic
+result does not imply feature acceptance, complete plan coverage or successful
+video capture. Missing or oversized evidence stays an explicit gap.
+
+The minute job and broker recovery timer deliver persisted facts and inspect
+existing jobs only. They do not wake an unchanged failure, run tests again,
+restart models, restore Watchdog, waive review or bypass an approval/access hold.
+
+## Rollback and validation
+
+Disable the native plugin to stop new submissions and result delivery; retain
+its pending outbox. Stop the broker to stop new admission. Do not delete remote
+attempts, receipts, SQLite state or native sessions. Already admitted remote
+work keeps its existing execution/cleanup identity. Inspect/reconcile it before
+removing service code. Do not reset an unknown attempt as a rollback shortcut.
+
+The manifest requires the `issues.wakeup.durable` host capability. A stock host without it must reject installation rather than silently ignore durable admission. Legacy keyed wakes keep their existing behavior.
+
+The native core addition is opt-in (`durable: true`) keyed plugin receipt admission using the
+existing wake-request primary key. Existing keyed and unkeyed SDK calls are unchanged unless they opt in. Exact,
+unambiguous older random-ID receipts are reused; ambiguous or changed identities
+fail with named conflicts. No database schema migration is required.
+
+## Privileged template acceptance
+
+The packet cannot supply arbitrary root Python. For `reviewed_controller`, the
+broker and execution host both require the exact operator-registered Python
+inventory/digests in `privilegedCodeDigests`. Only the validated attempt prefix
+is normalized to `{key}`; other bytes must match. Native extension modules,
+bytecode, import-hook files and package directories are forbidden. This adapter
+keeps root host orchestration separate from the fixed non-root application/test
+commands inside the registered templates.
+
+A lead's packet review is insufficient to accept that root boundary. The
+configured `privilegedCodeApproval` identifies an independent Security task
+(`issueId`, `documentKey`, `reviewerAgentId`). Its current reviewer-authored
+native document must contain:
+
+```json
+{
+  "kind": "operator_root_template",
+  "approved": true,
+  "companyId": "REGISTERED_COMPANY_UUID",
+  "projectId": "REGISTERED_PROJECT_UUID",
+  "codeManifestSha256": "SHA256_OF_CANONICAL_PRIVILEGED_CODE_DIGESTS",
+  "reviewerRunId": "ACTUAL_SUCCESSFUL_SECURITY_RUN_UUID"
+}
+```
+
+The broker verifies actual native run ownership, task, successful completion and
+chronology. The CTO's scope and worker acknowledgement must both carry the same
+`rootPrivilegeAcceptance` reference: `kind: issue_document_revision`, issue ID,
+document key, exact revision ID, independent reviewer agent ID and code-manifest
+SHA. This is an explicit privilege acceptance, not a fabricated execution
+approval or an inference from a source review. Until it exists, no controller
+runs. Existing access/installation/deployment holds still apply.
+
+The independent packet review also needs reviewer-authored JSON in the verdict:
+`wholePacketSha256`, `outcome: approved`, `reviewerRunId` and
+`targetDocumentRevisionId`. Native actor/run metadata and the current accepted
+interaction must match. Lead-authored copies alone cannot bind a packet to a
+review. The ACP command-name check is an attestation heuristic; it is combined
+with trusted native actor/provider/run records and the reviewer-authored verdict,
+not treated as a cryptographic provider signature.
+
+## Reconciling exceptional ownership
+
+A source/API/SSH failure before confirmed staging leaves a queued job, not a
+spent proof. Staging is published atomically. A staged recovery revalidates the
+whole current review/scope before its first launch. A missing attempt marker
+and no pending/running unit is a positive pre-dispatch observation; releasing
+that admission wait does not reset a test attempt. Missing confirmed remote
+state after an ambiguous launch remains a named identity-loss hold.
+
+The execution host can reconcile a terminated pure-control unit by its exact
+container labels. It gets one cleanup attempt and never starts its tests again.
+A lost cleanup response can be resolved by a healthy, exact absence check. A
+foreign container identity is not removed. Controller cleanup must have matching
+retained driver/audit evidence. Generic retries cannot manufacture that evidence.
+The unit uses mixed termination: signal the root owner first, allow its bounded
+finally/cleanup grace, then fence remaining owned processes.
+
+If positive cleanup evidence cannot be obtained, keep the quarantine. The first
+new measured unknown outcome gets one normal worker reconciliation turn; the
+bridge does not send a separate lead alert for an unchanged quarantine. Its
+remaining signal is the retained result document and the private operator
+reconciliation procedure. An operator may inspect the original retained unit,
+job plan, attempt, driver and cleanup ledger with normal private administrative
+access, correct an actual cleanup defect under review, and reconcile only the
+original owned resources. Then the normal passive reader publishes the new
+receipt. Never remove attempt markers, clear session state, relaunch a test or
+modify a native review/approval to resolve an ownership gap.
+
+
+Root-template Security acceptance covers how the pinned code treats all unpinned
+JSON/case data, not just Python hashes. Its current revision must actually be
+written by the cited reviewer run. This is an independent privilege decision;
+it does not replace the whole-packet Claude ACP code review on a different
+provider from its implementers. Qualification must record actual plugin-worker
+UID 0 and native-agent non-root UIDs. Private HMAC replay by root is within the
+trusted operator boundary; requests are idempotent, not freshness assertions.
+
+Systemd launch uses `--no-block` with retained unit identity, explicit `Restart=no`, and `TimeoutStartSec=2140` for the bounded oneshot activation (`RuntimeMaxSec` does not bound oneshot work). Lost launch,
+inspection or cancellation transport stays an internal observation wait. It
+emits no terminal result or agent wake. Only positive remote evidence may
+publish an unknown outcome, and unknown outcomes never self-block the task.
+
+
+Cancellation is acknowledged durably only after the remote unit manager accepts
+the stop request. A lost acknowledgement is reconciled on the next positive
+observation of that same unit; an active unit may receive the same idempotent
+stop again, within its original fixed lifetime. This never starts a test or a
+provider. Confirmed stops are not reissued. Current native pause, reassignment,
+cancellation or execution holds intentionally request cancellation of admitted
+work. Artifact transfer failures retain their internal evidence-delivery wait,
+including when cleanup is incomplete; they do not invent another unknown result.

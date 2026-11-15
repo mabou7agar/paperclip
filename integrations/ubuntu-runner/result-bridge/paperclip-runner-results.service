@@ -1,0 +1,23 @@
+[Unit]
+Description=Paperclip registered Ubuntu job results
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+UMask=0077
+ExecStart=/usr/bin/python3 -I -B /opt/paperclip-ubuntu-runner-results/server.py /etc/paperclip-runner-results/config.json
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=45
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/paperclip-ubuntu-runner-results /opt/paperclip-runner-ipc
+
+[Install]
+WantedBy=multi-user.target

@@ -1,5 +1,6 @@
 import { completionReceiptSourceReady, taskCompletionReceiptState, TASK_COMPLETION_RECEIPT_REASON } from "../task-completion-receipts.js";
 import { addressedInteractionWakeState } from "../addressed-interaction-wake.js";
+import { assertPluginWakeupReceipt, isPluginWakeupReceiptCollision } from "../plugin-wakeup-receipts.js";
 import { monitoringService } from "../monitoring.js";
 import { verifyBlockerStallWake } from "../recovery/blocker-stall-wakeups.js";
 import { CONTEXT_COMPACTION_WAKE_REASON, ContextCompactionError, isContextCompactionRun, readContextCompactionRequest } from "../context-compaction.js";
@@ -2347,7 +2348,14 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     agentId: string,
     opts: WakeupOptions = {},
   ): ReturnType<typeof enqueueWakeup> {
-    const promise = enqueueWakeup(agentId, opts);
+    const promise = enqueueWakeup(agentId, opts).catch(async error => {
+      if (!opts.durablePluginRequest || !isPluginWakeupReceiptCollision(error)) throw error;
+      const [receipt] = await db.select().from(agentWakeupRequests)
+        .where(eq(agentWakeupRequests.id, opts.durablePluginRequest.id)).limit(1);
+      if (!receipt) throw error;
+      assertPluginWakeupReceipt(opts.durablePluginRequest, receipt);
+      return receipt.runId ? getRun(receipt.runId) : null;
+    });
     activeWakeupPromises.add(promise);
     void promise
       .catch(() => {})
@@ -2574,7 +2582,17 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         opts.idempotencyKey !== museRequest.idempotencyKey)) {
       throw conflict("Muse work request does not match its admission authority.");
     }
-    const receiptRequest = durableRequest ?? dotRequest ?? museRequest ?? caseReceipt;
+    const pluginRequest = opts.durablePluginRequest;
+    if (pluginRequest && (durableRequest || dotRequest || museRequest || caseRequest ||
+        pluginRequest.companyId !== agent.companyId || pluginRequest.agentId !== agentId ||
+        pluginRequest.issueId !== issueId || source !== "assignment" ||
+        opts.requestedByActorType !== "system" || opts.requestedByActorId !== pluginRequest.pluginId ||
+        payload?.pluginId !== pluginRequest.pluginId || payload?.pluginWakeupDigest !== pluginRequest.digest ||
+        payload?.contextSource !== pluginRequest.contextSource || reason !== pluginRequest.reason ||
+        opts.idempotencyKey !== pluginRequest.idempotencyKey)) {
+      throw conflict("Plugin wakeup does not match its admission authority");
+    }
+    const receiptRequest = durableRequest ?? dotRequest ?? museRequest ?? caseReceipt ?? pluginRequest;
     const durableReceiptFields = receiptRequest
       ? { id: receiptRequest.id, requestedAt: receiptRequest.requestedAt }
       : {};
@@ -2587,6 +2605,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         .limit(1)
         .then((rows) => rows[0] ?? null);
       if (receipt && durableRequest) assertDurableChatWakeupReceipt(durableRequest, receipt);
+      if (receipt && pluginRequest) assertPluginWakeupReceipt(pluginRequest, receipt);
       if (receipt && caseRequest && (receipt.companyId !== agent.companyId || receipt.agentId !== agentId ||
           receipt.payload?.issueId !== caseRequest.issueId || receipt.idempotencyKey !== `case-handoff:${caseRequest.handoffId}`))
         throw conflict("Case handoff wake receipt identity changed");

@@ -793,6 +793,8 @@ export async function resolveRunScopedMentionedSkillKeys(input: {
 
 
 export interface WakeupOptions {
+  /** Authenticated plugin SDK intent. Never copied from public request bodies. */
+  durablePluginRequest?: import("../plugin-wakeup-receipts.js").PluginWakeupReceipt;
   /** Internal durable case assignment receipt. Never accepted from public wake payloads. */
   durableCaseHandoffRequest?: { handoffId: string; wakeupRequestId: string; issueId: string; expectedIssueStatusVersion: number };
   /** Set only by authenticated board wake routes; never copied from caller payloads. */

@@ -1556,15 +1556,21 @@ export interface PluginIssuesClient {
     issueId: string,
     companyId: string,
     options?: {
+      /** Opt in to one durable delivery per company/plugin/key. Legacy keyed calls are unchanged. */
+      durable?: boolean;
       reason?: string;
       contextSource?: string;
       idempotencyKey?: string | null;
+      /** Refuse delivery if task ownership changed since the result was produced. */
+      expectedAssigneeAgentId?: string;
     } & PluginIssueMutationActor,
   ): Promise<PluginIssueWakeupResult>;
   requestWakeups(
     issueIds: string[],
     companyId: string,
     options?: {
+      /** Opt in to one durable delivery per company/plugin/key. Legacy keyed calls are unchanged. */
+      durable?: boolean;
       reason?: string;
       contextSource?: string;
       idempotencyKeyPrefix?: string | null;
