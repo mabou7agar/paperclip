@@ -131,7 +131,7 @@ separate root-owned directory at `/opt/paperclip-runner-wake` contains only a
 writeable hint socket. Create it before starting the native broker; add it to
 the broker service's allowed write paths and mount it at the same public path
 in the application. It contains no credential or signed response. Confined
-agents cannot open it. A hint carries only company/job/source-run/task IDs, never execution authority.
+agents cannot authenticate a hint. A hint carries only company/job/source-run/task IDs, never execution authority.
 The socket verifies both the application UID and the kernel-enforced control
 profile using `SO_PEERCRED`, the socket-bound `SO_PEERPIDFD`, and the pinned
 process’s kernel label. A shared UID alone is insufficient. This optional mode
