@@ -66,6 +66,10 @@ parent domain first.
 An unsupported provider remains unavailable; this setting does not silently
 weaken its permissions. The already isolated remote sandbox transport remains
 unchanged. Local CLI child processes use the same launch policy.
+Confined CLI children inherit only ordinary host paths, locale, proxy and trust
+settings. Credentials must come from the adapter's explicit launch environment;
+the server's database and unrelated secrets are not inherited. Deployments
+without the policy retain their previous environment contract.
 
 Qualify the actual native agent after rollout, not just `docker exec`: it must
 be unable to open the server environment, IPC pipes, vault or another agent's

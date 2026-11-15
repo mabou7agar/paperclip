@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { localAgentLaunchTarget, localAgentProtocolGuard, readLocalAgentLaunchPolicy,
-  runtimeUsesLocalAgentPolicy, rememberLocalAgentPolicy, assertLocalAgentLaunchEnvironment } from "./local-agent-launch-policy.js";
+  runtimeUsesLocalAgentPolicy, rememberLocalAgentPolicy, assertLocalAgentLaunchEnvironment, localAgentInheritedEnvironment } from "./local-agent-launch-policy.js";
 
 describe("operator local agent launch policy", () => {
   it("keeps absent deployments unchanged and never interprets command arguments as shell", () => {
@@ -40,5 +40,14 @@ describe("operator local agent launch policy", () => {
     }
     expect(()=>assertLocalAgentLaunchEnvironment({PATH:"/usr/bin",ANTHROPIC_API_KEY:"fixture"},policy)).not.toThrow();
     expect(()=>assertLocalAgentLaunchEnvironment({LD_PRELOAD:"legacy"},null)).not.toThrow();
+  });
+  it("does not pass host control-plane credentials into confined CLI children",()=>{
+    const host={PATH:"/usr/bin",HOME:"/work",LC_ALL:"C",HTTPS_PROXY:"https://proxy.example",DATABASE_URL:"host-db",
+      BETTER_AUTH_SECRET:"host-auth",UNRELATED_TOKEN:"host-token",NODE_OPTIONS:"--import=/host-code.js"};
+    const policy={kind:"apparmor" as const,executable:"/opt/aa-exec",profile:"paperclip-agent"};
+    const inherited=localAgentInheritedEnvironment(host,policy);
+    expect(inherited).toEqual({PATH:host.PATH,HOME:host.HOME,LC_ALL:host.LC_ALL,HTTPS_PROXY:host.HTTPS_PROXY});
+    expect({...inherited,...{ANTHROPIC_API_KEY:"explicit-adapter-grant"}}.ANTHROPIC_API_KEY).toBe("explicit-adapter-grant");
+    expect(localAgentInheritedEnvironment(host,null)).toEqual(host);
   });
 });

@@ -55,6 +55,15 @@ export function localAgentLaunchTarget(command: string, args: readonly string[],
     : { command, args: [...args] };
 }
 
+/** Confined CLI launches must not inherit the control-plane database or vault
+ * credentials. Provider/runtime credentials still enter through the adapter's
+ * explicit launch environment, as they already do for ACP. */
+export function localAgentInheritedEnvironment(environment:NodeJS.ProcessEnv, policy:LocalAgentLaunchPolicy | null):NodeJS.ProcessEnv {
+  if (!policy) return {...environment};
+  const safe = /^(PATH|HOME|USER|LOGNAME|SHELL|TMP|TEMP|TMPDIR|LANG|LANGUAGE|LC_[A-Z_]+|TERM|COLORTERM|CI|FORCE_COLOR|XDG_CONFIG_HOME|XDG_DATA_HOME|XDG_CACHE_HOME|SSL_CERT_FILE|SSL_CERT_DIR|NODE_EXTRA_CA_CERTS|HTTP_PROXY|HTTPS_PROXY|ALL_PROXY|NO_PROXY|http_proxy|https_proxy|all_proxy|no_proxy)$/;
+  return Object.fromEntries(Object.entries(environment).filter(([key])=>safe.test(key)));
+}
+
 export function assertLocalAgentLaunchEnvironment(environment: NodeJS.ProcessEnv | undefined, policy:LocalAgentLaunchPolicy | null): void {
   if (policy && Object.keys(environment ?? {}).some(key => environment?.[key] !== undefined &&
       (/^LD_/.test(key) || ["GLIBC_TUNABLES","GCONV_PATH","LOCPATH","NLSPATH"].includes(key)))) {
