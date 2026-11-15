@@ -44,9 +44,17 @@ class ReviewAdmissionService:
         require(issue["status"] in ["todo", "in_progress", "in_review"], "job_native_execution_hold")
         return issue
 
-    def controller(self, job, profile, packet):
-        self.binding(job, profile)
-        require(packet.trial['harnessIssueId'] == job['taskId'], 'job_packet_task_binding_invalid')
+    def revision_authored(self, issue_id, key, document, actor_id, run_id):
+        from contracts import UUID
+        require(UUID.fullmatch(document['latestRevisionId']) and UUID.fullmatch(run_id), 'job_document_revision_invalid')
+        revision = self.native.read(f"/api/issues/{issue_id}/documents/{key}/revisions/{document['latestRevisionId']}")
+        require(revision.get('id') == document['latestRevisionId'] and revision.get('isLatest') is True and
+                revision.get('issueId') == issue_id and revision.get('key') == key and
+                revision.get('companyId') == document['companyId'] and revision.get('body') == document['body'] and
+                revision.get('createdByAgentId') == actor_id and revision.get('createdByRunId') == run_id,
+                'job_document_revision_author_mismatch')
+
+    def root_approval(self, job, profile):
         # Root privilege is accepted independently for an exact operator code
         # template. A lead-authored packet review alone cannot grant it.
         root_policy = profile['privilegedCodeApproval']
@@ -62,6 +70,14 @@ class ReviewAdmissionService:
                 root_value.get('codeManifestSha256') == digest(profile['privilegedCodeDigests']))
         if not accepted:
             raise AdmissionWait('job_root_template_not_accepted')
+        self.revision_authored(root_policy['issueId'], root_policy['documentKey'], root_approval,
+                               root_policy['reviewerAgentId'], root_value['reviewerRunId'])
+        return root_policy, root_approval, root_value
+
+    def controller(self, job, profile, packet):
+        self.binding(job, profile)
+        require(packet.trial['harnessIssueId'] == job['taskId'], 'job_packet_task_binding_invalid')
+        root_policy, root_approval, root_value = self.root_approval(job, profile)
         scope = self.native.comment(job["scopeIssueId"], job["scopeCommentId"])
         ack = self.native.comment(job["taskId"], job["ackCommentId"])
         require(scope["companyId"] == ack["companyId"] == job["companyId"] and
@@ -106,6 +122,7 @@ class ReviewAdmissionService:
                 V['wholePacketSha256'] == job['packetSha256'] and V['outcome'] == 'approved' and
                 V['reviewerRunId'] == C['reviewerRunId'] and
                 V['targetDocumentRevisionId'] == target['latestRevisionId'], 'job_reviewer_packet_binding_missing')
+        self.revision_authored(job['taskId'], profile['reviewDocumentKey'], verdict, C['reviewerAgentId'], C['reviewerRunId'])
         interactions = self.native.read(f'/api/issues/{job["taskId"]}/interactions')
         matches = [x for x in interactions if x["id"] == S["nativeReviewInteractionId"] == C["interactionId"]]
         require(len(matches) == 1, "job_native_review_missing")

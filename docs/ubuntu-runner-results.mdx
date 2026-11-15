@@ -214,3 +214,17 @@ access, correct an actual cleanup defect under review, and reconcile only the
 original owned resources. Then the normal passive reader publishes the new
 receipt. Never remove attempt markers, clear session state, relaunch a test or
 modify a native review/approval to resolve an ownership gap.
+
+
+Root-template Security acceptance covers how the pinned code treats all unpinned
+JSON/case data, not just Python hashes. Its current revision must actually be
+written by the cited reviewer run. This is an independent privilege decision;
+it does not replace the whole-packet Claude ACP code review on a different
+provider from its implementers. Qualification must record actual plugin-worker
+UID 0 and native-agent non-root UIDs. Private HMAC replay by root is within the
+trusted operator boundary; requests are idempotent, not freshness assertions.
+
+Systemd launch uses `--no-block` with retained unit identity, explicit `Restart=no`, and `TimeoutStartSec=2140` for the bounded oneshot activation (`RuntimeMaxSec` does not bound oneshot work). Lost launch,
+inspection or cancellation transport stays an internal observation wait. It
+emits no terminal result or agent wake. Only positive remote evidence may
+publish an unknown outcome, and unknown outcomes never self-block the task.

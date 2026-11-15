@@ -59,7 +59,7 @@ export class ResultService {
       // A repeated failure is a visible native wait, not an in-progress task
       // silently awaiting a callback that we deliberately suppress. The common
       // SDK update service preserves execution/review/session ownership.
-      if (issue.status !== 'blocked') await this.ctx.issues.update(issue.id, { status: 'blocked' }, result.companyId);
+      if (result.status !== 'unknown' && issue.status !== 'blocked') await this.ctx.issues.update(issue.id, { status: 'blocked' }, result.companyId);
       return this.broker.call('acknowledge', { jobId, receiptSha256: result.receiptSha256, disposition: 'recorded_only' });
     }
     const wake = await this.ctx.issues.requestWakeup(issue.id, result.companyId, {

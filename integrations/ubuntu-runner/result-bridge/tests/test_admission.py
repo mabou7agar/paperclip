@@ -52,10 +52,10 @@ def fixture():
     scope['body'] = body(S)
     ack = {'id': job['ackCommentId'], 'issueId': job['taskId'], 'companyId': job['companyId'], 'authorAgentId': job['agentId'],
            'createdByRunId': ack_run, 'createdAt': '2026-11-15T12:04:00Z', 'deletedAt': None, 'body': body(A)}
-    documents = {'target': {'latestRevisionId': target}, 'verdict': {'latestRevisionId': verdict, 'updatedByAgentId': reviewer,
+    documents = {'target': {'latestRevisionId': target}, 'verdict': {'companyId': job['companyId'], 'latestRevisionId': verdict, 'updatedByAgentId': reviewer, 'updatedByRunId': review_run,
                      'body': body({'wholePacketSha256': job['packetSha256'], 'outcome': 'approved', 'reviewerRunId': review_run, 'targetDocumentRevisionId': target})},
                  'actual-review': {'latestRevisionId': acp, 'updatedByAgentId': lead, 'body': body(C)}}
-    documents['root-template'] = {'companyId': job['companyId'], 'latestRevisionId': security_revision, 'updatedByAgentId': security,
+    documents['root-template'] = {'companyId': job['companyId'], 'latestRevisionId': security_revision, 'updatedByAgentId': security, 'updatedByRunId': security_run,
         'body': body({'kind': 'operator_root_template', 'approved': True, 'companyId': job['companyId'], 'projectId': job['projectId'],
                       'codeManifestSha256': root_acceptance['codeManifestSha256'], 'reviewerRunId': security_run})}
     review = {'id': interaction, 'status': 'accepted', 'result': {'outcome': 'accepted'}, 'resolvedByRunId': review_run,
@@ -74,6 +74,11 @@ def fixture():
     gates = {'companyActive': True, 'projectActive': True, 'pauseHeld': False}
     def read(path):
         if path.endswith('/interactions'): return [review]
+        if '/revisions/' in path:
+            parts = path.split('/'); document = documents[parts[-3]]
+            return {'id': document['latestRevisionId'], 'isLatest': True, 'issueId': parts[3], 'key': parts[-3],
+                'companyId': job['companyId'], 'body': document['body'], 'createdByAgentId': document['updatedByAgentId'],
+                'createdByRunId': document.get('updatedByRunId')}
         if '/documents/' in path: return documents[path.split('/')[-1]]
         if '/agents/' in path: return {'companyId': job['companyId'], 'status': 'idle'}
         return issue
@@ -105,6 +110,8 @@ class AdmissionTests(unittest.TestCase):
             lambda f: f.review.update(effectiveResolverPolicy='creator'),
             lambda f: f.documents['verdict'].update(updatedByAgentId=f.profile['scopeAgentId']),
             lambda f: f.documents['root-template'].update(updatedByAgentId=f.profile['scopeAgentId']),
+            lambda f: f.documents['root-template'].update(updatedByRunId=str(uuid.uuid4())),
+            lambda f: f.documents['verdict'].update(updatedByRunId=str(uuid.uuid4())),
             lambda f: f.documents['root-template'].update(body='```json\n{}\n```'),
             lambda f: f.records[1].update(actualACP=False), lambda f: f.records[1].update(provider='openai'),
             lambda f: f.records[1].update(after='new-unexpected-session'),

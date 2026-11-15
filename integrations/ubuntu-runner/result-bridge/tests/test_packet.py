@@ -10,7 +10,7 @@ from packet import Packet
 from contracts import Refusal
 
 
-def fixture(patch=None, extra=None, source_patch=None):
+def fixture(patch=None, extra=None, source_patch=None, prefix='q1'):
     root = '/tmp/example-owner'
     profile = {'candidate': 'f' * 40, 'authorityRoot': root, 'trialRoot': '/tmp/example-trial',
                'fixedTrialFields': {'uid': 1001}, 'continuationPattern': r'candidate-q[0-9]+',
@@ -30,6 +30,10 @@ def fixture(patch=None, extra=None, source_patch=None):
              'qualification-q1/execute_qualification.py': b'print("data-only q1")\n'}
     profile['privilegedCodeDigests'] = {'execute_qualification.py': hashlib.sha256(files['qualification-q1/execute_qualification.py'].replace(b'q1', b'{key}')).hexdigest()}
     if source_patch: files.update(source_patch)
+    if prefix != 'q1':
+        files = {name.replace('q1', prefix): raw.replace(b'q1', prefix.encode()) for name, raw in files.items()}
+        profile['continuationPattern'] = r'candidate-' + __import__('re').escape(prefix)
+        profile['executionIdPattern'] = r'example-' + __import__('re').escape(prefix)
     manifest = {name: {'bytes': len(raw), 'sha256': hashlib.sha256(raw).hexdigest()} for name, raw in files.items()}
     files.update({'manifest.json': json.dumps({'files': manifest}).encode(), 'SHA256SUMS': b'index'})
     stream = io.BytesIO()
@@ -78,3 +82,8 @@ class PrivilegedCodeTests(unittest.TestCase):
                        {'qualification-q1/import-package/__init__.py': b'import os'}]:
             raw, sha, profile = fixture(source_patch=source)
             with self.subTest(source=list(source)), self.assertRaises(Refusal): Packet(raw, sha, profile, privileged=True)
+
+    def test_root_code_prefix_cannot_change_python_grammar(self):
+        raw, sha, profile = fixture(prefix='q-1')
+        with self.assertRaisesRegex(Refusal, 'packet_privileged_prefix_invalid'):
+            Packet(raw, sha, profile, privileged=True)

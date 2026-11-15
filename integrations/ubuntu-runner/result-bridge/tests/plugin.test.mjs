@@ -118,3 +118,10 @@ test('submission binds company/project/assignee and current native checkout, nev
   await assert.rejects(f.service().submit(input, { ...f.run, companyId: randomUUID() }), /ownership_changed/);
   await assert.rejects(f.service().submit(input, { ...f.run, agentId: randomUUID() }), /ownership_changed/);
 });
+
+
+test('repeated unknown observations never self-block an admitted execution', async () => {
+  const f = fixture(); f.result.status = 'unknown'; f.result.newEvidence = false;
+  await f.service().deliver(f.result.jobId);
+  assert.equal(f.providers, 0); assert.equal(f.issue.status, 'in_progress');
+});

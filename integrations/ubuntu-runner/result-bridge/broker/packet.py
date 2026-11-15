@@ -67,6 +67,7 @@ class Packet:
         require(self.case_name in self.files and self.trial["continuationAttempt"] == self.trial["maxContinuationAttempts"] == 1,
                 "packet_attempt_boundary_invalid")
         if privileged:
+            require(re.fullmatch(r'[a-z][a-z0-9_]{0,31}', prefix), 'packet_privileged_prefix_invalid')
             # Only operator-registered Python templates may execute as root.
             # Prefix substitution changes bounded data identities, never free
             # code. No extension modules, bytecode, packages or import hooks.

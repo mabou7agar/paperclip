@@ -58,11 +58,13 @@ class JobTests(unittest.TestCase):
         self.assertEqual(self.repo.pending(), [identity])
         self.native.notify.assert_called_once_with(identity)
 
-    def test_ambiguous_transport_is_quarantined_then_read_only_reconciled(self):
+    def test_ambiguous_launch_transport_waits_then_read_only_reconciles_without_a_wake(self):
         identity = self.register()
         self.remote.launch.side_effect = Refusal('remote_transport_unconfirmed')
         self.service.execute(identity)
-        self.assertEqual(self.repo.get(identity)['state'], 'quarantined')
+        self.assertEqual(self.repo.get(identity)['state'], 'launching')
+        self.assertIsNone(self.repo.get(identity)['result'])
+        self.native.notify.assert_not_called()
         self.remote.launch.assert_called_once()
         self.terminal()
         self.service.execute(identity)
@@ -138,3 +140,31 @@ class JobTests(unittest.TestCase):
         self.remote.inspect.assert_called_once()
         self.remote.launch.assert_not_called()
         self.assertEqual(self.repo.get(identity)['state'], 'launching')
+
+    def test_lost_inspection_during_two_same_task_jobs_never_blocks_cancels_or_wakes(self):
+        for index in range(2):
+            identity = self.register({**self.request, 'packetSha256': str(index + 1) * 64})
+            self.repo.claim(identity)
+            self.remote.inspect.side_effect = Refusal('remote_transport_unconfirmed')
+            self.service.execute(identity)
+            saved = self.repo.get(identity)
+            self.assertEqual(saved['state'], 'launching')
+            self.assertEqual(saved['wait_code'], 'remote_observation_pending')
+            self.assertIsNone(saved['result'])
+            self.remote.cancel.assert_not_called()
+            self.native.notify.assert_not_called()
+            self.remote.inspect.side_effect = None
+            self.terminal()
+            self.service.execute(identity)
+            self.assertEqual(self.repo.get(identity)['state'], 'terminal')
+            self.native.notify.reset_mock()
+        self.remote.launch.assert_not_called()
+
+    def test_missing_privilege_acceptance_does_not_download_or_parse_packet(self):
+        from contracts import AdmissionWait
+        identity = self.register()
+        self.service.admission.root_approval.side_effect = AdmissionWait('job_root_template_not_accepted')
+        self.service.execute(identity)
+        self.service.load_packet.assert_not_called()
+        self.assertEqual(self.repo.get(identity)['state'], 'queued')
+        self.native.notify.assert_not_called()

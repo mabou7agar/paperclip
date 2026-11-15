@@ -61,3 +61,16 @@ class RemoteWorkerTests(unittest.TestCase):
         with patch.object(worker.subprocess, 'run', return_value=SimpleNamespace(returncode=0)) as call:
             self.assertTrue(worker.cancel(self.identity)['cancellationRequested'])
             self.assertEqual(call.call_args.args[0], ['systemctl', 'stop', '--no-block', 'paperclip-runner-job-' + self.identity])
+
+    def test_systemd_launch_is_nonblocking_and_pending_unit_is_not_launched_twice(self):
+        with patch.object(worker, 'inspect', return_value={'phase': 'staged'}), patch.object(worker.subprocess, 'run', return_value=SimpleNamespace(returncode=0)) as call:
+            self.assertEqual(worker.launch(self.identity)['phase'], 'submitted')
+            self.assertIn('--no-block', call.call_args.args[0])
+            self.assertIn('--property=Type=oneshot', call.call_args.args[0])
+            self.assertIn('--property=TimeoutStartSec=2140', call.call_args.args[0])
+            self.assertIn('--property=Restart=no', call.call_args.args[0])
+            self.assertNotIn('--property=RuntimeMaxSec=2140', call.call_args.args[0])
+            self.assertEqual(call.call_args.kwargs['timeout'], 20)
+        with patch.object(worker, 'inspect', return_value={'phase': 'submitted'}), patch.object(worker.subprocess, 'run') as call:
+            self.assertEqual(worker.launch(self.identity)['phase'], 'submitted')
+            call.assert_not_called()

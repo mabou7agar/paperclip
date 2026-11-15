@@ -157,14 +157,14 @@ def launch(identity):
         os.chmod(lock.name, 0o600)
         fcntl.flock(lock, fcntl.LOCK_EX)
         state = inspect(identity)
-        if state['phase'] in ['terminal', 'attempted']:
+        if state['phase'] in ['terminal', 'attempted', 'submitted']:
             return state
         require((root / 'plan.json').is_file(), 'remote_plan_missing')
         # A retained unit name AND the exclusive attempt below prevent a late
         # or repeated launch RPC from executing the controller a second time.
-        result = subprocess.run(['systemd-run', '--quiet', '--unit=paperclip-runner-job-' + identity,
+        result = subprocess.run(['systemd-run', '--quiet', '--no-block', '--unit=paperclip-runner-job-' + identity,
                                  '--property=Type=oneshot', '--property=RemainAfterExit=yes',
-                                 '--property=UMask=0077', '--property=RuntimeMaxSec=2140', '--property=KillMode=mixed', '--property=TimeoutStopSec=660',
+                                 '--property=UMask=0077', '--property=Restart=no', '--property=TimeoutStartSec=2140', '--property=KillMode=mixed', '--property=TimeoutStopSec=660',
                                  sys.executable, '-I', '-B', str(INSTALL / 'remote_worker.py'), '--run', identity],
                                 capture_output=True, timeout=20)
         if result.returncode:

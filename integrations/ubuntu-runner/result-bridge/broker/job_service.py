@@ -80,6 +80,8 @@ class JobService:
 
     def prepare(self, request, profile):
         self.source_settled(request, profile)
+        if request['kind'] == 'reviewed_controller':
+            self.admission.root_approval(request, profile)
         packet = self.load_packet(request, profile)
         if request['kind'] == 'reviewed_controller':
             require(profile.get('allowReviewedController') is True, 'job_controller_not_enabled')
@@ -123,6 +125,11 @@ class JobService:
             self.repository.wait(identity, error.code)
         except Refusal as error:
             state = self.repository.get(identity)['state']
+            if state in ['launching', 'quarantined'] and error.code in ['remote_transport_unconfirmed', 'remote_launch_unconfirmed', 'remote_unit_identity_unavailable']:
+                # An SSH/client observation failure is not terminal evidence.
+                # Keep the same ownership/attempt and let passive inspection
+                # reconcile it; never wake or block the worker mid-execution.
+                return self.repository.wait(identity, 'remote_observation_pending')
             if state == 'delivering':
                 return self.repository.wait(identity, 'evidence_delivery_pending')
             if state == 'queued' and error.code in ['job_native_pause_hold', 'job_native_execution_hold', 'job_agent_unavailable', 'job_source_run_missing']:
@@ -136,7 +143,7 @@ class JobService:
             state = self.repository.get(identity)['state']
             if state in ['queued', 'delivering']:
                 return self.repository.wait(identity, 'native_or_delivery_transport_pending')
-            self.finish(identity, request, {'status': 'unknown', 'code': 'job_execution_unreconciled', 'kind': request['kind']})
+            return self.repository.wait(identity, 'remote_observation_pending')
 
     def follow(self, identity, request, profile):
         # One passive observation per recovery event. Do not hold the shared
