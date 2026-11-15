@@ -15,7 +15,7 @@ def arguments(command):
     operation = args[4]
     if operation == '--stage':
         require(len(args) == 5, 'ssh_stage_arguments_refused')
-    elif operation in ['--launch', '--inspect', '--cancel']:
+    elif operation in ['--launch', '--inspect', '--cancel', '--readiness']:
         require(len(args) == 6 and UUID.fullmatch(args[5]), 'ssh_job_arguments_refused')
     elif operation == '--artifact':
         require(len(args) == 7 and UUID.fullmatch(args[5]) and SHA.fullmatch(args[6]), 'ssh_artifact_arguments_refused')

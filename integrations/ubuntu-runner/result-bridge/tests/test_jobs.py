@@ -195,3 +195,52 @@ class JobTests(unittest.TestCase):
             self.assertIsNone(self.repo.get(identity)['result'])
             self.native.notify.assert_not_called()
             self.remote.launch.assert_not_called()
+
+    def test_positive_cleanup_and_audit_are_real_gate_progress_not_duplicate_failure(self):
+        self.profile['setupContainment'] = {'required': True}
+        identity = self.register()
+        first = {'status': 'failed', 'kind': 'reviewed_controller', 'code': 'fixture_failed',
+                 'cleanupComplete': False, 'auditComplete': False}
+        self.service.finish(identity, self.request, first)
+        original = self.repo.get(identity)['result']
+        self.service.finish(identity, self.request, {**first, 'cleanupComplete': True, 'auditComplete': True})
+        updated = self.repo.get(identity)['result']
+        self.assertNotEqual(original['fingerprint'], updated['fingerprint'])
+        self.assertTrue(updated['newEvidence'])
+        self.assertEqual(self.repo.get(identity)['state'], 'terminal')
+        self.remote.launch.assert_not_called()
+
+
+    def test_missing_remote_readiness_never_claims_an_execution_or_wakes_an_agent(self):
+        self.profile['setupContainment'] = {'required': True}
+        self.remote.readiness.return_value = {'ready': False, 'code': 'setup_readiness_not_accepted'}
+        identity = self.register()
+        with patch('supervision_policy.SetupOwnership.from_plan'):
+            self.service.execute(identity)
+        saved = self.repo.get(identity)
+        self.assertEqual(saved['state'], 'queued')
+        self.assertEqual(saved['wait_code'], 'runner_setup_readiness_pending')
+        self.assertIsNone(saved['result'])
+        self.remote.launch.assert_not_called()
+        self.native.notify.assert_not_called()
+
+    def test_invalid_setup_registration_waits_before_staging_or_attempt(self):
+        self.profile['setupContainment'] = {'required': True}
+        identity = self.register()
+        with patch('supervision_policy.SetupOwnership.from_plan', side_effect=Refusal('setup_account_invalid')):
+            self.service.execute(identity)
+        self.assertEqual(self.repo.get(identity)['state'], 'queued')
+        self.assertEqual(self.repo.get(identity)['wait_code'], 'runner_setup_configuration_invalid')
+        self.remote.stage.assert_not_called()
+        self.remote.launch.assert_not_called()
+        self.native.notify.assert_not_called()
+
+    def test_legacy_profile_keeps_its_previous_failure_fingerprint(self):
+        identity = self.register()
+        first = {'status': 'failed', 'kind': 'reviewed_controller', 'code': 'fixture_failed',
+                 'cleanupComplete': False, 'auditComplete': False}
+        self.service.finish(identity, self.request, first)
+        original = self.repo.get(identity)['result']
+        self.service.finish(identity, self.request, {**first, 'cleanupComplete': True, 'auditComplete': True})
+        self.assertEqual(original['fingerprint'], self.repo.get(identity)['result']['fingerprint'])
+        self.assertFalse(self.repo.get(identity)['result']['newEvidence'])

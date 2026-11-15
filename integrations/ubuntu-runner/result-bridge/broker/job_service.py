@@ -78,13 +78,17 @@ class JobService:
         require(row['status'] == 'succeeded' and row['before'] == row['after'] ==
                 profile['savedSessions'][request['agentId']], 'job_source_session_unsettled')
 
-    def prepare(self, request, profile):
+    def prepare(self, request, profile, identity):
         self.source_settled(request, profile)
         if request['kind'] == 'reviewed_controller':
             self.admission.root_approval(request, profile)
         packet = self.load_packet(request, profile)
         if request['kind'] == 'reviewed_controller':
             require(profile.get('allowReviewedController') is True, 'job_controller_not_enabled')
+            if profile.get('setupContainment'):
+                from supervision_policy import SetupOwnership
+                try:SetupOwnership.from_plan({'jobId': identity, 'profile': profile}, packet)
+                except Refusal:raise AdmissionWait('runner_setup_configuration_invalid') from None
             return packet, self.admission.controller(request, profile, packet), None
         require(profile.get('allowControlChecks') is True and request['recipe'] in packet.files,
                 'job_control_checks_not_registered')
@@ -105,7 +109,7 @@ class JobService:
                 return
             if self.repository.ownership_holds(identity):
                 return self.repository.wait(identity, 'runner_slot_owned')
-            packet, admission, key = self.prepare(request, profile)
+            packet, admission, key = self.prepare(request, profile, identity)
             if key:
                 previous = self.repository.passed_controls(key, request['companyId'], request['profile'], profile['policyDigest'])
                 if previous:
@@ -114,9 +118,12 @@ class JobService:
             # Staging writes data only. A failed API read or partial SSH upload
             # before confirmed staging cannot consume the execution identity.
             self.remote.stage(profile, identity, request, packet, admission)
+            if request['kind'] == 'reviewed_controller' and profile.get('setupContainment'):
+                readiness = self.remote.readiness(profile, identity)
+                if readiness.get('ready') is not True:raise AdmissionWait('runner_setup_readiness_pending')
             # Re-verify the ENTIRE admission, including current target/verdict,
             # after staging and immediately before the first launch.
-            current_packet, current_admission, _ = self.prepare(request, profile)
+            current_packet, current_admission, _ = self.prepare(request, profile, identity)
             require(digest(current_admission) == digest(admission), 'job_admission_changed_before_launch')
             require(self.repository.claim(identity), 'job_already_claimed')
             self.remote.launch(profile, identity)
@@ -168,8 +175,14 @@ class JobService:
         if value['phase'] == 'staged':
             # No marker and no unit: a trusted positive pre-dispatch fact.
             try:
-                packet, admission, _ = self.prepare(request, profile)
+                packet, admission, _ = self.prepare(request, profile, identity)
                 self.remote.stage(profile, identity, request, packet, admission)
+                if request['kind'] == 'reviewed_controller' and profile.get('setupContainment'):
+                    readiness = self.remote.readiness(profile, identity)
+                    if readiness.get('ready') is not True:
+                        return self.repository.release_unlaunched(identity, 'runner_setup_readiness_pending')
+            except AdmissionWait as error:
+                return self.repository.release_unlaunched(identity, error.code)
             except Refusal as error:
                 if error.code in ['job_native_pause_hold', 'job_native_execution_hold', 'job_agent_unavailable',
                                   'job_source_run_not_settled', 'remote_transport_unconfirmed']:
@@ -192,6 +205,8 @@ class JobService:
         # Exclude timestamps, process IDs, output hashes, packet identities and
         # counters from failure progress. A new attempt alone is not progress.
         meaningful = {k: outcome.get(k) for k in ['status', 'code', 'kind', 'diagnostic', 'steps', 'checks', 'recipeSha256'] if k in outcome}
+        if self.profile(request).get('setupContainment'):
+            meaningful.update({key: outcome[key] for key in ['cleanupComplete', 'auditComplete'] if key in outcome})
         if outcome.get('kind') == 'control_checks':
             meaningful['facts'] = outcome.get('facts', {}).get('checks')
         result = {'jobId': identity, 'companyId': request['companyId'], 'projectId': request['projectId'],

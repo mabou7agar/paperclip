@@ -8,7 +8,7 @@ from contracts import canonical, closed_json, require, UUID, SHA
 
 class RemoteRepository:
     def call(self, profile, operation, identity=None, value=None):
-        require(operation in ['stage', 'launch', 'inspect', 'cancel'], 'remote_operation_invalid')
+        require(operation in ['stage', 'launch', 'inspect', 'cancel', 'readiness'], 'remote_operation_invalid')
         args = ['python3', '-I', '-B', profile['remoteInstall'] + '/remote_worker.py', '--' + operation]
         if identity:
             require(UUID.fullmatch(identity), 'remote_identity_invalid')
@@ -27,6 +27,9 @@ class RemoteRepository:
     def stage(self, profile, identity, request, packet, admission):
         return self.call(profile, 'stage', value={'jobId': identity, 'request': request, 'profile': profile,
                          'packet': base64.b64encode(packet.raw).decode(), 'admission': admission})
+
+    def readiness(self, profile, identity):
+        return self.call(profile, 'readiness', identity)
 
     def launch(self, profile, identity):
         return self.call(profile, 'launch', identity)

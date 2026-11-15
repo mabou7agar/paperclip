@@ -36,8 +36,15 @@ def load(path):
         require((target.scheme, target.netloc) == (url.scheme, url.netloc) and
                 re.fullmatch(r"/api/plugins/[a-f0-9-]{36}/webhooks/terminal", target.path) and
                 not target.username and not target.password and not target.query and not target.fragment, "broker_callback_invalid")
+    owned_namespaces = {}
     for key, profile in config['profiles'].items():
         validate_profile(key, profile)
+        if profile.get('setupContainment'):
+            value = profile['setupContainment']
+            scope = (profile['sshTarget'], profile['fixedTrialFields'].get('mysql'))
+            names = {'schema:' + name for name in value['databases']} | {'account:' + value['account']}
+            require(not names & owned_namespaces.get(scope, set()), 'broker_setup_namespace_overlap')
+            owned_namespaces.setdefault(scope, set()).update(names)
         profile['policyDigest'] = digest(profile)
     return config
 
@@ -49,7 +56,7 @@ def validate_profile(key, profile):
                 'targetDocumentKey', 'reviewDocumentKey', 'actualAcpDocumentKey', 'allowedModes',
                 'sourceDecisionFingerprints', 'authorityRoot', 'trialRoot', 'continuationPattern',
                 'executionIdPattern', 'authoritySchemaTemplate', 'allowReviewedController', 'privilegedCodeDigests', 'privilegedCodeApproval', 'allowControlChecks', 'controlInputs', 'preparedImage'}
-    require(isinstance(profile, dict) and set(profile) == required, 'broker_profile_fields_invalid')
+    require(isinstance(profile, dict) and required <= set(profile) <= required | {'setupContainment'}, 'broker_profile_fields_invalid')
     require(KEY.fullmatch(key), 'broker_profile_key_invalid')
     require(type(profile['concurrency']) is int and profile['concurrency'] == 1, 'broker_profile_concurrency_invalid')
     require(re.fullmatch(r'[a-zA-Z0-9_.@-]+', profile['sshTarget']) and not profile['sshTarget'].startswith('-'), 'broker_ssh_target_invalid')
@@ -103,3 +110,11 @@ def validate_profile(key, profile):
     require(isinstance(approval, dict) and set(approval) == {'issueId', 'documentKey', 'reviewerAgentId'} and
             UUID.fullmatch(approval['issueId']) and UUID.fullmatch(approval['reviewerAgentId']) and KEY.fullmatch(approval['documentKey']),
             'broker_privileged_code_approval_invalid')
+
+    if 'setupContainment' in profile:
+        value = profile['setupContainment']
+        require(isinstance(value, dict) and set(value) == {'schema', 'databases', 'account', 'receiptName',
+                'evidencePath', 'evidenceSha256', 'privatePaths', 'privateRoot'} and isinstance(value['databases'], list) and
+                1 <= len(value['databases']) <= 8 and len(set(value['databases'])) == len(value['databases']) and
+                all(isinstance(x, str) and re.fullmatch(r'[a-z][a-z0-9]{0,63}', x) for x in value['databases']) and
+                SHA.fullmatch(value['evidenceSha256']), 'broker_setup_containment_policy_invalid')
