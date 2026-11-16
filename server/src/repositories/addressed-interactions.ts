@@ -18,8 +18,6 @@ export function findAddressedInteraction(db: Db, input: {
   )).limit(1).then((rows) => rows[0] ?? null);
 }
 
-/** Select existing attention obligations, never infer task ownership or permission.
- * Recovery revalidates the complete audience policy and ordinary dispatch gates. */
 export const pendingAddressedInteractionReceiptSql = sql<boolean>`exists (
   select 1 from issue_thread_interactions attention
   join issues attention_issue on attention_issue.id = attention.issue_id
