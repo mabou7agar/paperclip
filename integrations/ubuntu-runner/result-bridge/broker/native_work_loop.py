@@ -13,7 +13,7 @@ class NativeWorkLoop:
             try:
                 self.transport.receive();self.scan_required=False
             except Refusal as error:
-                # Disabled/reinstalled plugins need a new native startup hint.
+                # Disabled/reinstalled plugins wait for a native readiness/state commit event.
                 # A transport failure instead retains a concrete unread intent.
                 retry=error.code!='native_plugin_binding_unavailable'
             except Exception:retry=True

@@ -413,6 +413,19 @@ const ALLOWED_TURN_SPAN_ATTRIBUTE_KEYS = new Set<string>([
 ]);
 
 describe("shared ACPX engine runtime behavior", () => {
+  it("confines the configured Gemini version probe before the ACP child can start", async () => {
+    const root = await makeTempRoot(), binary = path.join(root, "gemini"), observation = path.join(root, "probe.json");
+    await fs.writeFile(binary, `#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(observation)},JSON.stringify({secret:!!process.env.GEMINI_CONTROL_FIXTURE_SECRET}));console.log('0.33.0');\n`, {mode:0o755});
+    vi.stubEnv("GEMINI_CONTROL_FIXTURE_SECRET", "synthetic-control-only");
+    const policy = vi.spyOn(localLaunchPolicy,"readLocalAgentLaunchPolicy").mockReturnValue({kind:"apparmor",executable:"/fixture/aa-exec",profile:"paperclip-agent"});
+    const launch = vi.spyOn(localLaunchPolicy,"localAgentLaunchTarget").mockImplementation((command,args)=>({command,args:[...args]}));
+    try {
+      await runExecutor({agent:"gemini",agentCommand:binary+" --acp",cwd:root,stateDir:path.join(root,"state"),warmHandleIdleMs:0,mode:"persistent"});
+      expect(JSON.parse(await fs.readFile(observation,"utf8"))).toEqual({secret:false});
+      expect(launch.mock.calls.some(([command,args,active])=>command===binary&&args[0]==="--version"&&active?.profile==="paperclip-agent")).toBe(true);
+    } finally {policy.mockRestore();launch.mockRestore();vi.unstubAllEnvs();}
+  });
+
   it("confines the physical local ACP child while resuming the same logical session and prompt", async () => {
     const root = await makeTempRoot();
     const config = { agent: "custom", agentCommand: "node ./fake-acp.js", cwd: root,

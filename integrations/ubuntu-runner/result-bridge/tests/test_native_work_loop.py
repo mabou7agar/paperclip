@@ -71,5 +71,19 @@ class NativeWorkLoopTest(unittest.TestCase):
         with self.assertRaises(Finished):loop.run(inbox)
         self.assertEqual(transport.receive.call_count,2)
 
+    def test_readiness_event_recovers_the_retained_intent_without_idle_polling(self):
+        transport,service,loop=self.fixture();inbox=Mock();waits=[]
+        transport.receive.side_effect=Refusal('native_plugin_binding_unavailable')
+        def wait(timeout):
+            waits.append(timeout);self.assertIsNone(timeout)
+            if len(waits)==1:
+                transport.receive.side_effect=None
+                return True  # committed registry ready transition
+            raise Finished()
+        inbox.wait.side_effect=wait
+        with self.assertRaises(Finished):loop.run(inbox)
+        self.assertEqual(transport.receive.call_count,2)
+        self.assertEqual(waits,[None,None])
+
 
 if __name__=='__main__':unittest.main()

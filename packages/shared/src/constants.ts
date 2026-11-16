@@ -1428,6 +1428,7 @@ export const PLUGIN_CAPABILITIES = [
   // Plugin State
   "plugin.state.read",
   "plugin.state.write",
+  "plugin.state.notify",
   // Runtime / Integration
   "events.subscribe",
   "events.emit",

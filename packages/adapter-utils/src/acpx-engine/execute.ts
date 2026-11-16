@@ -9,7 +9,7 @@ import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFile } from "node:child_process";
+import { execFile } from "../local-workspace-process.js";
 import { promisify } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
 import { parseFrontmatterMarkdown } from "@paperclipai/shared";

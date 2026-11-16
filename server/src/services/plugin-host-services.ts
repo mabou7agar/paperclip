@@ -771,7 +771,7 @@ export function buildHostServices(
   } = {},
 ): HostServices & { dispose(): void } {
   const registry = pluginRegistryService(db);
-  const stateStore = pluginStateStore(db);
+  const stateStore = pluginStateStore(db, { notifyCommittedChanges: options.manifest?.capabilities.includes("plugin.state.notify") === true });
   const pluginDb = pluginDatabaseService(db);
   const secretsHandler = createPluginSecretsHandler({ db, pluginId });
   const companies = companyService(db);

@@ -67,10 +67,20 @@ function scopeConditions(
  * @see PLUGIN_SPEC.md §15.1 — Capabilities: Plugin State
  * @see PLUGIN_SPEC.md §21.3 — `plugin_state` table
  */
-export function pluginStateStore(db: Db) {
+export function pluginStateStore(db: Db, options: { notifyCommittedChanges?: boolean } = {}) {
   // -----------------------------------------------------------------------
   // Internal helpers
   // -----------------------------------------------------------------------
+
+  async function writeState<T>(pluginId: string, write: (database: Db) => Promise<T>): Promise<T> {
+    // Ordinary plugins retain their original single-write path. Only a manifest
+    // explicitly requesting commit notifications adds the transaction/XID work.
+    if (!options.notifyCommittedChanges) return write(db);
+    return db.transaction(async tx => {
+      await signalDatabaseWork(tx, `plugin-state:${pluginId}`, undefined, { notify: true });
+      return write(tx as unknown as Db);
+    });
+  }
 
   async function assertPluginExists(pluginId: string): Promise<void> {
     const rows = await db
@@ -136,11 +146,8 @@ export function pluginStateStore(db: Db) {
       const namespace = input.namespace ?? DEFAULT_NAMESPACE;
       const scopeId = input.scopeId ?? null;
 
-      await db.transaction(async tx => {
-        // Native commit-bound notifications are hints, never execution authority.
-        // A failed or delayed RPC cannot lose a later committed state write.
-        await signalDatabaseWork(tx, `plugin-state:${pluginId}`, undefined, { notify: true });
-        await tx
+      await writeState(pluginId, async database => {
+        await database
           .insert(pluginState)
           .values({
             pluginId,
@@ -189,9 +196,8 @@ export function pluginStateStore(db: Db) {
         namespace = DEFAULT_NAMESPACE,
       }: { scopeId?: string; namespace?: string } = {},
     ): Promise<void> => {
-      await db.transaction(async tx => {
-        await signalDatabaseWork(tx, `plugin-state:${pluginId}`, undefined, { notify: true });
-        await tx.delete(pluginState)
+      await writeState(pluginId, async database => {
+        await database.delete(pluginState)
           .where(scopeConditions(pluginId, scopeKind, scopeId, namespace, stateKey));
       });
     },

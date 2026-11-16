@@ -17,7 +17,7 @@ export default {
   displayName: 'Ubuntu runner results', description: 'Durable reviewed jobs and native same-task result delivery.',
   author: 'Paperclip', categories: ['automation'],
   capabilities: ['agent.tools.register', 'issues.read', 'issues.update', 'issue.documents.read', 'issue.documents.write',
-    'issues.checkout', 'issues.wakeup', 'issues.wakeup.durable', 'jobs.schedule', 'webhooks.receive', 'plugin.state.read', 'plugin.state.write'],
+    'issues.checkout', 'issues.wakeup', 'issues.wakeup.durable', 'jobs.schedule', 'webhooks.receive', 'plugin.state.read', 'plugin.state.write', 'plugin.state.notify'],
   entrypoints: { worker: './worker.mjs' }, tools,
   jobs: [{ jobKey: 'deliver-pending-results', displayName: 'Recover pending result delivery', schedule: '* * * * *' }],
   webhooks: [{ endpointKey: 'terminal', displayName: 'Runner completion hint' }],
