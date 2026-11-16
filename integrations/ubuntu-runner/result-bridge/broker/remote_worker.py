@@ -138,7 +138,7 @@ def inspect(identity):
                 if current is None:return {'phase': 'attempted', 'cleanupPending': True}
             else:
                 current = reconcile_control(root, plan, write_once)
-            if current.get('cleanupComplete') and (current.get('auditComplete') or plan['profile'].get('setupContainment')):
+            if current.get('cleanupComplete') and (current.get('auditComplete') or plan['profile'].get('setupContainment') or plan['request']['kind'] == 'control_checks'):
                 # Positive resource absence releases execution ownership even
                 # when evidence audit is a recorded failure. Native review and
                 # acceptance still see failed/auditComplete=false, never pass.

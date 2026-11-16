@@ -345,3 +345,44 @@ At expiry the owner stops the original host unit, fences it after 20 seconds if
 necessary, and performs independent cleanup. This takes precedence over the
 controller's longer graceful-cleanup allowance. Profiles without supervision
 retain their prior audit/quarantine and failure-fingerprint behavior.
+
+## Completed controls and interrupted cleanup
+
+The execution host saves validated control facts in the root-private
+`control-completion.json` before container cleanup. A cleanup error does not
+erase those facts or grant another test attempt. The receipt binds the original
+job, plan, recipe, input digest and prepared image. Cleanup remains incomplete
+until the owning service confirms container absence.
+
+For older saved jobs without that receipt, reconciliation may recover the
+original stopped container's bounded JSON output. It first verifies the exact
+job and plan labels, pinned image, non-root user, network isolation, read-only
+root, absence of mounts, dropped capabilities and no-new-privileges setting.
+A running container, a nonzero outer exit, unavailable output or a changed
+identity cannot establish a passing test. Foreign containers are never removed.
+
+Recovery preserves the original attempt and failure receipt. It saves a new
+`reconciled.json` only after owned cleanup succeeds. A recovered completion
+reports `recoveredCompletion: true` and `executionRepeated: false`. An absent
+container without valid retained facts settles as failed with the test outcome
+unavailable; positive cleanup is never a fabricated pass. The normal signed
+result, durable native continuation and independent acknowledgement still own
+delivery. No controller, provider, recipe, fixture or completed case is restarted.
+
+The native status request in `bruno/UbuntuRunner/Read native job.bru` reads the
+same retained identity without a wake. The legacy operator IPC request remains
+available for deployments that use that transport.
+
+A recovery refusal retains the original resources and keeps the job in an
+internal reconciliation wait. It does not publish a terminal result or wake an
+agent to repeat the checks. An operator must resolve the original evidence or
+cleanup uncertainty.
+
+The setup-readiness digest covers every installed Python module. Updating these
+control modules invalidates an older readiness digest. Do not rewrite that
+receipt to claim new measurements or silently reuse it with a changed digest.
+Where existing setup measurements must be preserved, use a separately reviewed,
+one-use recovery tool outside the measured installation for the original job.
+Keep further control-check admission disabled until a qualified runner release
+contains the permanent fix. The unchanged installed reader then consumes the
+reconciled receipt through its normal result path.
