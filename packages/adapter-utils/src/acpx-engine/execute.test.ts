@@ -464,6 +464,8 @@ describe("shared ACPX engine runtime behavior", () => {
       expect(resumed.sessionInputs).toHaveLength(1);
       expect(resumed.sessionInputs[0]?.resumeSessionId).toBe(first.result.sessionId);
       expect(resumed.result.clearSession).not.toBe(true);
+      expect(resumed.result.errorCode).toBe("acpx_session_resume_required");
+      expect(resumed.result.errorMeta).toMatchObject({ retryable: false, recoveryAction: "repair_existing_session" });
       expect(resumed.turnInputs).toHaveLength(0);
       expect(resumed.logs.map(row=>row.text).join()).not.toContain("retrying with a fresh session");
     } finally {policy.mockRestore();}

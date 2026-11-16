@@ -4770,6 +4770,11 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
             } catch (err) {
               // Required confinement must never turn a policy/startup refusal
               // into a fresh conversation or a second provider launch.
+              if (localLaunchPolicy && resumeSessionId && isResumeFailure(err)) {
+                const required = new Error("Saved ACPX session requires repair before it can resume.", { cause: err });
+                required.name = "SessionResumeRequiredError";
+                throw required;
+              }
               if (localLaunchPolicy || !resumeSessionId || !isResumeFailure(err)) throw err;
               clearSession = true;
               resumedSession = false;

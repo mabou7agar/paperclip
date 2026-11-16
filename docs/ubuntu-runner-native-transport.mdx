@@ -306,3 +306,15 @@ After confirming the application and native DB listener are ready, the operator
 can reset only this service's failed state and start it once. Startup reconstructs
 the retained queue; never recreate jobs, reset proof attempts or wake workers to
 repair transport. General Watchdog remains paused and monitoring alert-only.
+
+A required saved-session resume refusal uses the permanent native
+`acpx_session_resume_required` result, with `retryable: false` and
+`repair_existing_session`. It retains saved history and does not start a fresh
+conversation or an identical automatic heartbeat retry. Repair the actual
+identity/configuration problem before an evidence-gated continuation.
+
+A release must include matching shared capability and SDK protocol/handler
+artifacts alongside server changes. In particular, durable wakeups require the
+`issues.wakeup.durable` declaration and SDK capability gate; the optional commit
+notifications require `plugin.state.notify`. A server-only overlay is incomplete.
+Qualify the actual packaged validator and SDK before enabling native jobs.
