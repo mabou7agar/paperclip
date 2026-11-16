@@ -155,3 +155,23 @@ describe("context compaction wakes", () => {
     expect(wakeMustNotJoinActiveRun(comment, { issueId: "issue-1", wakeCommentId: "comment-2" }, false)).toBe(false);
   });
 });
+
+
+describe("pending addressed attention context", () => {
+  it.each([
+    { reason: "interaction_pending", source: "issue.interaction.created", kind: "request_confirmation", retained: true },
+    { reason: "issue_commented", source: "issue.interaction.created", kind: "request_confirmation", retained: false },
+    { reason: "interaction_pending", source: "issue.comment.created", kind: "request_confirmation", retained: false },
+    { reason: "interaction_pending", source: "issue.interaction.created", kind: "connection_intent", retained: false },
+  ])("preserves only a pending card identity: $reason / $source / $kind", ({ reason, source, kind, retained }) => {
+    const result = enrichPromotedWakeContext({ contextSnapshot: { issueId: "issue-1", wakeReason: reason,
+      source, interactionId: "card-1", interactionKind: kind, interactionStatus: "accepted",
+      continuationPolicy: "wake_assignee", checkboxSelection: ["stale"], itemVerdicts: ["stale"], newlyResolvedItemIds: ["stale"] },
+      reason, source: "assignment", triggerDetail: "system", payload: { issueId: "issue-1" } }).contextSnapshot;
+    expect(result.interactionId).toBe(retained ? "card-1" : undefined);
+    expect(result.interactionKind).toBe(retained ? kind : undefined);
+    for (const key of ["interactionStatus", "continuationPolicy", "checkboxSelection", "itemVerdicts", "newlyResolvedItemIds"])
+      expect(result[key]).toBeUndefined();
+    expect(result.issueId).toBe("issue-1");
+  });
+});

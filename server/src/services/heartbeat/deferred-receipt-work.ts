@@ -1,3 +1,4 @@
+import { pendingAddressedInteractionReceiptSql } from "../../repositories/addressed-interactions.js";
 import { PersistedExecutionWaitRefusal } from "../deferred-execution-wait.js";
 import { and, asc, eq, gt, inArray, isNull, or, sql } from "drizzle-orm";
 import { agentWakeupRequests, type Db } from "@paperclipai/db";
@@ -76,7 +77,7 @@ export function registerDeferredReceiptWork(
               sql`jsonb_typeof(${agentWakeupRequests.payload}#>'{_paperclipWakeContext,wakeCommentIds}') = 'array'
                 and ${agentWakeupRequests.payload}#>'{_paperclipWakeContext,wakeCommentIds}' <> '[]'::jsonb`,
               sql`${agentWakeupRequests.payload}->>'mutation' = 'interaction'`,
-              dependencyResolvedWakePayloadSql,
+              dependencyResolvedWakePayloadSql, pendingAddressedInteractionReceiptSql,
               currentExecutionStageReceiptSql,
               sql`exists (select 1 from heartbeat_runs r where r.company_id = ${agentWakeupRequests.companyId}
                 and r.runtime_mode = 'legacy' and r.status = 'cancelled'

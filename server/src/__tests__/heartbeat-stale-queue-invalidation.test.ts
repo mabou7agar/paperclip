@@ -354,6 +354,66 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     });
   }, 60_000);
 
+  it.each(["ready", "paused", "expired", "human", "reconciliation"] as const)(
+    "reconstructs only the saved addressed review receipt after restart: %s", async condition => {
+      const { companyId, agentId } = await seedCompanyAndAgent();
+      const [reviewer] = await db.insert(agents).values({ companyId, name: "Addressed reviewer", role: "engineer",
+        status: condition === "paused" ? "paused" : "idle", adapterType: "codex_local", adapterConfig: {},
+        runtimeConfig: { heartbeat: { wakeOnDemand: true } }, permissions: {} }).returning();
+      const [issue] = await db.insert(issues).values({ companyId, title: "Frozen source awaiting attention",
+        status: "in_progress", assigneeAgentId: agentId }).returning();
+      const source = await seedQueuedRun({ companyId, agentId, issueId: issue.id, wakeReason: "issue_assigned" });
+      await db.update(heartbeatRuns).set({ runtimeMode: "legacy", status: "cancelled", finishedAt: new Date(),
+        errorCode: condition === "reconciliation" ? "execution_reconciliation_required" : "issue_interaction_changed",
+      }).where(eq(heartbeatRuns.id, source.runId));
+      await db.update(agentWakeupRequests).set({ status: "skipped", finishedAt: new Date() })
+        .where(eq(agentWakeupRequests.id, source.wakeupRequestId));
+      const [card] = await db.insert(issueThreadInteractions).values({ companyId, issueId: issue.id,
+        kind: "request_confirmation", status: condition === "expired" ? "expired" : "pending",
+        createdByAgentId: agentId, addresseeAgentId: reviewer.id,
+        ...(condition === "human" ? { addresseeUserId: "responsible-user", effectiveResolverPolicy: "human_only" } : { effectiveResolverPolicy: "not_creator" }),
+        payload: { version: 1, prompt: "Review exact saved source" } }).returning();
+      if (condition === "reconciliation") await db.insert(issueRecoveryActions).values({ companyId,
+        sourceIssueId: issue.id, kind: "active_run_watchdog", ownerType: "board", cause: "uncertain_external_action",
+        status: "resolved", evidence: { runId: source.runId, automaticRecovery: { replay: "blocked" } },
+        fingerprint: source.runId, nextAction: "Reconcile the uncertain action" });
+      const [receipt] = await db.insert(agentWakeupRequests).values({ companyId, agentId: reviewer.id,
+        source: "assignment", triggerDetail: "system", reason: "issue_execution_deferred", status: "deferred_issue_execution",
+        requestedByActorType: "system", payload: { issueId: issue.id, _paperclipWakeContext: {
+          issueId: issue.id, source: "issue.interaction.created", wakeReason: "interaction_pending",
+          interactionId: card.id, interactionKind: "request_confirmation" } } }).returning();
+      const readReceipt = () => db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, receipt.id)).then(rows => rows[0]);
+      const restarted = heartbeatService(db, { runtimeEnv: { ...process.env, PAPERCLIP_IN_WORKTREE: "false" } });
+      await restarted.resumeQueuedRuns();
+      await restarted.drainActiveRunExecutions();
+      if (condition !== "ready") {
+        expect(await readReceipt()).toMatchObject({ runId: null, status: "deferred_issue_execution", payload: receipt.payload });
+        expect(mockAdapterExecute).not.toHaveBeenCalled();
+      }
+      if (condition === "paused") {
+        await db.update(agents).set({ status: "idle" }).where(eq(agents.id, reviewer.id));
+        await restarted.resumeQueuedRuns();
+      }
+      if (condition === "ready" || condition === "paused") {
+        await vi.waitFor(async () => expect((await readReceipt()).runId).toBeTruthy(), { timeout: 15_000 });
+        const delivered = await readReceipt();
+        await restarted.waitForRunExecutionDrain(delivered.runId!, { timeoutMs: 30_000 });
+        const actual = await restarted.getRun(delivered.runId!);
+        const [currentCard] = await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, card.id));
+        expect(actual, JSON.stringify({ status: actual?.status, error: actual?.errorCode, context: actual?.contextSnapshot,
+          card: { status: currentCard.status, resolver: currentCard.effectiveResolverPolicy } })).toMatchObject({ status: "succeeded" });
+        expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+        expect(actual?.contextSnapshot)
+          .toMatchObject({ issueId: issue.id, interactionId: card.id, interactionKind: "request_confirmation", wakeReason: "interaction_pending" });
+        await restarted.resumeQueuedRuns();
+        await restarted.drainActiveRunExecutions();
+        expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+        expect((await readReceipt()).id).toBe(receipt.id);
+        expect((await db.select().from(issues).where(eq(issues.id, issue.id)))[0].assigneeAgentId).toBe(agentId);
+      }
+    }, 60_000,
+  );
+
   it.each(["issue_waiting_for_response", "execution_reconciliation_required"] as const)(
     "does not renew a deferred queue after deliberate %s cancellation", async errorCode => {
       const { companyId, agentId } = await seedCompanyAndAgent();
