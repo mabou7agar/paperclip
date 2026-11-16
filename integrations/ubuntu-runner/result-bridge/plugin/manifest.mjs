@@ -13,11 +13,11 @@ export const tools = [
     parametersSchema: { type: 'object', properties: { jobId: { type: 'string', format: 'uuid' } }, required: ['jobId'], additionalProperties: false } },
 ];
 export default {
-  id: 'paperclip.ubuntu-runner-results', apiVersion: 1, version: '0.1.0',
+  id: 'paperclip.ubuntu-runner-results', apiVersion: 1, version: '0.2.0',
   displayName: 'Ubuntu runner results', description: 'Durable reviewed jobs and native same-task result delivery.',
   author: 'Paperclip', categories: ['automation'],
   capabilities: ['agent.tools.register', 'issues.read', 'issues.update', 'issue.documents.read', 'issue.documents.write',
-    'issues.checkout', 'issues.wakeup', 'issues.wakeup.durable', 'jobs.schedule', 'webhooks.receive'],
+    'issues.checkout', 'issues.wakeup', 'issues.wakeup.durable', 'jobs.schedule', 'webhooks.receive', 'plugin.state.read', 'plugin.state.write', 'plugin.state.notify'],
   entrypoints: { worker: './worker.mjs' }, tools,
   jobs: [{ jobKey: 'deliver-pending-results', displayName: 'Recover pending result delivery', schedule: '* * * * *' }],
   webhooks: [{ endpointKey: 'terminal', displayName: 'Runner completion hint' }],

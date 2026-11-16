@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { execFile as execFileCallback } from "node:child_process";
+import { execFile as execFileCallback } from "@paperclipai/adapter-utils/local-workspace-process";
 import { promisify } from "node:util";
 import { and, eq, sql } from "drizzle-orm";
 import { executionWorkspaces, projectWorkspaces, type Db } from "@paperclipai/db";

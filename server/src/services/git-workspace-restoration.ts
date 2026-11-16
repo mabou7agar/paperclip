@@ -5,7 +5,7 @@ import fs from "node:fs/promises";
 import { constants } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFile as execFileCallback } from "node:child_process";
+import { execFile as execFileCallback } from "@paperclipai/adapter-utils/local-workspace-process";
 import { createHash } from "node:crypto";
 import { resolveManagedProjectWorkspaceDir, resolvePaperclipInstanceRoot } from "../home-paths.js";
 import { materializeManagedProjectWorkspace, RepositoryRefNotFoundError, readManagedRepositoryPreparationFailure } from "./managed-repository-checkout.js";

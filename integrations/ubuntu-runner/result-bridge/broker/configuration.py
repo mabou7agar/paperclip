@@ -20,8 +20,17 @@ def private_file(path):
 
 def load(path):
     config = closed_json(private_file(path).read_bytes())
-    require(set(config) == {"stateRoot", "socketPath", "socketGid", "pluginAuthFile", "apiBaseUrl", "tokenFile", "databaseContainer",
-                            "databaseUser", "databaseName", "callbackUrl", "profiles"}, "broker_configuration_invalid")
+    base = {"stateRoot", "socketPath", "socketGid", "pluginAuthFile", "apiBaseUrl", "tokenFile", "databaseContainer",
+            "databaseUser", "databaseName", "callbackUrl", "profiles"}
+    require(base <= set(config) <= base | {'nativeQueue'}, "broker_configuration_invalid")
+    if 'nativeQueue' in config:
+        require(config['callbackUrl']=='','native_queue_legacy_callback_forbidden')
+        value = config['nativeQueue']
+        require(isinstance(value,dict) and {'pluginId','signingKeyFile','isolationReceiptFile','isolationReceiptSha256','agentPolicyFile'} <= set(value) <= {'pluginId','signingKeyFile','isolationReceiptFile','isolationReceiptSha256','agentPolicyFile','applicationContainer'} and
+                UUID.fullmatch(value['pluginId']) and SHA.fullmatch(value['isolationReceiptSha256']), 'native_queue_configuration_invalid')
+        private_file(value['signingKeyFile']); private_file(value['isolationReceiptFile'])
+        private_file(value['agentPolicyFile'])
+        require(isinstance(value.get('applicationContainer','paperclip-paperclip-1'),str)and re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}',value.get('applicationContainer','paperclip-paperclip-1')),'native_event_container_invalid')
     url = urlsplit(config["apiBaseUrl"])
     require(url.scheme in ["http", "https"] and url.hostname in ["127.0.0.1", "localhost"] and
             not url.username and not url.password and not url.query and not url.fragment and url.path in ["", "/"], "broker_api_not_loopback")

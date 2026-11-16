@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile } from "@paperclipai/adapter-utils/local-workspace-process";
 import { paperclipRunnerSupportsPlatform } from "@paperclipai/shared";
 
 type LocalRunnerTarget = {

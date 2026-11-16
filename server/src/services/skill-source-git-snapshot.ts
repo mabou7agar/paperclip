@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn } from '@paperclipai/adapter-utils/local-workspace-process';
 import { chmod, mkdtemp, readdir, rm, stat } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';

@@ -9,7 +9,7 @@ import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFile } from "node:child_process";
+import { execFile } from "../local-workspace-process.js";
 import { promisify } from "node:util";
 import { createHash, randomUUID } from "node:crypto";
 import { parseFrontmatterMarkdown } from "@paperclipai/shared";
@@ -45,6 +45,8 @@ import {
   type SandboxAdditionalSource,
 } from "@paperclipai/adapter-utils/execution-target";
 import { captureLocalProcess, capturedProcessExited, killCapturedLocalProcess } from "./local-process-control.js";
+import { readLocalAgentLaunchPolicy, localAgentSpawner, localAgentProtocolGuard,
+  rememberLocalAgentPolicy, runtimeUsesLocalAgentPolicy } from "../local-agent-launch-policy.js";
 import type { DuplexLossReason } from "../duplex-observability.js";
 import { DUPLEX_CHANNEL_LOST_ERROR_CODE } from "../bridge-transport-contract.js";
 import {
@@ -4529,6 +4531,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         await hostStore.evictIdle(now());
 
         const previousParams = parseObject(ctx.runtime.sessionParams);
+        const localLaunchPolicy = prepared.processSessionBridge ? null : readLocalAgentLaunchPolicy();
         const canResume = isCompatibleSession(previousParams, prepared);
         const persistedRuntimeStore = createRuntimeStore({ stateDir: prepared.stateDir });
         let resumeSessionId = canResume ? asString(previousParams.acpSessionId, "") || undefined : undefined;
@@ -4555,14 +4558,14 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         // it (today's `clearWarmHandleTimer(cached)` after the reuse decision).
         let cached = canResume ? hostStore.borrow(prepared.sessionKey) : undefined;
         providerProcessReason = canResume ? "cache_miss" : Object.keys(previousParams).length ? "identity_mismatch" : "created";
-        if (cached && (cached.observabilityCompatibilityKey !== ctx.observability?.compatibilityKey || ctx.context.refreshTools === true
+        if (cached && (!runtimeUsesLocalAgentPolicy(cached.runtime,localLaunchPolicy) || cached.observabilityCompatibilityKey !== ctx.observability?.compatibilityKey || ctx.context.refreshTools === true
           || asString(previousParams.mcpFingerprint, "") !== shortHash(prepared.mcpIdentity)
           // MCP bearer credentials are run-scoped, even for an unchanged catalog.
           || prepared.mcpServers.length > 0
           // A managed login gets a disposable home/current credentials per run.
           // Resume its saved conversation with a fresh process and environment.
           || (["claude", "codex"].includes(prepared.acpxAgent) && Boolean(parseObject(ctx.config.managedAiConnection).sessionIdentity)))) {
-          providerProcessReason = cached.observabilityCompatibilityKey !== ctx.observability?.compatibilityKey
+          providerProcessReason = !runtimeUsesLocalAgentPolicy(cached.runtime,localLaunchPolicy) || cached.observabilityCompatibilityKey !== ctx.observability?.compatibilityKey
             || (["claude", "codex"].includes(prepared.acpxAgent) && Boolean(parseObject(ctx.config.managedAiConnection).sessionIdentity))
             ? "configuration_changed" : "tools_changed";
           await hostStore.discard(prepared.sessionKey);
@@ -4613,6 +4616,11 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
           // must not merge the Paperclip server's ambient environment back in
           // when it spawns the provider child.
           inheritProcessEnv: false,
+          // Only the local provider child is confined. A host-side proxy for
+          // an already isolated remote sandbox retains its existing transport.
+          // The logical command, fingerprint and saved conversation stay intact.
+          spawnAgent: localAgentSpawner(localLaunchPolicy),
+          protocolGuardFactory: localAgentProtocolGuard(localLaunchPolicy),
           // Observe permission requests without deciding them: returning
           // undefined leaves the decision to ACPX's permission-mode resolver.
           onPermissionRequest: async (request) => {
@@ -4650,6 +4658,7 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
         } else {
           const createRuntimeStart = now();
           runtime = createRuntime(runtimeOptions);
+          rememberLocalAgentPolicy(runtime,localLaunchPolicy);
           createRuntimeMs = now() - createRuntimeStart;
           // The create_runtime phase runs only on a cold start.
           await emitRunPhaseTiming(ctx, "create_runtime", createRuntimeMs, "ok");
@@ -4759,7 +4768,14 @@ export function createAcpxEngineExecutor(deps: AcpxEngineExecutorOptions = {}) {
                 }),
               });
             } catch (err) {
-              if (!resumeSessionId || !isResumeFailure(err)) throw err;
+              // Required confinement must never turn a policy/startup refusal
+              // into a fresh conversation or a second provider launch.
+              if (localLaunchPolicy && resumeSessionId && isResumeFailure(err)) {
+                const required = new Error("Saved ACPX session requires repair before it can resume.", { cause: err });
+                required.name = "SessionResumeRequiredError";
+                throw required;
+              }
+              if (localLaunchPolicy || !resumeSessionId || !isResumeFailure(err)) throw err;
               clearSession = true;
               resumedSession = false;
               await ctx.onLog(

@@ -3,6 +3,8 @@ Description=Paperclip registered Ubuntu job results
 After=network-online.target docker.service
 Wants=network-online.target
 Requires=docker.service
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 Type=simple

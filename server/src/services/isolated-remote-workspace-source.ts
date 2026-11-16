@@ -1,7 +1,7 @@
 import type { Db } from "@paperclipai/db";
 import path from "node:path";
 import fs from "node:fs/promises";
-import { execFile as execFileCallback } from "node:child_process";
+import { execFile as execFileCallback } from "@paperclipai/adapter-utils/local-workspace-process";
 import { promisify } from "node:util";
 import type { TaskWorkspaceIntent } from "@paperclipai/shared";
 import { isGitHubHttpsRemoteUrl, type GitRemoteAuthProvider } from "./git-credentials.js";

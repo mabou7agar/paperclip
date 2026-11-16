@@ -38,6 +38,21 @@ class NativeRepository:
         require(UUID.fullmatch(issue_id) and UUID.fullmatch(comment_id), "native_comment_id_invalid")
         return self.read(f"/api/issues/{issue_id}/comments/{comment_id}")
 
+    def deliver_envelope(self, plugin_id, envelope):
+        require(UUID.fullmatch(plugin_id), 'native_delivery_scope_invalid')
+        from contracts import canonical
+        body = canonical(envelope)
+        require(len(body)<=192*1024, 'native_delivery_too_large')
+        request = urllib.request.Request(self.config['apiBaseUrl'].rstrip('/')+'/api/plugins/'+plugin_id+'/webhooks/terminal',
+            data=body,headers={'Content-Type':'application/json'})
+        with self.opener.open(request,timeout=25) as response:
+            require(response.status==200, 'native_delivery_unconfirmed')
+            raw = response.read(16385)
+            require(len(raw)<=16384, 'native_delivery_response_too_large')
+            # Transport acknowledgement only. The owning service independently
+            # verifies the actual native state/document/wake before ledger ACK.
+            return closed_json(raw)
+
     def admission_gates_sql(self, company_id, task_id):
         require(UUID.fullmatch(company_id) and UUID.fullmatch(task_id), 'native_gate_ids_invalid')
         sql = f"""SELECT json_build_object('companyActive',c.status='active' AND c.paused_at IS NULL,

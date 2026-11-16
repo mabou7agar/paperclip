@@ -1,6 +1,7 @@
 import { and, eq, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { plugins, pluginState } from "@paperclipai/db";
+import { signalDatabaseWork } from "@paperclipai/db/work-signals";
 import type {
   PluginStateScopeKind,
   SetPluginState,
@@ -66,10 +67,20 @@ function scopeConditions(
  * @see PLUGIN_SPEC.md §15.1 — Capabilities: Plugin State
  * @see PLUGIN_SPEC.md §21.3 — `plugin_state` table
  */
-export function pluginStateStore(db: Db) {
+export function pluginStateStore(db: Db, options: { notifyCommittedChanges?: boolean } = {}) {
   // -----------------------------------------------------------------------
   // Internal helpers
   // -----------------------------------------------------------------------
+
+  async function writeState<T>(pluginId: string, write: (database: Db) => Promise<T>): Promise<T> {
+    // Ordinary plugins retain their original single-write path. Only a manifest
+    // explicitly requesting commit notifications adds the transaction/XID work.
+    if (!options.notifyCommittedChanges) return write(db);
+    return db.transaction(async tx => {
+      await signalDatabaseWork(tx, `plugin-state:${pluginId}`, undefined, { notify: true });
+      return write(tx as unknown as Db);
+    });
+  }
 
   async function assertPluginExists(pluginId: string): Promise<void> {
     const rows = await db
@@ -135,30 +146,32 @@ export function pluginStateStore(db: Db) {
       const namespace = input.namespace ?? DEFAULT_NAMESPACE;
       const scopeId = input.scopeId ?? null;
 
-      await db
-        .insert(pluginState)
-        .values({
-          pluginId,
-          scopeKind: input.scopeKind,
-          scopeId,
-          namespace,
-          stateKey: input.stateKey,
-          valueJson: input.value,
-          updatedAt: new Date(),
-        })
-        .onConflictDoUpdate({
-          target: [
-            pluginState.pluginId,
-            pluginState.scopeKind,
-            pluginState.scopeId,
-            pluginState.namespace,
-            pluginState.stateKey,
-          ],
-          set: {
+      await writeState(pluginId, async database => {
+        await database
+          .insert(pluginState)
+          .values({
+            pluginId,
+            scopeKind: input.scopeKind,
+            scopeId,
+            namespace,
+            stateKey: input.stateKey,
             valueJson: input.value,
             updatedAt: new Date(),
-          },
-        });
+          })
+          .onConflictDoUpdate({
+            target: [
+              pluginState.pluginId,
+              pluginState.scopeKind,
+              pluginState.scopeId,
+              pluginState.namespace,
+              pluginState.stateKey,
+            ],
+            set: {
+              valueJson: input.value,
+              updatedAt: new Date(),
+            },
+          });
+      });
     },
 
     /**
@@ -183,9 +196,10 @@ export function pluginStateStore(db: Db) {
         namespace = DEFAULT_NAMESPACE,
       }: { scopeId?: string; namespace?: string } = {},
     ): Promise<void> => {
-      await db
-        .delete(pluginState)
-        .where(scopeConditions(pluginId, scopeKind, scopeId, namespace, stateKey));
+      await writeState(pluginId, async database => {
+        await database.delete(pluginState)
+          .where(scopeConditions(pluginId, scopeKind, scopeId, namespace, stateKey));
+      });
     },
 
     /**

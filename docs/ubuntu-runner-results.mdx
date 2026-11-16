@@ -16,8 +16,9 @@ the marker or starts the controller again. Uncertain termination/cleanup remains
 quarantined and blocks new admission until positive retained evidence resolves
 it. A new packet, timestamp, job ID or arbitrary commit is not failure progress.
 
-A completion hint contains only `jobId`. The plugin obtains the measured result
-from the operator Unix socket, saves an immutable task document, then requests a
+In native mode the root broker sends a signed completion through the existing
+loopback plugin webhook. The plugin verifies its public-key binding and retained
+request, saves an immutable task document, then requests a
 durable, keyed native wake. Paperclip's normal pause, dependency, budget, execution and
 review guards still apply. An optional `expectedAssigneeAgentId` also prevents a result from waking a new
 owner after a reassignment race. The existing task/provider session and plan remain
@@ -25,7 +26,7 @@ owned by native admission; the plugin never writes assignment, review counters o
 An unchanged failure uses the native SDK update service to enter a visible
 blocked wait once; it does not wake the worker again. The normal lead/review/CTO handoff remains unchanged.
 
-Duplicate hints and lost acknowledgements reuse the document and the original
+Duplicate deliveries and lost acknowledgements reuse the document and the original
 native wake receipt/run. A new closed diagnostic or actual gate result may cause
 one new continuation; the same unresolved failure is recorded without another
 wake. Delivery retries never execute tests or call a provider themselves.
@@ -50,6 +51,13 @@ The forced command accepts only stage/launch/inspect/cancel/artifact operations
 and validated identities. It denies interactive shells, arbitrary paths, remote
 `--run`, forwarding and caller commands. Pin the independently verified host key;
 do not disable host verification or reuse an agent's credential.
+
+The recommended unprivileged-server configuration is described in
+[Native runner result transport](./ubuntu-runner-native-transport). It uses
+commit-bound native state notifications and a signed loopback webhook, without
+mounting root IPC or credentials into the application. The following IPC
+configuration remains only for the backward-compatible isolated root-plugin
+service; it is not suitable for a plugin sharing the native agents' UID.
 
 On the Paperclip host, provision a root-private native operator token file,
 root-private SSH key and known-hosts file, root-only state directory, and

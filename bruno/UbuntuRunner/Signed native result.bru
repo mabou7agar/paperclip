@@ -1,0 +1,26 @@
+meta {
+  name: Deliver a retained signed runner envelope
+  type: http
+  seq: 3
+}
+post {
+  url: {{baseUrl}}/api/plugins/{{pluginId}}/webhooks/terminal
+  body: json
+  auth: none
+}
+body:json {
+  { "payload": "{{envelopePayload}}", "signature": "{{envelopeSignature}}" }
+}
+tests {
+  test("Native webhook records transport delivery", function () {
+    expect(res.getStatus()).to.equal(200);
+    expect(res.getBody().status).to.equal("success");
+  });
+}
+docs {
+  Replay only an existing root-signed envelope for its original task and plugin.
+  The private signing key never enters Bruno or the application. HTTP success is
+  not execution or acceptance evidence; the broker independently verifies the
+  saved admission or matching native document/wake before acknowledging it.
+  Do not create another test attempt to exercise this request.
+}

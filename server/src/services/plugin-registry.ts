@@ -1,3 +1,4 @@
+import { signalDatabaseWork } from "@paperclipai/db/work-signals";
 import { notifyExternalObjectRefresh } from "./external-object-refresh-notifications.js";
 import { isDeepStrictEqual } from "node:util";
 import { writePluginJobChange } from "./plugin-job-work-notifications.js";
@@ -89,9 +90,10 @@ export function pluginRegistryService(db: Db) {
       .then((rows) => rows[0] ?? null);
   }
 
-  async function writeWorkspaceProviderChange<T>(reconsiderWorkspaces: boolean, write: (database: Db) => Promise<T>): Promise<T> {
+  async function writeWorkspaceProviderChange<T>(reconsiderWorkspaces: boolean, write: (database: Db) => Promise<T>, statePluginId?: string): Promise<T> {
     return db.transaction(async tx => {
       await notifyExternalObjectRefresh(tx);
+      if (statePluginId) await signalDatabaseWork(tx, `plugin-state:${statePluginId}`, undefined, { notify: true });
       if (reconsiderWorkspaces) await notifyDeliveryWork(tx, DELIVERY_QUEUES.terminalWorkspaces);
       return write(tx as unknown as Db);
     });
@@ -255,7 +257,7 @@ export function pluginRegistryService(db: Db) {
         .set(setClause)
         .where(eq(plugins.id, id))
         .returning()
-        .then((rows) => rows[0] ?? null));
+        .then((rows) => rows[0] ?? null), data.status !== undefined && data.status !== plugin.status && plugin.manifestJson.capabilities.includes("plugin.state.notify") ? id : undefined);
     },
 
     // ----- Status ---------------------------------------------------------
@@ -276,7 +278,7 @@ export function pluginRegistryService(db: Db) {
         })
         .where(eq(plugins.id, id))
         .returning()
-        .then((rows) => rows[0] ?? null));
+        .then((rows) => rows[0] ?? null), input.status !== plugin.status && plugin.manifestJson.capabilities.includes("plugin.state.notify") ? id : undefined);
     },
 
     // ----- Uninstall / Remove --------------------------------------------

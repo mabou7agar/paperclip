@@ -54,7 +54,7 @@ function install(connection: Connection, context: Context) {
 }
 
 /** Await BEFORE the queue write, on its transaction. Nested transactions work. */
-export async function signalDatabaseWork(connection: object, topic: string, hint?: string): Promise<void> {
+export async function signalDatabaseWork(connection: object, topic: string, hint?: string, options?: { notify?: boolean }): Promise<void> {
   const context = contexts.get(connection);
   if (!context) return; // Lightweight service test doubles have no DB lifecycle.
   const state = context.transaction;
@@ -74,7 +74,7 @@ export async function signalDatabaseWork(connection: object, topic: string, hint
   // Keep a failed acquisition distinguishable from an uncertain queue write.
   try { await state.xid; }
   catch (error) { state.xid = undefined; throw error; }
-  if (context.scope.notify) {
+  if (context.scope.notify || options?.notify === true) {
     // PostgreSQL delivers only after the outer commit, including savepoints.
     // Queue rows remain authoritative; notification payloads contain no data.
     await (connection as Connection).execute(sql`select pg_notify(${DATABASE_WORK_CHANNEL}, ${notification(context.scope, topic)})`);

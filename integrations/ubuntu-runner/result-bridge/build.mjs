@@ -15,10 +15,10 @@ const pkg = JSON.parse(await readFile(path.join(source, 'plugin/package.json'), 
 delete pkg.peerDependencies;
 await writeFile(path.join(destination, 'plugin/package.json'), JSON.stringify(pkg, null, 2) + '\n');
 const files = ['plugin/worker.mjs', 'plugin/manifest.mjs', 'plugin/package.json'];
-for (const file of await readdir(path.join(source, 'broker'))) if (file.endsWith('.py')) {
+for (const file of await readdir(path.join(source, 'broker'))) if (file.endsWith('.py') || file === 'native_events.mjs') {
   await copyFile(path.join(source, 'broker', file), path.join(destination, 'broker', file)); files.push('broker/' + file);
 }
-for (const file of ['install.py', 'paperclip-runner-results.service']) {
+for (const file of ['install.py', 'paperclip-runner-results.service', 'agent-isolation.apparmor']) {
   await copyFile(path.join(source, file), path.join(destination, file)); files.push(file);
 }
 const manifest = {};

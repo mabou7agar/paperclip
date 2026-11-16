@@ -1,0 +1,23 @@
+{
+  "request": {
+    "companyId": "00000001-1111-4111-8111-000000000001",
+    "projectId": "00000002-1111-4111-8111-000000000002",
+    "taskId": "00000003-1111-4111-8111-000000000003",
+    "agentId": "00000004-1111-4111-8111-000000000004",
+    "sourceRunId": "00000005-1111-4111-8111-000000000005",
+    "attachmentId": "00000006-1111-4111-8111-000000000006",
+    "profile": "fixture",
+    "kind": "control_checks",
+    "packetSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "scopeIssueId": null,
+    "scopeCommentId": null,
+    "ackCommentId": null,
+    "recipe": "fixture-new.py"
+  },
+  "jobId": "30afabc7-920c-5dae-84c1-5eefb952e3e0",
+  "requestDigest": "2ce56c83e4739263616d70d0016f6b251653644a43812d29ea0256242630adfc",
+  "pluginId": "00000007-1111-4111-8111-000000000007",
+  "wakeKey": "runner-result:30afabc7-920c-5dae-84c1-5eefb952e3e0:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "wakeId": "0f7a404e-929f-517c-ac68-ec44d88e0ad3",
+  "wakeDigest": "2c148e6695c3f006c82ec22128fe534f1a70a967f5204e4975c7f480b27f4535"
+}

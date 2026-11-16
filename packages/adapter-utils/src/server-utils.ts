@@ -1,5 +1,6 @@
 import type { ExecutionContinuationEnvelope } from "@paperclipai/shared";
 import { spawn, type ChildProcess } from "node:child_process";
+import { localAgentLaunchTarget, readLocalAgentLaunchPolicy, assertLocalAgentLaunchEnvironment, localAgentInheritedEnvironment } from "./local-agent-launch-policy.js";
 import { createHash, randomUUID } from "node:crypto";
 import { constants as fsConstants, promises as fs, type Dirent } from "node:fs";
 import os from "node:os";
@@ -4803,8 +4804,9 @@ export async function runChildProcess(
     opts.onLogError ??
     ((err, id, msg) => console.warn({ err, runId: id }, msg));
   return new Promise<RunProcessResult>((resolve, reject) => {
+    const localLaunchPolicy = opts.remoteExecution ? null : readLocalAgentLaunchPolicy();
     const rawMerged: NodeJS.ProcessEnv = {
-      ...sanitizeInheritedPaperclipEnv(process.env),
+      ...localAgentInheritedEnvironment(sanitizeInheritedPaperclipEnv(process.env),localLaunchPolicy),
       ...opts.env,
     };
 
@@ -4837,7 +4839,9 @@ export async function runChildProcess(
         for (const [key, value] of Object.entries(childEnv)) {
           if (value === undefined) delete childEnv[key];
         }
-        const child = spawn(target.command, target.args, {
+        assertLocalAgentLaunchEnvironment(childEnv,localLaunchPolicy);
+        const physicalTarget = localAgentLaunchTarget(target.command, target.args, localLaunchPolicy);
+        const child = spawn(physicalTarget.command, physicalTarget.args, {
           cwd: target.cwd ?? opts.cwd,
           env: childEnv,
           detached: process.platform !== "win32",

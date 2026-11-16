@@ -1,0 +1,320 @@
+# Native runner result transport
+
+The optional Ubuntu result integration can run with an unprivileged Paperclip
+server. The plugin writes an intent through native plugin state; the root broker
+verifies that intent against the original run and the existing admission gates.
+Root-signed envelopes return through the existing native plugin webhook over loopback. Native task
+checkout, session preparation, execution guards, review and handoff still belong
+to Paperclip.
+
+This transport does not grant a new root execution right. Existing source review,
+Security approval, CTO scope, worker acknowledgement, attempt ownership, resource
+admission, cleanup and quarantine checks remain required.
+
+## Process boundary first
+
+An agent that shares the server's UID can otherwise open the server's initial
+environment or IPC descriptors. A plugin-held token does not fix that boundary.
+Do not mount the root broker's API token, HMAC, SSH identity or signing key into
+the application container, and do not run the application as root.
+
+An optional instance launch policy uses Linux AppArmor to put local agent
+processes in a separate domain while retaining the same UID, cwd, provider
+command and saved conversation. The example `agent-isolation.apparmor` preserves
+Docker's baseline mount, kernel filesystem, obsolete socket-family and capability
+restrictions. It permits a one-way transition from `paperclip-control` to
+`paperclip-agent`; agents cannot transition back. Agent reads of server/vault
+credentials and cross-domain ptrace/descriptor access are denied. Parent
+observation and cancellation remain allowed. This is a process/vault boundary,
+not a claim of complete per-workspace or per-company filesystem isolation.
+The example assumes `/paperclip` is the runtime home and `/app` holds live server
+code. It denies writes to live code and access to host container-control sockets.
+It also protects instance config/environment, embedded database, backups and
+logs; installed plugins, shell/Git/npm configuration, executable home paths and
+their replaceable ancestors. Prepare required provider/cache home directories
+before activation. Agents can use existing writable provider/workspace subtrees
+but cannot create or replace entries at the server home or instance root.
+Use a separate development checkout. Review and qualify the deny paths if those
+runtime locations differ; a fixture at another path does not attest a real vault.
+
+The operator supplies a root-owned, non-writable, non-symlink policy file outside
+the application home. Set `PAPERCLIP_LOCAL_AGENT_LAUNCH_POLICY` on the server to
+that file:
+
+```json
+{"kind":"apparmor","executable":"/opt/paperclip-agent-isolation/aa-exec","profile":"paperclip-agent"}
+```
+
+The executable and its ancestors must also be root-owned and non-writable. It
+must be an ELF binary, without setuid or setgid. Install/load the reviewed AppArmor profiles and
+start the application under `paperclip-control`. Mount only the executable,
+required public shared library and policy as read-only files outside the
+application home. Keep the default Docker seccomp filter and existing capability
+set: no privileged container, unconfined profile or `CAP_SYS_ADMIN` is required.
+
+The shared ACP engine uses ACPX's physical spawn hook. The local ACPX 0.12 patch
+backports the same optional launch and pre-dispatch protocol hooks already used
+in the newer runner dependency; it does not migrate provider versions. Ordinary
+deployments without the instance policy retain the prior path. When confinement
+is required, startup failures never fall back to an unconfined process, the CLI
+engine, a fresh conversation or another provider launch. A warm process from a
+different launch policy is closed without discarding saved provider history;
+the compatible conversation is loaded into the newly confined process.
+
+Server-side workspace commands use the shared optional process boundary too.
+This includes Git hooks/filters/helpers, workspace runtime services, source
+memory workers, repository acquisition/restoration and streamed Git operations.
+Local archive capture/restore injects that executor while its serialized sandbox
+implementation remains self-contained. Already bounded read-only inventory
+operations keep their explicit isolated Git environment and disabled hooks and
+fsmonitor. Server startup instrumentation in the immutable application tree and fixed
+SSH/tar sandbox transfer operations are not workspace code executions; their
+existing bounded transport remains unchanged. No global child-process monkey patch is installed.
+
+ACP requests asking the parent to read/write files or start/manage terminals
+are refused before dispatch, because otherwise the parent would bypass the
+child's confinement. Use providers with their own filesystem/terminal tools.
+The initialization request advertises those parent capabilities as disabled.
+Loader-injection environment variables are rejected before the transition
+executable starts, rather than letting agent configuration run code in the
+parent domain first.
+An unsupported provider remains unavailable; this setting does not silently
+weaken its permissions. The already isolated remote sandbox transport remains
+unchanged. Local CLI child processes use the same launch policy.
+Confined CLI children inherit only ordinary host paths, locale, proxy and trust
+settings. Credentials must come from the adapter's explicit launch environment;
+the server's database and unrelated secrets are not inherited. Deployments
+without the policy retain their previous environment contract.
+
+Qualify the actual native agent after rollout, not just `docker exec`: it must
+be unable to open the server environment, IPC pipes, vault or another agent's
+pipe. Reading an FD directory's entry names is distinct from opening a pipe.
+Record both honestly. Verify actual cancellation and unchanged before/after
+session IDs. Rotate exposed server credentials through their owning services;
+never replace an encryption master key without its supported migration.
+
+## Activate the native transport
+
+Keep the broker's Ed25519 private key in a root-only host file. Bind only the
+public trust description at `/opt/paperclip-runner-trust/broker.json`:
+
+```json
+{"pluginId":"<native-plugin-id>","publicKey":"<Ed25519-public-PEM>"}
+```
+
+This sealed public file selects native transport at plugin setup. Company config
+continues to contain only allowed profile names. Without the public binding,
+legacy root IPC remains available with its original root-peer/HMAC checks; those
+checks have not been relaxed. A malformed binding fails setup. Native mode
+requires an empty legacy `callbackUrl`; native delivery derives the fixed loopback
+`/api/plugins/:pluginId/webhooks/terminal` route from `apiBaseUrl`. No board
+credential is sent to that endpoint. The native webhook accepts only a signed
+envelope, never the legacy job-ID hint.
+Stop the old broker before switching transport. Both modes now share a
+state-directory lifetime lock; do not run an older release against that same
+ledger during migration.
+
+The broker's optional `nativeQueue` object contains `pluginId`,
+`signingKeyFile`, `isolationReceiptFile`, `isolationReceiptSha256` and
+`agentPolicyFile` (an exact private copy of the final loaded policy). Optional
+`applicationContainer` selects the registered application container and defaults
+to `paperclip-paperclip-1`. It cannot supply an executable or script. Activation
+requires the exact root-owned measured isolation receipt with schema
+`paperclip.agent-isolation.v2`, `actualAgentQualified: true`, the exact final
+`policySha256`, and false values for `serverEnvironmentOpenable`,
+`serverPipeOpenable`, `serverVaultOpenable`, `serverConfigOpenable`,
+`serverEnvironmentFileOpenable`, `serverDatabaseOpenable`, `serverBackupOpenable`,
+`serverLogOpenable`, `serverPluginWritable`, `serverHomeControlWritable` and
+`serverGitEscapesConfinement`, `serverAncestorRenameAllowed` and
+`serverRepositoryHelperEscapesConfinement`. Missing measurements or a changed policy refuse
+activation. Version-one fixture receipts cannot activate this transport.
+Do not publish that receipt from a simulated fixture or infer it from reuse flags.
+
+No root secret or authenticated broker IPC is mounted in the application.
+Only plugins declaring the optional `plugin.state.notify` capability opt in
+to state-write and registry-status commit notifications. Ordinary plugin state
+writes retain their prior path, without an extra transaction, XID or NOTIFY.
+The owning host binds that capability from its trusted manifest. The opted-in
+producer uses the existing database work-signal infrastructure. A
+per-call opt-in emits only a versioned plugin topic on `paperclip_work_v1`, inside
+the same transaction as the state write. PostgreSQL publishes after the outer
+commit; failed writes and rolled-back savepoints emit nothing. This does not
+enable the instance's separate ephemeral-server notification mode.
+
+The root broker starts one passive observer through `docker exec` as UID/GID
+`1000:1000`, with Node preloads removed. Mount its root-owned static
+`native_events.mjs` read-only at `/opt/paperclip-runner-events/native_events.mjs`,
+outside the application home. It reuses the installed PostgreSQL driver and the
+container's existing `DATABASE_URL`, or an existing direct
+`PAPERCLIP_DATABASE_LISTEN_URL` when configured. LISTEN requires a direct or
+session-pooled PostgreSQL connection, not a transaction-pooled endpoint. The
+connection is read-only, uses TCP keepalive, and exposes no credentials or row
+data to the host. The root broker receives only closed readiness/invalidation
+frames over the observer's stdout. Closing its owning stdin closes the listener.
+
+A transition back to ready publishes the same commit-bound plugin topic, so
+a retained intent does not require a state rewrite or periodic poll.
+LISTEN acknowledgement precedes the initial authoritative queue scan. Each
+reconnect acknowledgement requests another scan, and a commit during a scan
+retains a dirty event. Payloads never authorize execution: even forged or
+unrelated notifications can only request a bounded native scan; existing native
+provenance, scope, review and admission checks remain mandatory. There is no
+Unix notification socket, authenticated hint inbox, second notification ledger
+or timer for rolled-back/nonexistent requests. Listener failure is visible; the
+service has bounded startup attempts rather than silently continuing without
+notifications. No root process imports application modules in the container.
+
+Mount
+the plugin outside the application home so a standard home-ownership entrypoint
+does not try to chown read-only integration files. Check that the native health
+response identifies the `native_webhook` transport before starting the broker. A changed
+plugin installation ID holds delivery; it is never silently retargeted.
+
+## Durable intent, result and acknowledgement
+
+The tool retains its native company/project/assignee/checkout checks, and writes
+one closed intent under `runner-requests`, scoped to the original issue. The
+deterministic identity excludes provider wake churn. A repeated tool call reuses
+the original source run; different content at the same key is a conflict. Each
+company has at most 128 pending intents and each intent is at most 16 KiB.
+
+The tool returns `pending_admission` immediately: this is saved intent, not a
+claimed attempt or evidence of execution. End the turn and await the native
+result; do not poll or create a timer. The broker performs bounded full scans
+using native read-only queries on startup and committed state notifications. It verifies the host-set timestamp against the
+actual source run's time window and binds the first-seen immutable digest. There
+is no timestamp cursor that could lose a transaction committed late.
+The database emits only for committed intent writes. A lost RPC acknowledgement
+returns `runner_admission_unconfirmed`, not a safe-to-repeat test or claimed
+execution; a committed write remains reconstructible from native state.
+If the broker is unavailable, its startup scan reconstructs committed intents.
+Configured idle and retained completed history cause no periodic native scans.
+Only a real external job, unread intent or pending delivery owns the 15-second
+recovery deadline. Settlement returns the broker to its blocking commit-event wait.
+
+Admission uses the existing job service and immutable outbox. An admission
+envelope is retained for the status tool before the pending intent is deleted.
+A late refusal produces one native admission document and one durable
+continuation to diagnose that precise failure; it starts no test or attempt.
+
+The broker signs domain-separated canonical bytes using OpenSSL Ed25519. The
+plugin checks the pinned root public key, signed company/plugin ID, request
+digest and exact retained request/result scope before using the existing
+result service. Result evidence is saved before `requestWakeup` with the same
+native durable key. A passed reused result remains deliverable. An unchanged
+failure is recorded without another provider wake. Reassignment or closed tasks
+retain evidence without waking the former worker. Unknown execution remains a
+reconciliation matter and never authorizes another launch.
+Signed result side effects are serialized per job, including evidence and wake
+requests, without serializing unrelated jobs. Signed results also carry their durable ledger sequence. A later reconciliation
+supersedes an older observation; delayed envelopes cannot replace that newer
+status. Replayed submissions and status reads return the retained result rather
+than a stale queued admission.
+
+The root broker independently verifies the deterministic native wake receipt,
+including company, agent, issue, plugin, reason and payload digest. It never
+trusts the webhook HTTP response as a result ACK. An accepted admission also
+requires independently reading its exact retained signed state before ledger ACK. After a lost HTTP response or
+broker restart it reads that native receipt before sending again. A
+`recorded_only` disposition requires the real issue condition and matching result
+document. Different task/company failures remain isolated. Passive transport
+recovery starts no model and does not reset attempts, sessions or review gates.
+
+## Verification and deployment scope
+
+Use the focused native queue/signature tests, root intent/outbox recovery tests,
+shared engine session tests and the real ACP parent-operation fixture. The
+negative control proves parent delegation works without the optional guard;
+guarded filesystem/terminal requests must create no file and no second process.
+Cross-language vectors cover job IDs, native wake IDs/digests and OpenSSL-to-Node
+signatures. The isolated AppArmor qualifier uses an existing networkless image,
+synthetic data and temporary profiles, and removes them afterward.
+
+Roll out only reviewed broker/plugin and main application artifacts. An unchanged
+execution-host supervisor release and its existing ownership measurements can
+remain installed; do not change that host's code digest merely to copy unused
+transport modules. Run only new, failed or invalidated checks. Existing passed
+application tests, media, source approvals and accepted revisions remain evidence
+until their actual inputs or required scope change.
+
+## Deliberate boundaries
+
+A retained pre-execution refusal is immutable. Corrected work needs a distinct
+reviewed packet or scope; editing only an acknowledgement does not reset that
+job. This is not a spent test retry. Invalid or forged provenance is ignored
+without executing or waking an untrusted target; it needs operator diagnosis,
+not another blind tool call. Unknown ownership or pending cleanup remains an
+active reconciliation obligation, including the documented 15-second deadline;
+settled history alone does not keep it active.
+
+The common agent domain allows signals between its processes. It does not
+provide cross-company process or filesystem isolation. The policy also blocks
+`/proc/self/environ` readers and agent ptrace-based debugging tools. Use a
+separate independently reviewed profile for those needs. Do not loosen the
+transport activation boundary as a workaround. Agent resume failures retain the
+existing conversation and fail visibly; confinement never fabricates a new
+session to hide a lost provider history.
+
+## Why the existing broker remains
+
+The main-host root broker owns the primary admission/job ledger and passed-input
+cache. The execution host trusts the immutable plan admitted there. Its forced
+command SSH key must remain root-only: giving it to an agent or unprivileged
+relay would transfer plan-staging authority. Retain the already reviewed Ubuntu
+supervisor and code digest; a timeout alone does not replace ownership-aware
+fixture cancellation and cleanup. The existing native intent state is a delivery
+record, not a second assignment, review, budget or provider-session engine.
+
+The result path reuses the native webhook and `ResultService`, with the existing
+root outbox providing redelivery after HTTP loss or restart. Native webhook rows
+are audit records; the route does not itself promise automatic replay. Signature
+verification happens before result effects. Only the original native request can
+bind the signed result to a task, and only the independently checked saved
+admission or document/wake settles the root outbox. Transport recovery repeats
+delivery only, never the execution or a passed check.
+
+## Workspace subprocess audit
+
+Local workspace Git calls, including compaction/fsmonitor, file status/filters,
+migration Git, persisted sources, skill snapshots and instruction-copy helpers,
+use the optional shared physical launch policy. Local provider/model CLIs use
+it too. The actual Linux qualifier exercises the compaction function with a
+malicious fsmonitor helper and ordinary writable protected ancestors: the
+unconfined control must rename/read/replace those directories, and the agent
+must fail all three operations. Read-only mounts alone are insufficient proof.
+
+Fixed startup Git metadata reads in the immutable application tree, host
+process supervision, and fixed SSH/tar transport do not evaluate workspace code
+locally. Serialized remote Git scripts execute inside their existing remote
+boundary; no local child-process wrapper is serialized into those scripts.
+The read-only local inventory copy path does not launch Git. This is a scoped
+boundary, not a global child-process patch. Explicit repository credentials must
+be supplied through an approved run-scoped adapter environment; the unchanged
+server environment is filtered. Credentials deliberately exported to a confined
+process are usable by that process and are not claimed to be isolated from it.
+
+The passive external observer keeps one LISTEN connection while the registered
+broker is enabled. It does not support suspending the database or application
+host; retain that deployment's existing always-on requirement. Blocking idle
+LISTEN is not a claim of disconnected or sleep-safe compute. Stop/restart it
+with the broker lifecycle; no per-task listeners or database scans run while
+there is no event and no actual unsettled job.
+
+If repeated application restarts exhaust the broker's three startup attempts
+in 300 seconds, its failed systemd state must alert the responsible lead once.
+After confirming the application and native DB listener are ready, the operator
+can reset only this service's failed state and start it once. Startup reconstructs
+the retained queue; never recreate jobs, reset proof attempts or wake workers to
+repair transport. General Watchdog remains paused and monitoring alert-only.
+
+A required saved-session resume refusal uses the permanent native
+`acpx_session_resume_required` result, with `retryable: false` and
+`repair_existing_session`. It retains saved history and does not start a fresh
+conversation or an identical automatic heartbeat retry. Repair the actual
+identity/configuration problem before an evidence-gated continuation.
+
+A release must include matching shared capability and SDK protocol/handler
+artifacts alongside server changes. In particular, durable wakeups require the
+`issues.wakeup.durable` declaration and SDK capability gate; the optional commit
+notifications require `plugin.state.notify`. A server-only overlay is incomplete.
+Qualify the actual packaged validator and SDK before enabling native jobs.

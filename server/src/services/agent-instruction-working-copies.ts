@@ -7,7 +7,7 @@ import type { createDeliveryWorkCoordinator } from "./delivery-work-coordinator.
 import { registerScopedDeadlineWork } from "./scoped-deadline-work.js";
 import { agentDirectoryWorkingCopyService, isAgentDirectoryCopy } from "./agent-directory-working-copies.js";
 import { createHash } from "node:crypto";
-import { execFile as execFileCallback } from "node:child_process";
+import { execFile as execFileCallback } from "@paperclipai/adapter-utils/local-workspace-process";
 import { promisify } from "node:util";
 import fs from "node:fs/promises";
 import path from "node:path";

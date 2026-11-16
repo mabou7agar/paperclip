@@ -1,3 +1,4 @@
+import { execFile as workspaceExecFile } from "@paperclipai/adapter-utils/local-workspace-process";
 /**
  * A portable, streaming workspace archive. This function is intentionally
  * self-contained: the same implementation runs locally and in a sandbox.
@@ -15,7 +16,7 @@ async function workspaceArchive(input: {
   signal?: AbortSignal;
   maxEntries?: number;
   maxManifestBytes?: number;
-}): Promise<{ schema: "paperclip.remote-workspace-archive.v1"; manifestDigest: string; byteSize: number; sha256: string; entries: number }> {
+}, gitExec?: typeof import("node:child_process").execFile): Promise<{ schema: "paperclip.remote-workspace-archive.v1"; manifestDigest: string; byteSize: number; sha256: string; entries: number }> {
   const fs = await import("node:fs/promises");
   const { createReadStream } = await import("node:fs");
   const path = await import("node:path");
@@ -44,7 +45,7 @@ async function workspaceArchive(input: {
   };
   const git = (cwd: string, args: string[], stdin?: string) => new Promise<string>((resolve, reject) => {
     check();
-    const command = child.execFile("git", ["-c", "core.fsmonitor=false", "-c", "pack.threads=1", "-c", "protocol.allow=never", "-c", `core.hooksPath=${os.devNull}`, "-C", cwd, ...args], {
+    const command = (gitExec ?? child.execFile)("git", ["-c", "core.fsmonitor=false", "-c", "pack.threads=1", "-c", "protocol.allow=never", "-c", `core.hooksPath=${os.devNull}`, "-C", cwd, ...args], {
       signal: input.signal, timeout: 300_000, maxBuffer: 64 * 1024 * 1024,
       env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: os.devNull, GIT_TERMINAL_PROMPT: "0", GIT_OPTIONAL_LOCKS: "0",
         GIT_DIR: undefined, GIT_COMMON_DIR: undefined, GIT_WORK_TREE: undefined, GIT_INDEX_FILE: undefined,
@@ -630,7 +631,7 @@ async function workspaceArchive(input: {
 }
 
 export function captureRemoteWorkspaceDirectory(input: { cwd: string; archivePath: string; manifestPath?: string; exclude?: string[]; requireNoGit?: boolean; gitSourceRoots?: string[]; signal?: AbortSignal }) {
-  return workspaceArchive({ ...input, kind: "capture" });
+  return workspaceArchive({ ...input, kind: "capture" },workspaceExecFile);
 }
 
 export async function readRemoteWorkspaceArchiveDirectories(archivePath: string, expectedManifestDigest: string) {
@@ -658,7 +659,7 @@ export async function readRemoteWorkspaceArchiveDirectories(archivePath: string,
 }
 
 export function restoreRemoteWorkspaceArchive(input: { archivePath: string; targetDir: string; expectedManifestDigest: string; signal?: AbortSignal; maxEntries?: number; maxManifestBytes?: number }) {
-  return workspaceArchive({ ...input, kind: "restore" });
+  return workspaceArchive({ ...input, kind: "restore" },workspaceExecFile);
 }
 
 export function remoteWorkspaceCaptureFailureMessage(error: unknown): string | null {
