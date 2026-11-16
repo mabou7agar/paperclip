@@ -106,3 +106,22 @@ class RemoteWorkerTests(unittest.TestCase):
              patch.object(worker.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout=b'dead')):
             self.assertEqual(worker.inspect(self.identity)['phase'], 'attempted')
         self.assertFalse((self.root / 'reconciled.json').exists())
+
+
+class OldControlReconciliationTests(unittest.TestCase):
+    setUp = RemoteWorkerTests.setUp
+    tearDown = RemoteWorkerTests.tearDown
+    def test_old_unknown_control_with_positive_absence_is_settled_without_reexecution(self):
+        (self.root/'attempt.json').write_text(json.dumps({'jobId':self.identity}));(self.root/'attempt.json').chmod(0o600)
+        old={'status':'unknown','kind':'control_checks','cleanupComplete':False,'auditComplete':False}
+        (self.root/'result.json').write_text(json.dumps(old));(self.root/'result.json').chmod(0o600)
+        recovered={'status':'failed','kind':'control_checks','cleanupComplete':True,'auditComplete':False,'testOutcome':'unavailable'}
+        with patch.object(worker.subprocess,'run',return_value=SimpleNamespace(returncode=0,stdout=b'exited\n')), \
+             patch.object(worker,'reconcile_control',return_value=recovered) as reconcile, \
+             patch.object(worker,'control_checks') as execute:
+            value=worker.inspect(self.identity)
+            self.assertEqual(value,{'phase':'terminal','result':recovered})
+            self.assertEqual(worker.inspect(self.identity),value)
+            self.assertEqual(reconcile.call_count,1)
+            execute.assert_not_called()
+            self.assertEqual(json.loads((self.root/'result.json').read_text()),old)

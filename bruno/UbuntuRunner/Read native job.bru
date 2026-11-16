@@ -1,0 +1,47 @@
+meta {
+  name: Read retained native runner job
+  type: http
+  seq: 4
+}
+post {
+  url: {{baseUrl}}/api/plugins/tools/execute
+  body: json
+  auth: bearer
+}
+auth:bearer {
+  token: {{apiKey}}
+}
+body:json {
+  {
+    "tool": "paperclip.ubuntu-runner-results:runner-job-status",
+    "parameters": { "jobId": "{{jobId}}" },
+    "runContext": {
+      "companyId": "{{companyId}}",
+      "projectId": "{{projectId}}",
+      "agentId": "{{agentId}}",
+      "runId": "{{runId}}"
+    }
+  }
+}
+tests {
+  test("Read does not replace the saved job identity", function () {
+    expect(res.getStatus()).to.equal(200);
+    const body = res.getBody();
+    const result = body.result;
+    const value = result.data || JSON.parse(result.content);
+    expect(value.jobId).to.equal(bru.getVar("jobId"));
+    if (bru.getVar("expectRecoveredCompletion") === "true") {
+      expect(value.state).to.equal("terminal");
+      expect(value.result.result.recoveredCompletion).to.equal(true);
+      expect(value.result.result.executionRepeated).to.equal(false);
+      expect(value.result.result.cleanupComplete).to.equal(true);
+    }
+  });
+}
+docs {
+  Read an existing job through the normal authenticated plugin tool API. Use an
+  existing permitted agent/run context; never start a provider just to read it.
+  This request starts no job and emits no wake. An optional recovered completion
+  retains the original execution facts; it is not a fresh test or feature pass.
+  Set expectRecoveredCompletion=true only after actual recovery and cleanup.
+}

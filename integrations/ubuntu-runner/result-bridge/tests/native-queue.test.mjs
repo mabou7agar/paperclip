@@ -168,3 +168,22 @@ test('public native webhook needs no board actor but binds signature, company, t
   await f.client.receiveWebhook(result,new ResultService(f.ctx,f.client));
   assert.equal(f.docs.size,1);assert.equal(f.physicalWakes,1);
 });
+
+
+test('recovered control completion preserves facts through the unchanged webhook and wakes once',async()=>{
+  const f=fixture();await f.client.call('submit',f.request);
+  await f.client.receiveWebhook(f.envelope('admission',{jobId:f.result.jobId,state:'queued'}),f.service);
+  const result={...f.result,result:{status:'passed',kind:'control_checks',auditComplete:true,
+    cleanupComplete:true,containerRemoved:true,recoveredCompletion:true,executionRepeated:false,
+    facts:{uid:1001,network:'none',workspaceMounts:0,exit:0,scratchRemoved:true,overflow:false,timedOut:false,
+      checks:{newControls:39,oldChecks:0,status:'PASS'}},controlDigest:'a'.repeat(64),
+    recipeSha256:'d'.repeat(64),preparedImageSha256:'e'.repeat(64)}};
+  const signed=f.envelope('result',result);
+  await f.client.receiveWebhook(signed,f.service);
+  await f.client.receiveWebhook(signed,new ResultService(f.ctx,f.client));
+  const status=await f.client.call('status',{jobId:f.result.jobId,companyId:f.request.companyId,agentId:f.request.agentId});
+  assert.equal(status.state,'terminal');assert.deepEqual(status.result.result,result.result);
+  assert.equal(f.physicalWakes,1);assert.equal(f.docs.size,1);
+  assert.match([...f.docs.values()][0].body,/recoveredCompletion/);
+  assert.match([...f.docs.values()][0].body,/executionRepeated/);
+});

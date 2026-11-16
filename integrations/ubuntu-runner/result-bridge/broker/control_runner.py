@@ -4,11 +4,18 @@ import pathlib
 import subprocess
 from bounded_process import capture
 from contracts import canonical, closed_json, closed_diagnostic, digest, require, Refusal
+from control_results import validated_result, preserve_completion, recover_completion
 INSTALL = pathlib.Path('/opt/paperclip-ubuntu-runner-results')
 
 
 def lookup_control(name):
-    template = '{"job":{{json(index .Config.Labels "paperclip.runner.job")}},"plan":{{json(index .Config.Labels "paperclip.runner.plan")}},"running":{{json .State.Running}}}'
+    template = ('{"job":{{json (index .Config.Labels "paperclip.runner.job")}},'
+                '"plan":{{json (index .Config.Labels "paperclip.runner.plan")}},'
+                '"running":{{json .State.Running}},"exit":{{json .State.ExitCode}},'
+                '"image":{{json .Image}},"user":{{json .Config.User}},'
+                '"network":{{json .HostConfig.NetworkMode}},"readonly":{{json .HostConfig.ReadonlyRootfs}},'
+                '"privileged":{{json .HostConfig.Privileged}},"mountCount":{{len .Mounts}},'
+                '"capDrop":{{json .HostConfig.CapDrop}},"securityOpt":{{json .HostConfig.SecurityOpt}}}')
     result = subprocess.run(['docker', 'inspect', '--type=container', '--format', template, name], capture_output=True, timeout=15)
     if result.returncode == 0:
         require(len(result.stdout) <= 1024, 'control_identity_unavailable')
@@ -32,14 +39,21 @@ def remove_owned_control(name, plan):
 
 def reconcile_control(root, plan, write_once):
     name = 'paperclip-controls-' + plan['jobId']
-    if lookup_control(name) is not None:
+    current = lookup_control(name)
+    # Preserve completion BEFORE cleanup. Old releases may have lost the return
+    # value when finally raised, while the original stopped container kept it.
+    completion = recover_completion(root, plan, current)
+    if current is not None:
         try:
             write_once(root / 'orphan-cleanup-attempt.json', {'jobId': plan['jobId'], 'kind': 'owned_control_cleanup'})
         except FileExistsError:
             return {'status': 'unknown', 'kind': 'control_checks', 'code': 'control_cleanup_not_confirmed'}
         remove_owned_control(name, plan)
+    if completion:
+        return {**completion, 'cleanupComplete': True, 'containerRemoved': True,
+                'recoveredCompletion': True, 'executionRepeated': False}
     return {'status': 'failed', 'kind': 'control_checks', 'code': 'control_unit_terminated',
-            'cleanupComplete': True, 'executionStarted': True, 'testOutcome': 'unavailable'}
+            'cleanupComplete': True, 'auditComplete': False, 'executionStarted': True, 'testOutcome': 'unavailable'}
 
 
 def control_checks(root, plan, packet):
@@ -88,13 +102,9 @@ print(json.dumps(out))
         require(result['exit'] == 0 and not result['timedOut'] and
                 not result['stdout']['overflow'] and not result['stderr']['overflow'], 'control_process_failed')
         raw = result['stdout']['retained']
-        facts = closed_diagnostic(closed_json(raw))
-        require(facts['uid'] == profile['uid'] and facts['network'] == 'none' and facts['scratchRemoved'] is True and facts['overflow'] is False and facts['timedOut'] is False,
-                'control_boundary_failed')
-        return {'status': 'passed' if facts['exit'] == 0 else 'failed', 'kind': 'control_checks',
-                'recipeSha256': packet.file_sha(request['recipe']), 'facts': facts, 'cleanupComplete': True,
-                'controlDigest': plan['admission']['controlDigest'],
-                'preparedImageSha256': image.removeprefix('sha256:'), 'containerRemoved': True}
+        value = validated_result(plan, packet, closed_json(raw))
+        preserve_completion(root, plan, value)
+        return {**value, 'cleanupComplete': True, 'containerRemoved': True}
     except Refusal as error:
         return {'status': 'failed', 'kind': 'control_checks', 'code': error.code, 'cleanupComplete': True}
     finally:
