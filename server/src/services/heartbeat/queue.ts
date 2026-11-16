@@ -1,3 +1,4 @@
+import { pendingAddressedInteractionReceiptSql } from "../../repositories/addressed-interactions.js";
 import { completionReceiptSourceReady, taskCompletionReceiptState, TASK_COMPLETION_RECEIPT_REASON } from "../task-completion-receipts.js";
 import { addressedInteractionWakeState } from "../addressed-interaction-wake.js";
 import { assertPluginWakeupReceipt, isPluginWakeupReceiptCollision } from "../plugin-wakeup-receipts.js";
@@ -1961,12 +1962,14 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
     // A server restart or a message/cleanup race can leave a deferred wake
     // after its owner has released the issue lock. Revisit it through the same
     // release admission, so recovery holds and operator Stops still apply.
-    const strandedQueues = await db.select({ wake: agentWakeupRequests, executionStageReceipt: currentExecutionStageReceiptSql })
+    const strandedQueues = await db.select({ wake: agentWakeupRequests, executionStageReceipt: currentExecutionStageReceiptSql,
+      addressedInteractionReceipt: pendingAddressedInteractionReceiptSql })
       .from(agentWakeupRequests)
       .innerJoin(issues, and(eq(issues.companyId, agentWakeupRequests.companyId),
         sql`${issues.id}::text = ${agentWakeupRequests.payload}->>'issueId'`,
         or(eq(issues.assigneeAgentId, agentWakeupRequests.agentId),
-          sql`${agentWakeupRequests.payload} #>> '{_paperclipWakeContext,wakeReason}' = 'issue_comment_mentioned'`)))
+          sql`${agentWakeupRequests.payload} #>> '{_paperclipWakeContext,wakeReason}' = 'issue_comment_mentioned'`,
+          pendingAddressedInteractionReceiptSql)))
       .innerJoin(companies, and(eq(companies.id, issues.companyId), eq(companies.status, "active")))
       .where(and(scope.companyId ? eq(agentWakeupRequests.companyId, scope.companyId) : undefined,
         scope.requestId ? eq(agentWakeupRequests.id, scope.requestId) : undefined,
@@ -1976,7 +1979,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           sql`jsonb_typeof(${agentWakeupRequests.payload} #> '{_paperclipWakeContext,wakeCommentIds}') = 'array'`,
           sql`${agentWakeupRequests.payload} #> '{_paperclipWakeContext,wakeCommentIds}' <> '[]'::jsonb`,
         ), sql`${agentWakeupRequests.payload}->>'mutation' = 'interaction'`,
-        dependencyResolvedWakePayloadSql, currentExecutionStageReceiptSql),
+        dependencyResolvedWakePayloadSql, currentExecutionStageReceiptSql, pendingAddressedInteractionReceiptSql),
         sql`${agentWakeupRequests.payload}->'queuedCommentInterrupt' is null`,
         sql`NOT EXISTS (SELECT 1 FROM heartbeat_runs live_issue_run
           WHERE live_issue_run.company_id = ${issues.companyId}
@@ -1986,9 +1989,13 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         cutoff ? gte(agentWakeupRequests.requestedAt, cutoff) : undefined))
       .orderBy(asc(agentWakeupRequests.updatedAt)).limit(50);
     const releasedNativeSources = new Set<string>();
-    for (const { wake, executionStageReceipt } of strandedQueues) {
+    for (const { wake, executionStageReceipt, addressedInteractionReceipt } of strandedQueues) {
+      const addressedPending = addressedInteractionReceipt && await addressedInteractionWakeState(db, {
+        companyId: wake.companyId, issueId: String(wake.payload?.issueId), agentId: wake.agentId,
+        contextSnapshot: parseObject(parseObject(wake.payload)[DEFERRED_WAKE_CONTEXT_KEY]),
+      }) === "pending";
       const dependencyWake = isDependencyResolvedWakePayload(wake.payload);
-      if (!executionStageReceipt && !dependencyWake && !queuedCommentIdsFromWakePayload(wake.payload).length &&
+      if (!executionStageReceipt && !addressedPending && !dependencyWake && !queuedCommentIdsFromWakePayload(wake.payload).length &&
           !await readQueuedInteractionResponse(db, wake.companyId, String(wake.payload?.issueId), wake.payload)) continue;
       const [latest] = await db.select({
         id: heartbeatRuns.id,

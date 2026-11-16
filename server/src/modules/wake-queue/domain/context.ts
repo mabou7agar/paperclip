@@ -106,7 +106,14 @@ function normalizeInteractionContinuationWakeContext(
   payload: Record<string, unknown> | null | undefined,
 ): void {
   if (isInteractionResolutionWakePayload(payload)) return;
+  // An addressed pending card is not a resolved-response continuation. Keep
+  // only its immutable identity; dispatch revalidates the current card/audience.
+  const addressedPending = contextSnapshot.wakeReason === "interaction_pending" &&
+    contextSnapshot.source === "issue.interaction.created" &&
+    readNonEmptyString(contextSnapshot.interactionId) !== null &&
+    ["ask_user_questions", "request_confirmation"].includes(String(contextSnapshot.interactionKind));
   for (const key of INTERACTION_CONTINUATION_CONTEXT_KEYS) {
+    if (addressedPending && (key === "interactionId" || key === "interactionKind")) continue;
     delete contextSnapshot[key];
   }
 }

@@ -4990,3 +4990,5 @@ with company/run identifiers to the process logger; it cannot append provider te
 to a completed run or borrow a successor run's recorder. Canonical native output
 export, source coverage, secret redaction and persistence-failure warnings retain
 their existing contracts.
+
+Addressed pending questions and review confirmations remain obligations for their explicit recipient after a restart, including when that recipient is not the task assignee. Recovery selects the existing receipt only while the same card and audience remain current, revalidates the normal interaction policy, and uses ordinary release admission. It preserves assignment, original request/context and all pause, Stop, access and execution-reconciliation holds. It creates no replacement wake.

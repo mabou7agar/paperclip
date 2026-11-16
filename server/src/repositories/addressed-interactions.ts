@@ -1,5 +1,5 @@
 import { and, eq, isNull, ne, or, sql } from "drizzle-orm";
-import { issues, issueThreadInteractions, type Db } from "@paperclipai/db";
+import { agentWakeupRequests, issues, issueThreadInteractions, type Db } from "@paperclipai/db";
 
 export function findAddressedInteraction(db: Db, input: {
   companyId: string; issueId: string; agentId: string; interactionId: string;
@@ -17,3 +17,22 @@ export function findAddressedInteraction(db: Db, input: {
       and (${issues.assigneeAgentId} is null or ${issues.assigneeAgentId} <> ${input.agentId}))` : undefined,
   )).limit(1).then((rows) => rows[0] ?? null);
 }
+
+/** Select existing attention obligations, never infer task ownership or permission.
+ * Recovery revalidates the complete audience policy and ordinary dispatch gates. */
+export const pendingAddressedInteractionReceiptSql = sql<boolean>`exists (
+  select 1 from issue_thread_interactions attention
+  join issues attention_issue on attention_issue.id = attention.issue_id
+    and attention_issue.company_id = attention.company_id
+  where attention.company_id = ${agentWakeupRequests}.company_id
+    and attention.issue_id::text = ${agentWakeupRequests}.payload->>'issueId'
+    and attention.id::text = ${agentWakeupRequests}.payload#>>'{_paperclipWakeContext,interactionId}'
+    and attention.addressee_agent_id = ${agentWakeupRequests}.agent_id
+    and attention.addressee_user_id is null and attention.status = 'pending'
+    and attention.kind in ('ask_user_questions', 'request_confirmation')
+    and attention.kind = ${agentWakeupRequests}.payload#>>'{_paperclipWakeContext,interactionKind}'
+    and attention_issue.status not in ('done', 'cancelled')
+    and ${agentWakeupRequests}.payload#>>'{_paperclipWakeContext,wakeReason}' = 'interaction_pending'
+    and ${agentWakeupRequests}.payload#>>'{_paperclipWakeContext,source}' = 'issue.interaction.created'
+    and coalesce(${agentWakeupRequests}.payload->'executionWait', 'null'::jsonb) = 'null'::jsonb
+)`;
