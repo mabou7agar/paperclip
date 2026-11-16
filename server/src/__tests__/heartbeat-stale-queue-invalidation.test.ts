@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { setImmediate as immediate } from "node:timers/promises";
 import * as runState from "../services/heartbeat/run-state.js";
+import * as deferredNotifications from "../services/deferred-execution-notifications.js";
 import { eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
@@ -23,6 +24,7 @@ import {
   issueExecutionDecisions,
   issueDocuments,
   issueRelations,
+  issueRecoveryActions,
   issueThreadInteractions,
   issues,
 } from "@paperclipai/db";
@@ -248,7 +250,10 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     return { companyId, agentId };
   }
 
-  it.each([false, true])("promotes a deferred stage after stale assignment cancellation, paused=%s", async paused => {
+  it.each([
+    { change: "assignment", paused: false }, { change: "assignment", paused: true },
+    { change: "interaction", paused: false }, { change: "interaction", paused: true },
+  ])("promotes a deferred stage after stale $change cancellation, paused=$paused", async ({ change, paused }) => {
     const { companyId, agentId } = await seedCompanyAndAgent();
     const [recipient] = await db.insert(agents).values({ companyId, name: "Independent review recipient", role: "engineer",
       status: paused ? "paused" : "idle", adapterType: "codex_local", adapterConfig: {},
@@ -267,7 +272,18 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
         currentParticipant: participant, returnAssignee, completedStageIds: [], changesRequestedCount: 0,
         lastDecisionId: null, lastDecisionOutcome: null, monitor: null, reviewRequest: null },
     }).returning();
-    const stale = await seedQueuedRun({ companyId, agentId, issueId: issue.id, wakeReason: "issue_assigned" });
+    const obsoleteInteractionId = randomUUID();
+    if (change === "interaction") {
+      await db.insert(issueThreadInteractions).values({ id: obsoleteInteractionId, companyId, issueId: issue.id,
+        kind: "request_confirmation", status: "expired", addresseeAgentId: agentId,
+        effectiveResolverPolicy: "not_creator", payload: { version: 1, prompt: "Review obsolete source" },
+      });
+    }
+    const stale = await seedQueuedRun({ companyId, agentId, issueId: issue.id,
+      wakeReason: change === "interaction" ? "interaction_pending" : "issue_assigned",
+      ...(change === "interaction" ? { contextExtras: { source: "issue.interaction.created",
+        interactionId: obsoleteInteractionId, interactionKind: "request_confirmation" } } : {}),
+    });
     await db.update(issues).set({ executionRunId: stale.runId }).where(eq(issues.id, issue.id));
     const [wake] = await db.insert(agentWakeupRequests).values({ companyId, agentId: recipient.id,
       source: "assignment", triggerDetail: "system", reason: "issue_execution_deferred",
@@ -299,7 +315,8 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
 
     await heartbeat.resumeQueuedRuns();
     await heartbeat.drainActiveRunExecutions();
-    expect(await heartbeat.getRun(stale.runId)).toMatchObject({ status: "cancelled", errorCode: "issue_assignee_changed", startedAt: null });
+    expect(await heartbeat.getRun(stale.runId)).toMatchObject({ status: "cancelled",
+      errorCode: change === "interaction" ? "issue_interaction_changed" : "issue_assignee_changed", startedAt: null });
     expect(countExecuteCallsForRun(stale.runId)).toBe(0);
     const readWake = () => db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake.id)).then(rows => rows[0]);
     if (paused) {
@@ -336,6 +353,53 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       executionState: { status: "completed", completedStageIds: [stageId], changesRequestedCount: 0 },
     });
   }, 60_000);
+
+  it.each(["issue_waiting_for_response", "execution_reconciliation_required"] as const)(
+    "does not renew a deferred queue after deliberate %s cancellation", async errorCode => {
+      const { companyId, agentId } = await seedCompanyAndAgent();
+      const [issue] = await db.insert(issues).values({ companyId, title: "Held continuation with saved input",
+        status: "in_progress", assigneeAgentId: agentId }).returning();
+      const queued = await seedQueuedRun({ companyId, agentId, issueId: issue.id, wakeReason: "issue_assigned" });
+      await db.update(heartbeatRuns).set({ runtimeMode: "legacy", responsibleUserId: "responsible-user",
+        resultJson: { conversationContinuation: "continue_conversation_v1" },
+      }).where(eq(heartbeatRuns.id, queued.runId));
+      await db.update(issues).set({ executionRunId: queued.runId }).where(eq(issues.id, issue.id));
+      if (errorCode === "issue_waiting_for_response") {
+        await db.insert(issueThreadInteractions).values({ companyId, issueId: issue.id, kind: "request_confirmation",
+          status: "pending", addresseeUserId: "responsible-user", effectiveResolverPolicy: "human_only",
+          payload: { version: 1, prompt: "Confirm the held change" },
+        });
+      } else {
+        await db.insert(issueRecoveryActions).values({ companyId, sourceIssueId: issue.id, kind: "active_run_watchdog",
+          ownerType: "board", cause: "uncertain_external_action", status: "resolved",
+          evidence: { runId: queued.runId, automaticRecovery: { replay: "blocked" } }, fingerprint: queued.runId,
+          nextAction: "Reconcile the uncertain action before continuing",
+        });
+      }
+      const [saved] = await db.insert(agentWakeupRequests).values({ companyId, agentId, source: "automation",
+        triggerDetail: "system", reason: "issue_execution_deferred", status: "deferred_issue_execution",
+        requestedByActorType: "system", payload: { issueId: issue.id, _paperclipWakeContext: {
+          issueId: issue.id, wakeReason: "issue_assigned", wakeSource: "automation",
+        } },
+      }).returning();
+      const beforeRuns = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns);
+      const beforeWakes = await db.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests);
+      const notify = vi.spyOn(deferredNotifications, "notifyDeferredWakesForIssue");
+      try {
+        await heartbeat.resumeQueuedRuns();
+        await heartbeat.drainActiveRunExecutions();
+        expect(await heartbeat.getRun(queued.runId)).toMatchObject({ status: "cancelled", errorCode, startedAt: null });
+        expect(mockAdapterExecute).not.toHaveBeenCalled();
+        expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, saved.id)))[0])
+          .toMatchObject({ status: "deferred_issue_execution", runId: null, payload: saved.payload });
+        expect((await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns)).map(row => row.id).sort())
+          .toEqual(beforeRuns.map(row => row.id).sort());
+        expect((await db.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests)).map(row => row.id).sort())
+          .toEqual(beforeWakes.map(row => row.id).sort());
+        expect(notify.mock.calls.filter(([, scope]) => scope.issueId === issue.id)).toHaveLength(0);
+      } finally { notify.mockRestore(); }
+    }, 60_000,
+  );
 
   it.each(["legacy", "native"])("delivers an accepted non-assignee queue after its %s owner finished", async runtimeMode => {
     const { companyId, agentId } = await seedCompanyAndAgent();

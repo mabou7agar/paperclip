@@ -1,7 +1,7 @@
 import { taskCompletionReceiptState } from "../../../services/task-completion-receipts.js";
 import { addressedInteractionWakeState } from "../../../services/addressed-interaction-wake.js";
 import { notifyExecutionRunWork } from "../../../services/execution-control-notifications.js";
-import { notifyDeferredExecutionWork } from "../../../services/deferred-execution-notifications.js";
+import { notifyDeferredExecutionWork, notifyDeferredWakesForIssue } from "../../../services/deferred-execution-notifications.js";
 import { hasRequiredWorkspaceRecovery } from "../../../services/workspace-restore-recovery-state.js";
 import { readNativeWorkspaceSyncReference } from "../../../services/native-runtime/native-workspace-sync.js";
 import { isPreDispatchExecutionWaitVerified } from "../../../services/pre-dispatch-execution-wait.js";
@@ -1145,10 +1145,12 @@ export function createPostgresRunDispatchAdapter(
       await notifyDeliveryWork(tx, DELIVERY_QUEUES.accounting, run.companyId);
       await notifyUnsafeWorkspaceExportRecovery(tx, { companyId: run.companyId, issueId });
       await notifyChatRunMilestones(tx, { companyId: run.companyId, issueId });
-      if (decision.errorCode === "issue_assignee_changed") {
-        // Register before the cancellation write in this transaction. A
-        // crash or failed immediate promotion must not lose a saved stage.
+      if (decision.errorCode === "issue_assignee_changed" || decision.errorCode === "issue_interaction_changed") {
+        // Obsolete ownership or review identity can release a saved successor.
+        // Keep the company recovery hint and also target existing issue receipts;
+        // deliberate response/reconciliation waits never renew their own queue.
         await notifyDeferredExecutionWork(tx, { companyId: run.companyId });
+        await notifyDeferredWakesForIssue(tx, { companyId: run.companyId, issueId });
       }
       const [row] = await tx
         .update(heartbeatRuns)
