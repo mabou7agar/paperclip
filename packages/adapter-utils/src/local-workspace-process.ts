@@ -1,4 +1,4 @@
-import { execFile as nativeExecFile, spawn as nativeSpawn } from "node:child_process";
+import { execFile as nativeExecFile, spawn as nativeSpawn, spawnSync as nativeSpawnSync } from "node:child_process";
 import { promisify } from "node:util";
 import { assertLocalAgentLaunchEnvironment, localAgentInheritedEnvironment, localAgentLaunchTarget,
   readLocalAgentLaunchPolicy } from "./local-agent-launch-policy.js";
@@ -47,3 +47,10 @@ Object.defineProperty(execFile,promisify.custom,{value:(...args:unknown[])=>{
   });
   return Object.assign(promise,{child:child!});
 }});
+
+/** Model metadata CLIs can also load user configuration. */
+export const spawnSync:typeof nativeSpawnSync = ((command:string,argsOrOptions?:unknown,options?:unknown)=>{
+  const args=Array.isArray(argsOrOptions)?argsOrOptions:[];
+  const value=target(command,args,(Array.isArray(argsOrOptions)?options:argsOrOptions??options) as Record<string,unknown>??{});
+  return nativeSpawnSync(value.command,value.args,value.options);
+}) as typeof nativeSpawnSync;

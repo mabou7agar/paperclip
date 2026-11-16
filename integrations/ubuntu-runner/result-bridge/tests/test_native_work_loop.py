@@ -14,7 +14,7 @@ class Finished(Exception):pass
 class NativeWorkLoopTest(unittest.TestCase):
     def fixture(self):
         transport=Mock();service=Mock()
-        transport.ledger.pending_admissions.return_value=[];transport.ledger.has_pending_hints.return_value=False
+        transport.ledger.pending_admissions.return_value=[]
         service.repository.pending.return_value=[];service.repository.unfinished.return_value=[]
         return transport,service,NativeWorkLoop(transport,service)
 
@@ -57,6 +57,19 @@ class NativeWorkLoopTest(unittest.TestCase):
         transport,service,loop=self.fixture()
         transport.receive.side_effect=Refusal('native_plugin_binding_unavailable')
         self.assertIsNone(loop.reconcile())
+
+
+    def test_commit_while_scan_is_running_keeps_a_dirty_event_for_a_second_scan(self):
+        transport,service,loop=self.fixture();inbox=Mock();pending=[False]
+        def scan():pending[0]=True
+        transport.receive.side_effect=scan
+        def wait(timeout):
+            self.assertIsNone(timeout)
+            if pending[0]:pending[0]=False;transport.receive.side_effect=None;return True
+            raise Finished()
+        inbox.wait.side_effect=wait
+        with self.assertRaises(Finished):loop.run(inbox)
+        self.assertEqual(transport.receive.call_count,2)
 
 
 if __name__=='__main__':unittest.main()

@@ -3,6 +3,8 @@ Description=Paperclip registered Ubuntu job results
 After=network-online.target docker.service
 Wants=network-online.target
 Requires=docker.service
+StartLimitIntervalSec=300
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -17,7 +19,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/var/lib/paperclip-ubuntu-runner-results /opt/paperclip-runner-ipc -/opt/paperclip-runner-wake
+ReadWritePaths=/var/lib/paperclip-ubuntu-runner-results /opt/paperclip-runner-ipc
 
 [Install]
 WantedBy=multi-user.target

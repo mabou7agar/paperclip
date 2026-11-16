@@ -11,7 +11,7 @@ function fixture() {
   const request = { companyId:randomUUID(), projectId:randomUUID(), agentId:randomUUID(), sourceRunId:randomUUID(),
     taskId:randomUUID(), profile:'fixture',kind:'control_checks',attachmentId:randomUUID(),packetSha256:'a'.repeat(64),
     scopeIssueId:null,scopeCommentId:null,ackCommentId:null,recipe:'fixture-new.py' };
-  const state = new Map(), docs = new Map(), wakes = new Map(); let physicalWakes = 0, hints = 0;
+  const state = new Map(), docs = new Map(), wakes = new Map(); let physicalWakes = 0;
   const ctx = { state:{ get:async key=>state.get(canonical(key))??null,
     set:async(key,value)=>state.set(canonical(key),structuredClone(value)),delete:async key=>state.delete(canonical(key)) },
     config:{get:async()=>({profiles:['fixture']})},issues:{
@@ -23,7 +23,7 @@ function fixture() {
         return wakes.get(value.idempotencyKey);
       },
     } };
-  const client = new NativeQueueClient(ctx,async()=>trust,async()=>{hints++;return true;}), service = new ResultService(ctx,client);
+  const client = new NativeQueueClient(ctx,async()=>trust), service = new ResultService(ctx,client);
   const actor = {companyId:request.companyId,actor:{type:'user',userId:trust.brokerUserId,companyId:request.companyId}};
   const envelope = (kind,data,patch={}) => {
     const raw = Buffer.from(canonical({schema:'paperclip.runner-envelope.v1',kind,pluginKey:PLUGIN_KEY,
@@ -34,19 +34,19 @@ function fixture() {
   const result = { jobId:jobId(request),companyId:request.companyId,projectId:request.projectId,issueId:request.taskId,
     agentId:request.agentId,profile:'fixture',status:'passed',receiptSha256:'b'.repeat(64),fingerprint:'c'.repeat(64),newEvidence:true,
     result:{status:'passed',kind:'control_checks',cleanupComplete:true} };
-  return { request,ctx,client,service,actor,envelope,result,state,docs,wakes,get physicalWakes(){return physicalWakes;},get hints(){return hints;} };
+  return { request,ctx,client,service,actor,envelope,result,state,docs,wakes,get physicalWakes(){return physicalWakes;} };
 }
 
-test('startup and ambiguous committed intent notify recovery without a provider wake',async()=>{
-  const f=fixture();await f.client.startup();assert.equal(f.hints,1);
+test('ambiguous committed state remains discoverable without a producer socket or model wake',async()=>{
+  const f=fixture();
   const set=f.ctx.state.set;
   f.ctx.state.set=async(key,value)=>{
     await set(key,value);
     if(key.namespace==='runner-requests')throw new Error('response lost after commit');
   };
-  await assert.rejects(f.client.call('submit',f.request),/admission_notification_unconfirmed/);
+  await assert.rejects(f.client.call('submit',f.request),/admission_unconfirmed/);
   assert.deepEqual(await f.ctx.state.get(requestKey(f.request.taskId,jobId(f.request))),f.request);
-  assert.equal(f.hints,2);assert.equal(f.physicalWakes,0);
+  assert.equal(f.physicalWakes,0);
 });
 
 test('native intent survives a lost tool response; admission and result use one durable continuation', async()=>{
@@ -129,12 +129,6 @@ test('reconciled progress wins over a stale signed result and replay returns ret
 });
 
 
-test('an unacknowledged notification is reported as uncertain, never as a queued execution',async()=>{
-  const f=fixture();f.client.notify=async()=>false;
-  await assert.rejects(f.client.call('submit',f.request),/admission_notification_unconfirmed/);
-  assert.deepEqual(await f.ctx.state.get(requestKey(f.request.taskId,jobId(f.request))),f.request);
-  assert.equal(f.physicalWakes,0);
-});
 
 test('per-job result serialization covers side effects as well as saved sequence',async()=>{
   const f=fixture();await f.client.call('submit',f.request);

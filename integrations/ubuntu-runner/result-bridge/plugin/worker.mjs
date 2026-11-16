@@ -21,9 +21,9 @@ return definePlugin({
         ? await service.submit(args, run) : await service.status(args.jobId, run);
         return { content: JSON.stringify(data), data }; }
       catch (error) {
-        if (error?.message === 'runner_admission_notification_unconfirmed') return {
-          error:"Runner intent is saved but admission is unconfirmed. Keep this task and session. Do not submit another job, repeat tests, poll or wake yourself. Native broker recovery owns the intent; route a persistent configuration failure to the lead once.",
-          data:{state:'admission_unconfirmed',code:'runner_notification_unconfirmed'},
+        if (error?.message === 'runner_admission_unconfirmed') return {
+          error:"Runner intent is saved but admission is unconfirmed. Keep this task and session. Do not submit another job, repeat tests, poll or wake yourself. Native commit notifications and broker recovery own any committed intent; route a persistent configuration failure to the lead once.",
+          data:{state:'admission_unconfirmed',code:'runner_state_write_unconfirmed'},
         };
         const match = /^runner_broker:([a-z][a-z0-9_]{1,99})$/.exec(error?.message ?? '');
         const code = match?.[1] ?? 'runner_request_unavailable';

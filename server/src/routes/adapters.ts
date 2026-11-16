@@ -13,7 +13,7 @@
  * @module server/routes/adapters
  */
 
-import { execFile } from "node:child_process";
+import { execFile } from "@paperclipai/adapter-utils/local-workspace-process";
 import fs from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";

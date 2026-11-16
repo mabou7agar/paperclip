@@ -132,10 +132,10 @@ def serve(config):
 def serve_native(config,service):
     """No plugin-facing socket or credential. Native host owns IPC provenance."""
     from native_transport import NativeTransport
-    from native_work_loop import NativeHintInbox, NativeWorkLoop
+    from native_work_loop import NativeWorkLoop
+    from native_events import NativeStateEvents
     transport = NativeTransport(config,service,service.native)
-    inbox=NativeHintInbox(transport.ledger,{profile["companyId"] for profile in config["profiles"].values()},
-        peer_uid=config["nativeQueue"].get("hintPeerUid",1000),peer_profile=config["nativeQueue"].get("hintPeerProfile","paperclip-control"))
+    inbox=NativeStateEvents(config["nativeQueue"]["pluginId"],config["nativeQueue"].get("applicationContainer","paperclip-paperclip-1"))
     try:NativeWorkLoop(transport,service).run(inbox)
     finally:inbox.close()
 

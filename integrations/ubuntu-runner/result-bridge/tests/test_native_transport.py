@@ -62,6 +62,7 @@ class NativeTransportTest(unittest.TestCase):
             'serverConfigOpenable':False,'serverEnvironmentFileOpenable':False,'serverDatabaseOpenable':False,
             'serverBackupOpenable':False,'serverLogOpenable':False,'serverPluginWritable':False,
             'serverHomeControlWritable':False,'serverGitEscapesConfinement':False,
+            'serverAncestorRenameAllowed':False,'serverRepositoryHelperEscapesConfinement':False,
             'policySha256':__import__('hashlib').sha256(policy.read_bytes()).hexdigest()}));receipt.chmod(0o600)
         self.config={'profiles':{'fixture':{'companyId':self.request['companyId']}},'nativeQueue':{'pluginId':self.plugin,
             'signingKeyFile':str(self.root/'unused-fixture-key'),'isolationReceiptFile':str(receipt),'agentPolicyFile':str(policy),
@@ -130,7 +131,7 @@ class NativeTransportTest(unittest.TestCase):
         import hashlib
         receipt=pathlib.Path(self.config['nativeQueue']['isolationReceiptFile'])
         original=json.loads(receipt.read_bytes())
-        for key in ['serverConfigOpenable','serverPluginWritable','serverGitEscapesConfinement']:
+        for key in ['serverConfigOpenable','serverPluginWritable','serverGitEscapesConfinement','serverAncestorRenameAllowed','serverRepositoryHelperEscapesConfinement']:
             altered=dict(original);del altered[key];receipt.write_bytes(canonical(altered))
             self.config['nativeQueue']['isolationReceiptSha256']=hashlib.sha256(receipt.read_bytes()).hexdigest()
             with self.assertRaises(Exception):NativeTransport(self.config,self.service,self.native)
@@ -138,23 +139,6 @@ class NativeTransportTest(unittest.TestCase):
         self.config['nativeQueue']['isolationReceiptSha256']=hashlib.sha256(receipt.read_bytes()).hexdigest()
         pathlib.Path(self.config['nativeQueue']['agentPolicyFile']).write_text('different-policy')
         with self.assertRaises(Exception):NativeTransport(self.config,self.service,self.native)
-
-    def test_durable_hint_survives_empty_scan_and_late_native_commit(self):
-        from native_work_loop import NativeWorkLoop
-        original=self.native.rows;self.native.rows=[]
-        hint={'jobId':job_id(self.request),**{key:self.request[key] for key in ['companyId','sourceRunId','taskId']}}
-        self.transport.ledger.retain_hint(hint,{self.request['companyId']})
-        loop=NativeWorkLoop(self.transport,self.service)
-        self.assertEqual(loop.reconcile(),15)
-        self.assertTrue(self.transport.ledger.has_pending_hints());self.assertEqual(self.created,0)
-        # The transaction becomes visible after the original signal/empty scan.
-        self.native.rows=original
-        loop.reconcile()
-        self.assertFalse(self.transport.ledger.has_pending_hints());self.assertEqual(self.created,1)
-        restarted=NativeTransport(self.config,self.service,self.native)
-        self.assertFalse(restarted.ledger.has_pending_hints())
-        with self.assertRaises(Exception):restarted.ledger.retain_hint({**hint,'sourceRunId':str(uuid.uuid4())},{self.request['companyId']})
-        self.assertFalse(self.native.wake)
 
     def test_recorded_only_ack_requires_real_plugin_document_and_closed_task(self):
         result={'jobId':job_id(self.request),'companyId':self.request['companyId'],'projectId':self.request['projectId'],

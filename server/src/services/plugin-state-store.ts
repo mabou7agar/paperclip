@@ -1,6 +1,7 @@
 import { and, eq, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { plugins, pluginState } from "@paperclipai/db";
+import { signalDatabaseWork } from "@paperclipai/db/work-signals";
 import type {
   PluginStateScopeKind,
   SetPluginState,
@@ -135,30 +136,35 @@ export function pluginStateStore(db: Db) {
       const namespace = input.namespace ?? DEFAULT_NAMESPACE;
       const scopeId = input.scopeId ?? null;
 
-      await db
-        .insert(pluginState)
-        .values({
-          pluginId,
-          scopeKind: input.scopeKind,
-          scopeId,
-          namespace,
-          stateKey: input.stateKey,
-          valueJson: input.value,
-          updatedAt: new Date(),
-        })
-        .onConflictDoUpdate({
-          target: [
-            pluginState.pluginId,
-            pluginState.scopeKind,
-            pluginState.scopeId,
-            pluginState.namespace,
-            pluginState.stateKey,
-          ],
-          set: {
+      await db.transaction(async tx => {
+        // Native commit-bound notifications are hints, never execution authority.
+        // A failed or delayed RPC cannot lose a later committed state write.
+        await signalDatabaseWork(tx, `plugin-state:${pluginId}`, undefined, { notify: true });
+        await tx
+          .insert(pluginState)
+          .values({
+            pluginId,
+            scopeKind: input.scopeKind,
+            scopeId,
+            namespace,
+            stateKey: input.stateKey,
             valueJson: input.value,
             updatedAt: new Date(),
-          },
-        });
+          })
+          .onConflictDoUpdate({
+            target: [
+              pluginState.pluginId,
+              pluginState.scopeKind,
+              pluginState.scopeId,
+              pluginState.namespace,
+              pluginState.stateKey,
+            ],
+            set: {
+              valueJson: input.value,
+              updatedAt: new Date(),
+            },
+          });
+      });
     },
 
     /**
@@ -183,9 +189,11 @@ export function pluginStateStore(db: Db) {
         namespace = DEFAULT_NAMESPACE,
       }: { scopeId?: string; namespace?: string } = {},
     ): Promise<void> => {
-      await db
-        .delete(pluginState)
-        .where(scopeConditions(pluginId, scopeKind, scopeId, namespace, stateKey));
+      await db.transaction(async tx => {
+        await signalDatabaseWork(tx, `plugin-state:${pluginId}`, undefined, { notify: true });
+        await tx.delete(pluginState)
+          .where(scopeConditions(pluginId, scopeKind, scopeId, namespace, stateKey));
+      });
     },
 
     /**

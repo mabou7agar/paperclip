@@ -1,14 +1,12 @@
 import { uuid, delivery } from './contracts.mjs';
 import { digest, stableInput, jobId, requestKey, ADMISSION_NAMESPACE } from './native-contracts.mjs';
 import { loadTrust, verifyEnvelope, verifyBrokerEnvelope } from './native-envelope.mjs';
-import { notifyNativeBroker } from './native-wake.mjs';
 
 /** Intent uses host-owned state; signed broker output uses native webhooks. No IPC secret. */
 export class NativeQueueClient {
-  constructor(ctx, trustLoader = loadTrust, notify = notifyNativeBroker) {
-    this.ctx = ctx; this.trustLoader = trustLoader; this.notify = notify; this.serial = Promise.resolve(); this.resultLocks=new Map();
+  constructor(ctx, trustLoader = loadTrust) {
+    this.ctx = ctx; this.trustLoader = trustLoader; this.serial = Promise.resolve(); this.resultLocks=new Map();
   }
-  async startup() { await this.notify(); }
   async locked(work) {
     const next = this.serial.then(work); this.serial = next.catch(() => {}); return next;
   }
@@ -56,14 +54,8 @@ export class NativeQueueClient {
         intentWriteAttempted=true;
         if (!previous) await this.ctx.state.set(key, input);
       } catch(error) {
-        if (intentWriteAttempted) throw new Error("runner_admission_notification_unconfirmed");
+        if (intentWriteAttempted) throw new Error("runner_admission_unconfirmed");
         throw error;
-      } finally {
-        // An ambiguous state-write response may already have committed. Hint
-        // even on error; a worker or plugin restart must not be a lost cursor.
-        if (intentWriteAttempted && !await this.notify({...previous??input,jobId:id})) {
-          throw new Error("runner_admission_notification_unconfirmed");
-        }
       }
       return { jobId: id, state: 'pending_admission', replayed: !!previous,
         next: 'Intent saved, not execution authority. End this turn and wait for the native result. Do not poll, repeat tests, create a timer or wake yourself.' };

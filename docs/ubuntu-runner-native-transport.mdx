@@ -117,40 +117,47 @@ ledger during migration.
 The broker's optional `nativeQueue` object contains `pluginId`,
 `signingKeyFile`, `isolationReceiptFile`, `isolationReceiptSha256` and
 `agentPolicyFile` (an exact private copy of the final loaded policy). Optional
-`hintPeerUid` and `hintPeerProfile` default to `1000` and `paperclip-control`;
-set them to the measured unprivileged plugin UID and loaded control domain. Activation
+`applicationContainer` selects the registered application container and defaults
+to `paperclip-paperclip-1`. It cannot supply an executable or script. Activation
 requires the exact root-owned measured isolation receipt with schema
 `paperclip.agent-isolation.v2`, `actualAgentQualified: true`, the exact final
 `policySha256`, and false values for `serverEnvironmentOpenable`,
 `serverPipeOpenable`, `serverVaultOpenable`, `serverConfigOpenable`,
 `serverEnvironmentFileOpenable`, `serverDatabaseOpenable`, `serverBackupOpenable`,
 `serverLogOpenable`, `serverPluginWritable`, `serverHomeControlWritable` and
-`serverGitEscapesConfinement`. Missing measurements or a changed policy refuse
+`serverGitEscapesConfinement`, `serverAncestorRenameAllowed` and
+`serverRepositoryHelperEscapesConfinement`. Missing measurements or a changed policy refuse
 activation. Version-one fixture receipts cannot activate this transport.
 Do not publish that receipt from a simulated fixture or infer it from reuse flags.
 
-No root secret or authenticated broker IPC is mounted in the application. A
-separate root-owned directory at `/opt/paperclip-runner-wake` contains only a
-writeable hint socket. Create it before starting the native broker; add it to
-the broker service's allowed write paths and mount it at the same public path
-in the application. It contains no credential or signed response. Confined
-agents cannot authenticate a hint. A hint carries only company/job/source-run/task IDs, never execution authority.
-The socket verifies both the application UID and the kernel-enforced control
-profile using `SO_PEERCRED`, the socket-bound `SO_PEERPIDFD`, and the pinned
-process’s kernel label. A shared UID alone is insufficient. This optional mode
-requires Linux 6.5+ and fails closed without the peer pidfd; it never falls back
-to a numeric PID lookup that can race process reuse. The installed 6.8 kernel
-can lack a usable AppArmor socket peer label, so `SO_PEERSEC` is not assumed.
-See the [Linux socket ABI](https://github.com/torvalds/linux/blob/v6.8/include/uapi/asm-generic/socket.h)
-and [AppArmor peer-label implementation](https://github.com/torvalds/linux/blob/v6.8/security/apparmor/lsm.c).
-These checks protect a separate hint inbox; the legacy root-peer/HMAC checks
-remain unchanged. The root ledger fsyncs an unresolved hint before its ACK.
-An empty native scan cannot consume it: only a validated matching native intent
-settles the obligation. A late commit or broker restart therefore keeps recovery
-active without waking a provider. An unacknowledged notification is returned as
-`admission_unconfirmed`, never a claimed queued execution or a safe-to-repeat
-test. The listener runs independently of execution recovery, so long-running
-inspection cannot prevent durable acknowledgement.
+No root secret or authenticated broker IPC is mounted in the application.
+Plugin state writes use the existing database work-signal infrastructure. A
+per-call opt-in emits only a versioned plugin topic on `paperclip_work_v1`, inside
+the same transaction as the state write. PostgreSQL publishes after the outer
+commit; failed writes and rolled-back savepoints emit nothing. This does not
+enable the instance's separate ephemeral-server notification mode.
+
+The root broker starts one passive observer through `docker exec` as UID/GID
+`1000:1000`, with Node preloads removed. Mount its root-owned static
+`native_events.mjs` read-only at `/opt/paperclip-runner-events/native_events.mjs`,
+outside the application home. It reuses the installed PostgreSQL driver and the
+container's existing `DATABASE_URL`, or an existing direct
+`PAPERCLIP_DATABASE_LISTEN_URL` when configured. LISTEN requires a direct or
+session-pooled PostgreSQL connection, not a transaction-pooled endpoint. The
+connection is read-only, uses TCP keepalive, and exposes no credentials or row
+data to the host. The root broker receives only closed readiness/invalidation
+frames over the observer's stdout. Closing its owning stdin closes the listener.
+
+LISTEN acknowledgement precedes the initial authoritative queue scan. Each
+reconnect acknowledgement requests another scan, and a commit during a scan
+retains a dirty event. Payloads never authorize execution: even forged or
+unrelated notifications can only request a bounded native scan; existing native
+provenance, scope, review and admission checks remain mandatory. There is no
+Unix notification socket, authenticated hint inbox, second notification ledger
+or timer for rolled-back/nonexistent requests. Listener failure is visible; the
+service has bounded startup attempts rather than silently continuing without
+notifications. No root process imports application modules in the container.
+
 Mount
 the plugin outside the application home so a standard home-ownership entrypoint
 does not try to chown read-only integration files. Check that the native health
@@ -168,15 +175,16 @@ company has at most 128 pending intents and each intent is at most 16 KiB.
 The tool returns `pending_admission` immediately: this is saved intent, not a
 claimed attempt or evidence of execution. End the turn and await the native
 result; do not poll or create a timer. The broker performs bounded full scans
-using native read-only queries on startup and producer hints. It verifies the host-set timestamp against the
+using native read-only queries on startup and committed state notifications. It verifies the host-set timestamp against the
 actual source run's time window and binds the first-seen immutable digest. There
 is no timestamp cursor that could lose a transaction committed late.
-The plugin hints after an attempted intent write, including an ambiguous write response, and at
-every worker startup. Unsettled writes remain failures, not claimed execution.
+The database emits only for committed intent writes. A lost RPC acknowledgement
+returns `runner_admission_unconfirmed`, not a safe-to-repeat test or claimed
+execution; a committed write remains reconstructible from native state.
 If the broker is unavailable, its startup scan reconstructs committed intents.
 Configured idle and retained completed history cause no periodic native scans.
 Only a real external job, unread intent or pending delivery owns the 15-second
-recovery deadline. Settlement returns the broker to its blocking hint wait.
+recovery deadline. Settlement returns the broker to its blocking commit-event wait.
 
 Admission uses the existing job service and immutable outbox. An admission
 envelope is retained for the status tool before the pending intent is deleted.
@@ -258,3 +266,30 @@ verification happens before result effects. Only the original native request can
 bind the signed result to a task, and only the independently checked saved
 admission or document/wake settles the root outbox. Transport recovery repeats
 delivery only, never the execution or a passed check.
+
+## Workspace subprocess audit
+
+Local workspace Git calls, including compaction/fsmonitor, file status/filters,
+migration Git, persisted sources, skill snapshots and instruction-copy helpers,
+use the optional shared physical launch policy. Local provider/model CLIs use
+it too. The actual Linux qualifier exercises the compaction function with a
+malicious fsmonitor helper and ordinary writable protected ancestors: the
+unconfined control must rename/read/replace those directories, and the agent
+must fail all three operations. Read-only mounts alone are insufficient proof.
+
+Fixed startup Git metadata reads in the immutable application tree, host
+process supervision, and fixed SSH/tar transport do not evaluate workspace code
+locally. Serialized remote Git scripts execute inside their existing remote
+boundary; no local child-process wrapper is serialized into those scripts.
+The read-only local inventory copy path does not launch Git. This is a scoped
+boundary, not a global child-process patch. Explicit repository credentials must
+be supplied through an approved run-scoped adapter environment; the unchanged
+server environment is filtered. Credentials deliberately exported to a confined
+process are usable by that process and are not claimed to be isolated from it.
+
+The passive external observer keeps one LISTEN connection while the registered
+broker is enabled. It does not support suspending the database or application
+host; retain that deployment's existing always-on requirement. Blocking idle
+LISTEN is not a claim of disconnected or sleep-safe compute. Stop/restart it
+with the broker lifecycle; no per-task listeners or database scans run while
+there is no event and no actual unsettled job.

@@ -1,7 +1,7 @@
 import { describe,it,expect,vi } from "vitest";
 import { promisify } from "node:util";
 import * as policy from "./local-agent-launch-policy.js";
-import { execFile,spawn } from "./local-workspace-process.js";
+import { execFile,spawn,spawnSync } from "./local-workspace-process.js";
 
 describe("optional local workspace process boundary",()=>{
   it("keeps native execFile promise and buffer contracts when the policy is absent",async()=>{
@@ -39,4 +39,15 @@ describe("optional local workspace process boundary",()=>{
       });
     } finally {reading.mockRestore();}
   });
+});
+
+
+it("confines synchronous metadata CLIs without changing native result shape",()=>{
+  const reading=vi.spyOn(policy,"readLocalAgentLaunchPolicy").mockReturnValue({kind:"apparmor",profile:"paperclip-agent",executable:"/fixture/aa-exec"});
+  const launch=vi.spyOn(policy,"localAgentLaunchTarget").mockImplementation((command,args)=>({command,args:[...args]}));
+  vi.stubEnv("METADATA_FIXTURE_SECRET","synthetic-control-only");
+  try {
+    const result=spawnSync(process.execPath,["-e","process.stdout.write(String(!!process.env.METADATA_FIXTURE_SECRET))"],{encoding:"utf8",env:{...process.env}});
+    expect(result.status).toBe(0);expect(result.stdout).toBe("false");expect(launch).toHaveBeenCalledTimes(1);
+  }finally{reading.mockRestore();launch.mockRestore();vi.unstubAllEnvs();}
 });

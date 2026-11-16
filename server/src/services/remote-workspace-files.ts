@@ -3,7 +3,7 @@ import { createReadStream } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { execFile } from "node:child_process";
+import { execFile } from "@paperclipai/adapter-utils/local-workspace-process";
 import { promisify } from "node:util";
 import type { Readable } from "node:stream";
 import { and, eq } from "drizzle-orm";

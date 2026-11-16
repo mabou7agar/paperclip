@@ -1,7 +1,7 @@
 import { FAST_RESPONSE_AGENT_GUIDANCE, fastResponseHistoryBody } from "@paperclipai/shared";
 import { enqueueFastResponse, supersedeFastResponse } from "../services/fast-responses.js";
 import { Router } from "express";
-import { spawn } from "node:child_process";
+import { spawn } from "@paperclipai/adapter-utils/local-workspace-process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";

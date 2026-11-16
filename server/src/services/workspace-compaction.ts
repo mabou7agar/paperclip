@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile } from "@paperclipai/adapter-utils/local-workspace-process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";

@@ -30,28 +30,3 @@ def authenticate(connection, headers, raw, config):
     secret = private_file(config['pluginAuthFile']).read_bytes().strip()
     require(len(secret) == 64 and all(x in b'0123456789abcdef' for x in secret), 'broker_authentication_configuration_invalid')
     verify_signature(secret, headers, raw)
-
-
-def authenticate_control_hint_peer(connection, expected_uid, expected_profile):
-    """Authenticate hints only, not privileged IPC or execution authority.
-
-    SO_PEERPIDFD pins the socket's original peer, avoiding PID-reuse races in
-    procfs label reads. No unsafe numeric-PID-only fallback is permitted.
-    Linux 6.5+ ABI: include/uapi/asm-generic/socket.h, SO_PEERPIDFD=77.
-    """
-    pid,uid,_=struct.unpack('3i',connection.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))
-    require(pid>0 and uid==expected_uid,'native_hint_peer_untrusted')
-    peerfd=connection.getsockopt(socket.SOL_SOCKET,getattr(socket,'SO_PEERPIDFD',77))
-    try:
-        os.set_inheritable(peerfd,False)
-        alive=select.poll();alive.register(peerfd,select.POLLIN|select.POLLHUP|select.POLLERR)
-        require(not alive.poll(0),'native_hint_peer_exited')
-        with pathlib.Path('/proc/self/fdinfo/'+str(peerfd)).open('rb') as file:info=file.read(8193)
-        require(len(info)<=8192,'native_hint_peer_metadata_invalid')
-        values=[line.split()[1] for line in info.splitlines() if line.startswith(b'Pid:')]
-        require(values==[str(pid).encode()],'native_hint_peer_identity_changed')
-        with pathlib.Path('/proc/'+str(pid)+'/attr/current').open('rb') as file:raw=file.read(4097)
-        require(len(raw)<=4096 and raw.decode().strip()==expected_profile+' (enforce)', 'native_hint_peer_untrusted')
-        require(not alive.poll(0),'native_hint_peer_exited')
-    finally:
-        os.close(peerfd)

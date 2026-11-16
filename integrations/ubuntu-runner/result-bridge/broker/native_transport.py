@@ -33,7 +33,8 @@ class NativeTransport:
         measured = closed_json(receipt)
         boundary=['serverEnvironmentOpenable','serverPipeOpenable','serverVaultOpenable','serverConfigOpenable',
             'serverEnvironmentFileOpenable','serverDatabaseOpenable','serverBackupOpenable','serverLogOpenable',
-            'serverPluginWritable','serverHomeControlWritable','serverGitEscapesConfinement']
+            'serverPluginWritable','serverHomeControlWritable','serverGitEscapesConfinement',
+            'serverAncestorRenameAllowed','serverRepositoryHelperEscapesConfinement']
         require(measured.get('schema') == 'paperclip.agent-isolation.v2' and measured.get('actualAgentQualified') is True and
                 all(measured.get(key) is False for key in boundary) and measured.get('policySha256')==
                 hashlib.sha256(private_file(self.policy['agentPolicyFile']).read_bytes()).hexdigest(),
@@ -72,7 +73,6 @@ class NativeTransport:
                         except Refusal as error:
                             response = {'jobId':row['key'],'state':'not_admitted','code':error.code}
                         self.ledger.admission(row['key'],response)
-                        self.ledger.observe_hint(request,row['key'])
                     except (Refusal,ValueError,KeyError,TypeError):
                         # Malformed/conflicting intent grants no execution and
                         # never suppresses another valid task/company's request.

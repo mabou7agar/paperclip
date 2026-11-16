@@ -19,6 +19,17 @@ const parent = process.argv[2], profile = process.argv[3];
 const writable = file => { try { const fd=fs.openSync(file,fs.constants.O_WRONLY|fs.constants.O_NONBLOCK);fs.closeSync(fd);return true; }catch{return false;} };
 const openable = file => { try { const fd = fs.openSync(file,fs.constants.O_RDONLY|fs.constants.O_NONBLOCK); fs.closeSync(fd); return true; } catch { return false; } };
 let fdListable = false; try { fs.readdirSync('/proc/'+parent+'/fd'); fdListable = true; } catch {}
+const ancestorCases=[['/paperclip/instances','fixture/config.json'],['/paperclip/instances/fixture','config.json'],
+ ['/paperclip/instances/fixture/data','backups/fixture.sql'],['/paperclip/.paperclip','plugins/fixture-worker.mjs'],
+ ['/paperclip/.config','git/config'],['/paperclip/.local','bin/fixture']];
+const ancestorChecks=ancestorCases.map(([target,child])=>{
+ let moved=false,read=false,replaced=false;const alias=target+'-qualification-moved';
+ try{fs.renameSync(target,alias);moved=true;read=openable(alias+'/'+child);
+  fs.mkdirSync(target);fs.writeFileSync(target+'/replacement','synthetic-only');replaced=true;
+ }catch{}finally{if(moved){try{fs.rmSync(target,{recursive:true,force:true});fs.renameSync(alias,target);}catch{}}}
+ return {moved,read,replaced};
+});
+const serverAncestorRenameAllowed=ancestorChecks.some(x=>x.moved||x.read||x.replaced);
 const escaped = cp.spawnSync('/opt/qualification/aa-exec',['-p',profile,'--','node','-e','process.exit(0)'],{encoding:'utf8'});
 const peer = cp.spawn('node',['-e','setTimeout(()=>{},5000)'],{stdio:['pipe','pipe','pipe']});
 let peerPipeOpenable=false;
@@ -37,7 +48,7 @@ console.log(JSON.stringify({label,environmentOpenable:openable('/proc/'+parent+'
  serverBackupOpenable:openable('/paperclip/instances/fixture/data/backups/fixture.sql'),
  serverLogOpenable:openable('/paperclip/instances/fixture/logs/server.log'),
  serverPluginWritable:writable('/paperclip/plugins/fixture-worker.mjs'),serverHomeControlWritable:writable('/paperclip/.profile'),
- profileEscapeSucceeded:escaped.status===0,peerPipeOpenable,workspaceWritable:turn.session==='synthetic-fixed-session',uid:process.getuid(),gid:process.getgid()}));
+ serverAncestorRenameAllowed,ancestorChecks,profileEscapeSucceeded:escaped.status===0,peerPipeOpenable,workspaceWritable:turn.session==='synthetic-fixed-session',uid:process.getuid(),gid:process.getgid()}));
 });
 '''
 
@@ -50,6 +61,10 @@ if(baseline.status!==0)throw Error('baseline_failed');
 for(const file of ['/paperclip/instances/fixture/config.json','/paperclip/instances/fixture/.env','/paperclip/instances/fixture/db/PG_VERSION','/paperclip/instances/fixture/data/backups/fixture.sql','/paperclip/instances/fixture/logs/server.log']){const fd=fs.openSync(file,'r');fs.closeSync(fd);}
 for(const file of ['/paperclip/plugins/fixture-worker.mjs','/paperclip/.profile']){const fd=fs.openSync(file,'r+');fs.closeSync(fd);}
 
+fs.writeFileSync('/tmp/qualification-parent.pid',String(process.pid));
+// Each ordinary ancestor must genuinely be movable/readable/replaceable in
+// the control domain, otherwise a denied rename would be a fixture artefact.
+const ancestorProgram=fs.readFileSync(root+'/peer.js','utf8');
 process.env.DATABASE_URL='synthetic-control-only';
 process.env.PAPERCLIP_LOCAL_AGENT_LAUNCH_POLICY=root+'/policy.json';
 const repo='/tmp/git-worktree';fs.mkdirSync(repo);
@@ -64,6 +79,19 @@ const workspace=await import(root+'/local-workspace-process.ts');
 await new Promise((resolve,reject)=>workspace.execFile('git',commit,{cwd:repo,env:{...process.env,FIXTURE_PARENT_PID:String(process.pid)}},error=>error?reject(error):resolve()));
 const git=JSON.parse(fs.readFileSync('/tmp/git-hook-result.json'));
 const serverGitEscapesConfinement=!git.label.startsWith(agent+' ')||git.environmentOpenable||git.inheritedControlCredential;
+raw(['config','core.fsmonitor','/opt/qualification/fsmonitor.sh']);
+raw(['ls-files','-z']);const baselineFsmonitor=JSON.parse(fs.readFileSync('/tmp/git-hook-result.json'));
+if(!baselineFsmonitor.environmentOpenable||!baselineFsmonitor.inheritedControlCredential)throw Error('fsmonitor_negative_control_failed');
+fs.writeFileSync(repo+'/.gitignore','node_modules/\n');fs.mkdirSync(repo+'/node_modules');
+fs.unlinkSync('/tmp/git-hook-result.json');
+const compaction=await import(root+'/workspace-compaction.ts');
+await compaction.findRegenerableWorkspaceDirs(repo);
+const fsmonitor=JSON.parse(fs.readFileSync('/tmp/git-hook-result.json'));
+const serverRepositoryHelperEscapesConfinement=!fsmonitor.label.startsWith(agent+' ')||fsmonitor.environmentOpenable||fsmonitor.inheritedControlCredential;
+const controlPeer=cp.spawnSync('node',[root+'/peer.js',String(process.pid),profile],{encoding:'utf8'});
+if(controlPeer.status!==0)throw Error('rename_negative_control_failed');const baselineAncestors=JSON.parse(controlPeer.stdout);
+if(!baselineAncestors.ancestorChecks.every(x=>x.moved&&x.read&&x.replaced))throw Error('rename_negative_control_invalid');
+
 
 const child = cp.spawnSync(root+'/aa-exec',['-p',agent,'--','node',root+'/peer.js',String(process.pid),profile],{encoding:'utf8'});
 if(child.status!==0)throw Error('agent_profile_start_failed');
@@ -72,7 +100,8 @@ const sleeping = cp.spawn(root+'/aa-exec',['-p',agent,'--','node','-e','setTimeo
 sleeping.once('spawn',()=>setTimeout(()=>{if(!sleeping.kill('SIGTERM'))throw Error('cancel_failed')},100));
 sleeping.once('exit',(code,signal)=>{
 console.log(JSON.stringify({baseline:JSON.parse(baseline.stdout),agent:result,cancelled:signal==='SIGTERM',
- serverGitEscapesConfinement,git,baselineGit,parentProfile:fs.readFileSync('/proc/self/attr/current','utf8').trim(),uid:process.getuid(),readEnvironmentBytes:0}));
+ serverGitEscapesConfinement,serverRepositoryHelperEscapesConfinement,serverAncestorRenameAllowed:result.serverAncestorRenameAllowed,
+ baselineAncestors:baselineAncestors.ancestorChecks,fsmonitor,baselineFsmonitor,git,baselineGit,parentProfile:fs.readFileSync('/proc/self/attr/current','utf8').trim(),uid:process.getuid(),readEnvironmentBytes:0}));
 });
 })().catch(error=>{process.stderr.write('qualification_parent_failed:'+String(error?.stack??error).slice(0,4000));process.exitCode=1});
 '''
@@ -80,7 +109,7 @@ console.log(JSON.stringify({baseline:JSON.parse(baseline.stdout),agent:result,ca
 
 GIT_HOOK = r'''
 const fs=require('node:fs');let environmentOpenable=false;
-try{const fd=fs.openSync('/proc/'+process.env.FIXTURE_PARENT_PID+'/environ','r');fs.closeSync(fd);environmentOpenable=true}catch{}
+try{const parent=process.env.FIXTURE_PARENT_PID||fs.readFileSync('/tmp/qualification-parent.pid','utf8');const fd=fs.openSync('/proc/'+parent+'/environ','r');fs.closeSync(fd);environmentOpenable=true}catch{}
 fs.writeFileSync('/tmp/git-hook-result.json',JSON.stringify({label:fs.readFileSync('/proc/self/attr/current','utf8').trim(),environmentOpenable,inheritedControlCredential:!!process.env.DATABASE_URL}));
 '''
 
@@ -106,26 +135,31 @@ def main(profile_source, image, utility_source):
         utility=pathlib.Path(utility_source).resolve(strict=True)
         for name in ['local-workspace-process.ts','local-agent-launch-policy.ts']:
             (root/name).write_bytes((utility/name).read_bytes());(root/name).chmod(0o644)
-        defaults={'config.json':'/paperclip/instances/fixture/config.json','env':'/paperclip/instances/fixture/.env',
-            'database':'/paperclip/instances/fixture/db/PG_VERSION','backup':'/paperclip/instances/fixture/data/backups/fixture.sql',
-            'log':'/paperclip/instances/fixture/logs/server.log','plugin':'/paperclip/plugins/fixture-worker.mjs','home-control':'/paperclip/.profile'}
-        for name in defaults:
-            file=root/name;file.write_text('synthetic-only');file.chmod(0o600);os.chown(file,1000,1000)
-        secret = root / 'dummy'; secret.write_text('synthetic-only'); secret.chmod(0o600); os.chown(secret,1000,1000)
+        home=root/'home';home.mkdir(mode=0o700)
+        names=['instances/fixture/secrets/dummy','instances/fixture/config.json','instances/fixture/.env',
+            'instances/fixture/db/PG_VERSION','instances/fixture/data/backups/fixture.sql','instances/fixture/logs/server.log',
+            'plugins/fixture-worker.mjs','.profile','.paperclip/plugins/fixture-worker.mjs','.config/git/config','.local/bin/fixture']
+        for name in names:
+            file=home/name;file.parent.mkdir(parents=True,exist_ok=True);file.write_text('synthetic-only');file.chmod(0o600)
+        for file in [home,*home.rglob('*')]:os.chown(file,1000,1000);file.chmod(0o700 if file.is_dir()else 0o600)
+        compaction=utility.parents[2]/'server/src/services/workspace-compaction.ts'
+        code=compaction.read_text();expected='@paperclipai/adapter-utils/local-workspace-process'
+        if code.count(expected)!=1:raise RuntimeError('compaction_module_binding_changed')
+        (root/'workspace-compaction.ts').write_text(code.replace(expected,'./local-workspace-process.ts'));(root/'workspace-compaction.ts').chmod(0o644)
+        (root/'fsmonitor.sh').write_text('#!/bin/sh\nexec node /opt/qualification/git-hook.cjs\n');(root/'fsmonitor.sh').chmod(0o755)
         subprocess.run(['/sbin/apparmor_parser','-Q',str(policy)],check=True,capture_output=True)
         try:
             subprocess.run(['/sbin/apparmor_parser','-a',str(policy)],check=True,capture_output=True); loaded=True
             lib = pathlib.Path('/usr/lib/x86_64-linux-gnu/libapparmor.so.1').resolve(strict=True)
-            command = ['docker','run','--rm','--name',container_name,'--network','none','--read-only','--user','1000:1000',
+            command = ['docker','run','--rm','--name',container_name,'--network','none','--user','1000:1000',
                 '--cpus','1','--memory','512m','--pids-limit','128','--security-opt','apparmor='+control,
                 '--tmpfs','/tmp:rw,exec,nosuid,nodev,size=64m',
                 '--mount',f'type=bind,src={root}/parent.js,dst=/opt/qualification/parent.js,readonly',
                 '--mount',f'type=bind,src={root}/peer.js,dst=/opt/qualification/peer.js,readonly',
                 '--mount','type=bind,src=/usr/bin/aa-exec,dst=/opt/qualification/aa-exec,readonly',
                 '--mount',f'type=bind,src={lib},dst=/usr/lib/x86_64-linux-gnu/libapparmor.so.1,readonly',
-                '--mount',f'type=bind,src={secret},dst=/paperclip/instances/fixture/secrets/dummy,readonly',
-                *[item for name,destination in defaults.items() for item in ['--mount',f'type=bind,src={root/name},dst={destination}']],
-                *[item for name in ['git-hook.cjs','policy.json','local-workspace-process.ts','local-agent-launch-policy.ts'] for item in ['--mount',f'type=bind,src={root/name},dst=/opt/qualification/{name},readonly']],
+                '--mount',f'type=bind,src={home},dst=/paperclip',
+                *[item for name in ['git-hook.cjs','fsmonitor.sh','workspace-compaction.ts','policy.json','local-workspace-process.ts','local-agent-launch-policy.ts'] for item in ['--mount',f'type=bind,src={root/name},dst=/opt/qualification/{name},readonly']],
                 '--entrypoint','node',image,'--import','/app/server/node_modules/tsx/dist/loader.mjs','/opt/qualification/parent.js',control,agent]
             done = subprocess.run(command, capture_output=True, text=True, timeout=25)
             if done.returncode:
@@ -136,6 +170,7 @@ def main(profile_source, image, utility_source):
             if not (result['baseline']['environmentOpenable'] and result['cancelled'] and observed['workspaceWritable'] and
                     observed['label'].startswith(agent+' ') and result['parentProfile'].startswith(control+' ') and
                     observed['uid']==1000 and observed['gid']==1000 and result['serverGitEscapesConfinement'] is False and
+                    result['serverRepositoryHelperEscapesConfinement'] is False and result['serverAncestorRenameAllowed'] is False and
                     not any(observed[key] for key in ['environmentOpenable','pipeOpenable','peerPipeOpenable','secretOpenable',
                                                        'secretAliasOpenable','profileEscapeSucceeded','serverConfigOpenable','serverEnvironmentFileOpenable','serverDatabaseOpenable',
                                                        'serverBackupOpenable','serverLogOpenable','serverPluginWritable','serverHomeControlWritable'])):
