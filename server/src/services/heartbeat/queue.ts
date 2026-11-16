@@ -1130,17 +1130,18 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       });
       if (staleness.outcome === "cancelled" || staleness.outcome === "deferred") {
         applyRunDispatchPostCommitEffects(staleness.postCommitEffects);
-        if (staleness.outcome === "cancelled" && staleness.errorCode === "issue_assignee_changed") {
+        if (staleness.outcome === "cancelled" &&
+            (staleness.errorCode === "issue_assignee_changed" || staleness.errorCode === "issue_interaction_changed")) {
           // This run never entered the executor's cleanup/finally path. Its
-          // successor may already be parked behind it (including another
-          // review participant), so settle through normal guarded promotion.
+          // obsolete owner or review identity can have a saved successor.
+          // Promotion still rechecks every current execution gate.
           await releaseIssueExecutionAndPromote(run, {
             suppressImmediateRecovery: true,
             deferredPostCommitEffects,
           }).catch(err => {
             // The cancellation transaction retained/notified the durable
             // stage receipt. Its existing worker owns retry after failure.
-            logger.warn({ err, runId: run.id, issueId }, "superseded assignment handoff remains pending");
+            logger.warn({ err, runId: run.id, issueId }, "stale dispatch handoff remains pending");
           });
         }
         logger.info(
