@@ -2964,6 +2964,15 @@ describe("renderPaperclipWakePrompt", () => {
     expect(prompt).toContain("PAP-1723 Finish blocker (todo)");
   });
 
+  it("keeps a resolved blocked disposition limited to decision and handoff", () => {
+    const prompt = renderPaperclipWakePrompt({ reason: "issue_commented", dependencyBlockedInteraction: true,
+      interactionKind: "request_confirmation", interactionStatus: "accepted",
+      issue: { id: "parent", title: "Saved decision", status: "blocked" } });
+    expect(prompt).toContain("consolidate the saved decision and route its required next step");
+    expect(prompt).toContain("all existing approval, access and dependency holds remain");
+    expect(prompt).toContain("do not rerun completed work or start blocked implementation");
+  });
+
   it("renders loose review request instructions for execution handoffs", () => {
     const prompt = renderPaperclipWakePrompt({
       reason: "execution_review_requested",
