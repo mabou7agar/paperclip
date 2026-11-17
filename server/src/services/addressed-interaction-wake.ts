@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { Db } from "@paperclipai/db";
-import { findAddressedInteraction } from "../repositories/addressed-interactions.js";
+import { findAddressedInteraction, hasConsumedAddressedInteractionWake } from "../repositories/addressed-interactions.js";
 import { issueThreadInteractionAttentionAgentAllowed } from "./issue-thread-interaction-resolution.js";
 
 export function isAddressedInteractionWakeContext(context: Record<string, unknown>): boolean {
@@ -18,6 +18,7 @@ type AddressedWakeInput = {
   contextSnapshot: Record<string, unknown>;
   /** A blocked-task attention exception cannot be manufactured by its worker. */
   excludeTaskOwnerAndCreator?: boolean;
+  allowTaskOwnerFromBlockingSource?: boolean;
 };
 
 async function readAddressedWake(db: Db, input: AddressedWakeInput): Promise<{ state: "pending"; interaction: AddressedInteraction } | { state: "stale" } | null> {
@@ -45,4 +46,12 @@ export async function addressedInteractionWakeContext(db: Db, input: AddressedWa
   if (read?.state !== "pending") return null;
   const { id, kind, title, summary, sourceRunId, payload } = read.interaction;
   return { id, kind, title, summary, sourceRunId, payload };
+}
+
+export async function addressedInteractionWakeAlreadyConsumed(db: Db, input: AddressedWakeInput): Promise<boolean> {
+  const read = await readAddressedWake(db, input);
+  return read?.state === "pending" && hasConsumedAddressedInteractionWake(db, {
+    companyId: input.companyId, issueId: input.issueId, agentId: input.agentId,
+    interactionId: read.interaction.id,
+  });
 }
