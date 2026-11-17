@@ -5015,3 +5015,12 @@ or a terminal cancellation before start does not consume the event. A genuinely
 repaired gate may admit the same retained
 card without replacing it. The receipt and pending card remain durable truth;
 repeated notification does not create another provider turn.
+
+A parent owner who resolved a blocking worker's addressed confirmation also owes
+one decision follow-up. Its accepted or rejected event is checked against the
+persisted card, current blocking worker and dependency path, current parent owner,
+resolver run and continuation policy. The resolver must settle successfully before
+queued dispatch. This turn records the decision and delegates its required next
+step; it does not unblock implementation or waive any approval or access gate.
+Each resolved canonical event reserves delivery through deferral and is consumed
+once. It cannot replay its pending attention turn or authorize completed tests.

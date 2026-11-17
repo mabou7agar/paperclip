@@ -44,7 +44,11 @@ export function findAddressedInteraction(db: Db, input: {
 export async function hasConsumedAddressedInteractionWake(db: Db, input: {
   companyId: string; issueId: string; agentId: string; interactionId: string;
   excludeRequestId?: string | null;
+  phase?: "pending" | "accepted" | "rejected";
 }) {
+  const phase = input.phase ?? "pending";
+  const source = phase === "pending" ? "issue.interaction.created" : `issue.interaction.${phase === "accepted" ? "accept" : "reject"}`;
+  const key = phase === "pending" ? `interaction-pending:${input.interactionId}` : `interaction:${input.interactionId}:${phase}`;
   const [receipt] = await db.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).leftJoin(heartbeatRuns, and(
     eq(heartbeatRuns.id, agentWakeupRequests.runId),
     eq(heartbeatRuns.companyId, input.companyId),
@@ -52,10 +56,10 @@ export async function hasConsumedAddressedInteractionWake(db: Db, input: {
   )).where(and(
     eq(agentWakeupRequests.companyId, input.companyId),
     eq(agentWakeupRequests.agentId, input.agentId),
-    eq(agentWakeupRequests.idempotencyKey, `interaction-pending:${input.interactionId}`),
+    eq(agentWakeupRequests.idempotencyKey, key),
     sql`${agentWakeupRequests.payload}->>'issueId' = ${input.issueId}`,
     sql`${agentWakeupRequests.payload}#>>'{_paperclipWakeContext,interactionId}' = ${input.interactionId}`,
-    sql`${agentWakeupRequests.payload}#>>'{_paperclipWakeContext,source}' = 'issue.interaction.created'`,
+    sql`${agentWakeupRequests.payload}#>>'{_paperclipWakeContext,source}' = ${source}`,
     input.excludeRequestId ? ne(agentWakeupRequests.id, input.excludeRequestId) : undefined,
     ne(agentWakeupRequests.status, "skipped"),
     or(and(eq(agentWakeupRequests.status, "deferred_issue_execution"), isNull(agentWakeupRequests.runId)),
@@ -63,6 +67,25 @@ export async function hasConsumedAddressedInteractionWake(db: Db, input: {
       sql`${heartbeatRuns.status} in ('queued', 'scheduled_retry')`),
   )).limit(1);
   return Boolean(receipt);
+}
+
+export async function hasAddressedOwnerDispositionRun(db: Db, input: {
+  companyId: string; issueId: string; agentId: string; interactionId: string; resolvedRunId: string;
+  requireSettledDecision?: boolean;
+}) {
+  const [run] = await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).innerJoin(issues, and(
+    eq(issues.id, input.issueId), eq(issues.companyId, input.companyId), eq(issues.assigneeAgentId, input.agentId),
+  )).where(and(
+    eq(heartbeatRuns.id, input.resolvedRunId), eq(heartbeatRuns.companyId, input.companyId),
+    eq(heartbeatRuns.agentId, input.agentId), eq(heartbeatRuns.issueId, input.issueId),
+    input.requireSettledDecision ? eq(heartbeatRuns.status, "succeeded") : sql`${heartbeatRuns.status} in ('running', 'succeeded')`,
+    sql`${heartbeatRuns.contextSnapshot}->>'interactionId' = ${input.interactionId}`,
+    sql`${heartbeatRuns.contextSnapshot}->>'source' = 'issue.interaction.created'`,
+    sql`${heartbeatRuns.contextSnapshot}->>'interactionKind' = 'request_confirmation'`,
+    sql`${heartbeatRuns.contextSnapshot}->>'wakeReason' = 'interaction_pending'`,
+    sql`${heartbeatRuns.contextSnapshot}->>'dependencyBlockedInteraction' = 'true'`,
+  )).limit(1);
+  return Boolean(run);
 }
 
 export const pendingAddressedInteractionReceiptSql = sql<boolean>`exists (

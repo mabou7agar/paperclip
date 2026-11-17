@@ -2710,6 +2710,10 @@ function renderPaperclipWakePromptBody(
     lines.push(
       "- execution scope: respond or triage the human comment; do not treat blocker-dependent deliverable work as unblocked",
     );
+    if (normalized.interactionKind === "request_confirmation" &&
+        (normalized.interactionStatus === "accepted" || normalized.interactionStatus === "rejected")) {
+      lines.push("- resolved decision follow-up: consolidate the saved decision and route its required next step to the responsible task or worker; all existing approval, access and dependency holds remain; do not rerun completed work or start blocked implementation");
+    }
     if (normalized.unresolvedBlockerSummaries.length > 0) {
       const blockers = normalized.unresolvedBlockerSummaries
         .map(

@@ -1,6 +1,6 @@
 import { pendingAddressedInteractionReceiptSql } from "../../repositories/addressed-interactions.js";
 import { completionReceiptSourceReady, taskCompletionReceiptState, TASK_COMPLETION_RECEIPT_REASON } from "../task-completion-receipts.js";
-import { addressedInteractionWakeState, addressedInteractionWakeAlreadyConsumed } from "../addressed-interaction-wake.js";
+import { addressedInteractionWakeState, addressedInteractionWakeAlreadyConsumed, blockingDispositionContinuationAllowed } from "../addressed-interaction-wake.js";
 import { assertPluginWakeupReceipt, isPluginWakeupReceiptCollision } from "../plugin-wakeup-receipts.js";
 import { monitoringService } from "../monitoring.js";
 import { verifyBlockerStallWake } from "../recovery/blocker-stall-wakeups.js";
@@ -1111,7 +1111,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           companyId: run.companyId, issueId, agentId: run.agentId, contextSnapshot: context,
           excludeTaskOwnerAndCreator: true,
           allowTaskOwnerFromBlockingSource: true,
-        }) !== "pending"
+        }) !== "pending" && !await blockingDispositionContinuationAllowed(db, {
+          companyId: run.companyId, issueId, agentId: run.agentId, contextSnapshot: context, requireSettledDecision: true,
+        })
       ) {
         await cancelQueuedRunForBlockedDependencies(
           run,
@@ -3155,7 +3157,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             if (delivered) return { kind: "skipped" as const };
           }
 
-          if (opts.idempotencyKey === `interaction-pending:${enrichedContextSnapshot.interactionId}` &&
+          if ((opts.idempotencyKey === `interaction-pending:${enrichedContextSnapshot.interactionId}` ||
+              opts.idempotencyKey === `interaction:${enrichedContextSnapshot.interactionId}:accepted` ||
+              opts.idempotencyKey === `interaction:${enrichedContextSnapshot.interactionId}:rejected`) &&
               await addressedInteractionWakeAlreadyConsumed(tx as unknown as Db, {
                 companyId: agent.companyId, issueId, agentId, contextSnapshot: enrichedContextSnapshot,
                 excludeRequestId: executionWaitRequestId,
@@ -4123,7 +4127,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               contextSnapshot: enrichedContextSnapshot,
               excludeTaskOwnerAndCreator: true,
               allowTaskOwnerFromBlockingSource: true,
-            }) === "pending");
+            }) === "pending" || await blockingDispositionContinuationAllowed(tx as unknown as Db, {
+              companyId: issue.companyId, issueId: issue.id, agentId, contextSnapshot: enrichedContextSnapshot,
+            }));
 
           if (blockedInteractionWake) {
             enrichedContextSnapshot.dependencyBlockedInteraction = true;
