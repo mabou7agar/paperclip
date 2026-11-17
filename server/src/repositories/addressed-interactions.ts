@@ -43,8 +43,9 @@ export function findAddressedInteraction(db: Db, input: {
 
 export async function hasConsumedAddressedInteractionWake(db: Db, input: {
   companyId: string; issueId: string; agentId: string; interactionId: string;
+  excludeRequestId?: string | null;
 }) {
-  const [receipt] = await db.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).innerJoin(heartbeatRuns, and(
+  const [receipt] = await db.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).leftJoin(heartbeatRuns, and(
     eq(heartbeatRuns.id, agentWakeupRequests.runId),
     eq(heartbeatRuns.companyId, input.companyId),
     eq(heartbeatRuns.agentId, input.agentId),
@@ -55,8 +56,10 @@ export async function hasConsumedAddressedInteractionWake(db: Db, input: {
     sql`${agentWakeupRequests.payload}->>'issueId' = ${input.issueId}`,
     sql`${agentWakeupRequests.payload}#>>'{_paperclipWakeContext,interactionId}' = ${input.interactionId}`,
     sql`${agentWakeupRequests.payload}#>>'{_paperclipWakeContext,source}' = 'issue.interaction.created'`,
+    input.excludeRequestId ? ne(agentWakeupRequests.id, input.excludeRequestId) : undefined,
     ne(agentWakeupRequests.status, "skipped"),
-    or(sql`${heartbeatRuns.startedAt} is not null`,
+    or(and(eq(agentWakeupRequests.status, "deferred_issue_execution"), isNull(agentWakeupRequests.runId)),
+      sql`${heartbeatRuns.startedAt} is not null`,
       sql`${heartbeatRuns.status} in ('queued', 'scheduled_retry')`),
   )).limit(1);
   return Boolean(receipt);

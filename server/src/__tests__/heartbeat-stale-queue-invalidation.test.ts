@@ -1152,6 +1152,42 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect(await restarted.getRun((await delivered()).runId!)).toMatchObject({ status: "succeeded", contextSnapshot: context });
   }, 75_000);
 
+  it("deduplicates a blocked parent disposition while the parent execution is occupied", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const [worker] = await db.insert(agents).values({ companyId, name: "Worker", role: "engineer", status: "idle", adapterType: "codex_local" }).returning();
+    const [parent] = await db.insert(issues).values({ companyId, title: "Busy parent", status: "blocked", assigneeAgentId: agentId }).returning();
+    const [child] = await db.insert(issues).values({ companyId, title: "Current source", status: "blocked", assigneeAgentId: worker.id }).returning();
+    await db.insert(issueRelations).values({ companyId, issueId: child.id, relatedIssueId: parent.id, type: "blocks" });
+    const source = await seedQueuedRun({ companyId, agentId: worker.id, issueId: child.id, wakeReason: "issue_assigned" });
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, source.runId));
+    const [card] = await db.insert(issueThreadInteractions).values({ companyId, issueId: parent.id, kind: "request_confirmation",
+      createdByAgentId: worker.id, addresseeAgentId: agentId, sourceRunId: source.runId, effectiveResolverPolicy: "not_creator",
+      payload: { version: 1, prompt: "Disposition current saved evidence" } }).returning();
+    const occupied = await seedQueuedRun({ companyId, agentId: worker.id, issueId: parent.id, wakeReason: "issue_commented" });
+    await db.update(heartbeatRuns).set({ status: "running", startedAt: new Date() }).where(eq(heartbeatRuns.id, occupied.runId));
+    await db.update(issues).set({ executionRunId: occupied.runId }).where(eq(issues.id, parent.id));
+    const request = { source: "automation" as const, triggerDetail: "system" as const, reason: "interaction_pending",
+      requestedByActorType: "agent" as const, requestedByActorId: worker.id, idempotencyKey: `interaction-pending:${card.id}`,
+      payload: { issueId: parent.id, interactionId: card.id, interactionKind: card.kind, mutation: "interaction" },
+      contextSnapshot: { issueId: parent.id, source: "issue.interaction.created", wakeReason: "interaction_pending", interactionId: card.id, interactionKind: card.kind } };
+    await Promise.all([heartbeat.wakeup(agentId, request), heartbeat.wakeup(agentId, request)]);
+    const pending = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, request.idempotencyKey));
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatchObject({ status: "deferred_issue_execution", runId: null });
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, occupied.runId));
+    await db.update(issues).set({ executionRunId: null }).where(eq(issues.id, parent.id));
+    const restarted = heartbeatService(db, { runtimeEnv: { ...process.env, PAPERCLIP_IN_WORKTREE: "false" } });
+    await restarted.resumeQueuedRuns();
+    expect(await waitForCondition(async () => mockAdapterExecute.mock.calls.length === 1, 30_000)).toBe(true);
+    await restarted.drainActiveRunExecutions();
+    await restarted.wakeup(agentId, request);
+    await restarted.resumeQueuedRuns();
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+    const [receipt] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, pending[0]!.id));
+    expect(receipt?.runId).toBeTruthy();
+    expect(await restarted.getRun(receipt!.runId!)).toMatchObject({ status: "succeeded", contextSnapshot: request.contextSnapshot });
+  }, 75_000);
+
   it.each(["queued", "scheduled_retry"] as const)("retains a valid %s addressed question when a worker wake arrives", async status => {
     const { companyId, agentId } = await seedCompanyAndAgent({ heartbeatConfig: { enabled: false } });
     const workerId = randomUUID();

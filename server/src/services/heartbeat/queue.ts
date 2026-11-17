@@ -3158,6 +3158,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           if (opts.idempotencyKey === `interaction-pending:${enrichedContextSnapshot.interactionId}` &&
               await addressedInteractionWakeAlreadyConsumed(tx as unknown as Db, {
                 companyId: agent.companyId, issueId, agentId, contextSnapshot: enrichedContextSnapshot,
+                excludeRequestId: executionWaitRequestId,
               })) return { kind: "skipped" as const };
 
           if (executionWaitRequestId) {

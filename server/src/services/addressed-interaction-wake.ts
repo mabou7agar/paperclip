@@ -16,6 +16,7 @@ export type AddressedInteractionContext = Pick<AddressedInteraction, "id" | "kin
 type AddressedWakeInput = {
   companyId: string; issueId: string; agentId: string;
   contextSnapshot: Record<string, unknown>;
+  excludeRequestId?: string | null;
   /** A blocked-task attention exception cannot be manufactured by its worker. */
   excludeTaskOwnerAndCreator?: boolean;
   allowTaskOwnerFromBlockingSource?: boolean;
@@ -52,6 +53,6 @@ export async function addressedInteractionWakeAlreadyConsumed(db: Db, input: Add
   const read = await readAddressedWake(db, input);
   return read?.state === "pending" && hasConsumedAddressedInteractionWake(db, {
     companyId: input.companyId, issueId: input.issueId, agentId: input.agentId,
-    interactionId: read.interaction.id,
+    interactionId: read.interaction.id, excludeRequestId: input.excludeRequestId,
   });
 }

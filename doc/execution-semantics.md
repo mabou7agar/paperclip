@@ -5008,7 +5008,9 @@ Existing state and compatible provider sessions carry forward without migration.
 No new polling, scheduler, automatic test rerun or task reassignment is added.
 
 The canonical pending-card event (`interaction-pending:<card ID>`) is consumed
-once under the issue lock, including after its run finishes. A skipped admission
+once under the issue lock, including after its run finishes. A saved deferred
+receipt reserves that event until normal promotion; duplicates cannot create
+additional deferred receipts. A skipped admission
 or a terminal cancellation before start does not consume the event. A genuinely
 repaired gate may admit the same retained
 card without replacing it. The receipt and pending card remain durable truth;
