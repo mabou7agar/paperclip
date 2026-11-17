@@ -4992,3 +4992,26 @@ export, source coverage, secret redaction and persistence-failure warnings retai
 their existing contracts.
 
 Addressed pending questions and review confirmations remain obligations for their explicit recipient after a restart, including when that recipient is not the task assignee. Recovery selects the existing receipt only while the same card and audience remain current, revalidates the normal interaction policy, and uses ordinary release admission. It preserves assignment, original request/context and all pause, Stop, access and execution-reconciliation holds. It creates no replacement wake.
+
+### Addressed dispositions from unfinished blockers
+
+A task owner may answer a current card addressed by another agent when its saved
+source run belongs to that agent's unfinished blocking task. This includes a
+transitive blocker through an unfinished lead task. Creation and queued dispatch
+recheck the same company, source run, worker assignment, dependency path, card
+audience and pending status. The run uses the existing dependency-blocked
+interaction mode; it neither completes blockers nor grants execution, review or
+approval authority beyond the card. Self-addressed cards and cards without this
+source provenance cannot manufacture an exception. Resolved cards, completed
+dependency branches, removed links and reassigned sources lose this exception.
+Existing state and compatible provider sessions carry forward without migration.
+No new polling, scheduler, automatic test rerun or task reassignment is added.
+
+The canonical pending-card event (`interaction-pending:<card ID>`) is consumed
+once under the issue lock, including after its run finishes. A saved deferred
+receipt reserves that event until normal promotion; duplicates cannot create
+additional deferred receipts. A skipped admission
+or a terminal cancellation before start does not consume the event. A genuinely
+repaired gate may admit the same retained
+card without replacing it. The receipt and pending card remain durable truth;
+repeated notification does not create another provider turn.

@@ -997,7 +997,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       kind: "ask_user_questions", createdByAgentId: worker.id, addresseeAgentId: agentId,
       effectiveResolverPolicy: "anyone", payload: { version: 1, questions: [] } }).returning();
     const [occupied] = await db.insert(issues).values({ companyId, title: "Recipient is occupied", status: "in_progress", assigneeAgentId: agentId }).returning();
-    const { runId: occupyingRunId } = await seedQueuedRun({ companyId, agentId, issueId: occupied.id });
+    const { runId: occupyingRunId } = await seedQueuedRun({ companyId, agentId, issueId: occupied.id, wakeReason: "issue_assigned" });
     await db.update(heartbeatRuns).set({ status: "running", startedAt: new Date() }).where(eq(heartbeatRuns.id, occupyingRunId));
     await heartbeat.wakeup(agentId, { source: "automation", triggerDetail: "system", reason: "interaction_pending",
       requestedByActorType: "agent", requestedByActorId: worker.id,
@@ -1021,6 +1021,172 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     expect((await db.select().from(issues).where(eq(issues.id, issue.id)))[0]).toMatchObject({ status: "blocked", assigneeAgentId: change === "answered" ? worker.id : agentId });
     expect((await issueService(db).listDependencyReadiness(companyId, [issue.id])).get(issue.id)?.isDependencyReady).toBe(false);
   });
+
+  it.each(["direct", "transitive", "unrelated", "reassigned", "failed_source", "completed_branch", "answered", "self", "cycle", "cross_company"] as const)("checks a blocked parent disposition against its live source (%s)", async kind => {
+    const { companyId, agentId } = await seedCompanyAndAgent({ agentName: "Parent owner" });
+    const [worker] = await db.insert(agents).values({ companyId, name: "QA worker", role: "engineer", status: "idle", adapterType: "codex_local" }).returning();
+    const [parent] = await db.insert(issues).values({ companyId, title: "Parent disposition", status: "blocked", assigneeAgentId: agentId }).returning();
+    const [child] = await db.insert(issues).values({ companyId, title: "Validation source", status: "in_progress", assigneeAgentId: worker.id }).returning();
+    const [lead] = await db.insert(issues).values({ companyId, title: "Delivery", status: kind === "completed_branch" ? "done" : "blocked" }).returning();
+    await db.insert(issueRelations).values({ companyId, issueId: lead.id, relatedIssueId: parent.id, type: "blocks" });
+    if (kind !== "unrelated") await db.insert(issueRelations).values({ companyId, issueId: child.id,
+      relatedIssueId: kind === "direct" ? parent.id : lead.id, type: "blocks" });
+    if (kind === "completed_branch") {
+      const [other] = await db.insert(issues).values({ companyId, title: "Other blocker", status: "blocked" }).returning();
+      await db.insert(issueRelations).values({ companyId, issueId: other.id, relatedIssueId: parent.id, type: "blocks" });
+    }
+    if (kind === "cycle") await db.insert(issueRelations).values({ companyId, issueId: lead.id, relatedIssueId: child.id, type: "blocks" });
+    const { runId: sourceRunId } = await seedQueuedRun({ companyId, agentId: worker.id, issueId: child.id, wakeReason: "issue_assigned" });
+    if (kind === "cross_company") {
+      const other = await seedCompanyAndAgent();
+      await db.update(heartbeatRuns).set({ companyId: other.companyId }).where(eq(heartbeatRuns.id, sourceRunId));
+    }
+    await db.update(heartbeatRuns).set({ status: kind === "failed_source" ? "failed" : "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, sourceRunId));
+    if (kind === "reassigned") await db.update(issues).set({ assigneeAgentId: agentId }).where(eq(issues.id, child.id));
+    const [card] = await db.insert(issueThreadInteractions).values({ companyId, issueId: parent.id,
+      kind: "request_confirmation", status: kind === "answered" ? "accepted" : "pending",
+      createdByAgentId: kind === "self" ? agentId : worker.id, addresseeAgentId: agentId, sourceRunId,
+      effectiveResolverPolicy: "not_creator", payload: { version: 1, prompt: "Review saved results only" } }).returning();
+    const request = { source: "automation" as const, triggerDetail: "system" as const, reason: "interaction_pending",
+      requestedByActorType: "agent" as const, requestedByActorId: worker.id,
+      payload: { issueId: parent.id, interactionId: card.id, interactionKind: card.kind, mutation: "interaction" },
+      idempotencyKey: `interaction-pending:${card.id}`,
+      contextSnapshot: { issueId: parent.id, source: "issue.interaction.created", wakeReason: "interaction_pending",
+        interactionId: card.id, interactionKind: card.kind, planningContext: "Preserve frozen candidate and plan" } };
+    await Promise.all([heartbeat.wakeup(agentId, request), heartbeat.wakeup(agentId, request)]);
+    await heartbeat.resumeQueuedRuns();
+    const allowed = kind === "direct" || kind === "transitive" || kind === "cycle";
+    const runs = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.issueId, parent.id));
+    expect(runs).toHaveLength(allowed ? 1 : 0);
+    if (allowed) {
+      const runId = runs[0]!.id;
+      expect(await waitForCondition(async () => countExecuteCallsForRun(runId) === 1, 30_000)).toBe(true);
+      await heartbeat.waitForRunExecutionDrain(runId, { timeoutMs: 30_000 });
+      await heartbeat.wakeup(agentId, request);
+      await heartbeat.resumeQueuedRuns();
+      expect(countExecuteCallsForRun(runId)).toBe(1);
+      expect(await heartbeat.getRun(runId)).toMatchObject({ status: "succeeded", contextSnapshot: {
+        interactionId: card.id, dependencyBlockedInteraction: true, planningContext: "Preserve frozen candidate and plan" } });
+      expect(await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.issueId, parent.id))).toHaveLength(1);
+    } else expect(mockAdapterExecute).not.toHaveBeenCalled();
+    expect((await db.select().from(issues).where(eq(issues.id, parent.id)))[0]).toMatchObject({ status: "blocked", assigneeAgentId: agentId });
+    expect((await issueService(db).listDependencyReadiness(companyId, [parent.id])).get(parent.id)?.isDependencyReady).toBe(false);
+    expect((await db.select().from(issueThreadInteractions).where(eq(issueThreadInteractions.id, card.id)))[0].status)
+      .toBe(kind === "answered" ? "accepted" : "pending");
+  }, 75_000);
+
+  it.each(["ownership", "link"] as const)("rechecks a blocked parent disposition when source %s changes before dispatch", async change => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const [worker] = await db.insert(agents).values({ companyId, name: "Worker", role: "engineer", status: "idle", adapterType: "codex_local" }).returning();
+    const [parent] = await db.insert(issues).values({ companyId, title: "Parent", status: "blocked", assigneeAgentId: agentId }).returning();
+    const [child] = await db.insert(issues).values({ companyId, title: "Child", status: "blocked", assigneeAgentId: worker.id }).returning();
+    await db.insert(issueRelations).values({ companyId, issueId: child.id, relatedIssueId: parent.id, type: "blocks" });
+    const [other] = await db.insert(issues).values({ companyId, title: "Independent unresolved blocker", status: "blocked" }).returning();
+    await db.insert(issueRelations).values({ companyId, issueId: other.id, relatedIssueId: parent.id, type: "blocks" });
+    const { runId: sourceRunId } = await seedQueuedRun({ companyId, agentId: worker.id, issueId: child.id, wakeReason: "issue_assigned" });
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, sourceRunId));
+    const [card] = await db.insert(issueThreadInteractions).values({ companyId, issueId: parent.id,
+      kind: "request_confirmation", createdByAgentId: worker.id, addresseeAgentId: agentId, sourceRunId,
+      effectiveResolverPolicy: "not_creator", payload: { version: 1, prompt: "Review saved results" } }).returning();
+    const [occupied] = await db.insert(issues).values({ companyId, title: "Recipient busy", status: "in_progress", assigneeAgentId: agentId }).returning();
+    const { runId: occupyingRunId } = await seedQueuedRun({ companyId, agentId, issueId: occupied.id, wakeReason: "issue_assigned" });
+    await db.update(heartbeatRuns).set({ status: "running", startedAt: new Date() }).where(eq(heartbeatRuns.id, occupyingRunId));
+    const request = { source: "automation" as const, triggerDetail: "system" as const, reason: "interaction_pending",
+      requestedByActorType: "agent" as const, requestedByActorId: worker.id,
+      payload: { issueId: parent.id, interactionId: card.id, interactionKind: card.kind, mutation: "interaction" },
+      idempotencyKey: `interaction-pending:${card.id}`,
+      contextSnapshot: { issueId: parent.id, source: "issue.interaction.created", interactionId: card.id,
+        interactionKind: card.kind, wakeReason: "interaction_pending" } };
+    await heartbeat.wakeup(agentId, request);
+    const [queued] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.issueId, parent.id));
+    expect(queued).toMatchObject({ status: "queued", contextSnapshot: { dependencyBlockedInteraction: true } });
+    if (change === "ownership") await db.update(issues).set({ assigneeAgentId: agentId }).where(eq(issues.id, child.id));
+    else await db.delete(issueRelations).where(eq(issueRelations.issueId, child.id));
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, occupyingRunId));
+    await heartbeat.resumeQueuedRuns();
+    expect(await waitForCondition(async () => (await heartbeat.getRun(queued!.id))?.status === "cancelled")).toBe(true);
+    expect(await heartbeat.getRun(queued!.id)).toMatchObject({ status: "cancelled", errorCode: "issue_dependencies_blocked" });
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+    if (change === "ownership") await db.update(issues).set({ assigneeAgentId: worker.id }).where(eq(issues.id, child.id));
+    else await db.insert(issueRelations).values({ companyId, issueId: child.id, relatedIssueId: parent.id, type: "blocks" });
+    await heartbeat.wakeup(agentId, request);
+    await heartbeat.resumeQueuedRuns();
+    expect(await waitForCondition(async () => mockAdapterExecute.mock.calls.length === 1, 30_000)).toBe(true);
+    await heartbeat.drainActiveRunExecutions();
+    await heartbeat.wakeup(agentId, request);
+    await heartbeat.resumeQueuedRuns();
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+  }, 75_000);
+
+  it.each(["owner", "non_owner"] as const)("resumes a blocked parent disposition after pre-start cancellation, recipient pause and restart (%s)", async mode => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const [worker] = await db.insert(agents).values({ companyId, name: "Blocking worker", role: "engineer", status: "idle", adapterType: "codex_local" }).returning();
+    const [parent] = await db.insert(issues).values({ companyId, title: "Saved disposition", status: "blocked", assigneeAgentId: mode === "owner" ? agentId : worker.id }).returning();
+    const [child] = await db.insert(issues).values({ companyId, title: "Source", status: "blocked", assigneeAgentId: worker.id }).returning();
+    await db.insert(issueRelations).values({ companyId, issueId: child.id, relatedIssueId: parent.id, type: "blocks" });
+    const source = await seedQueuedRun({ companyId, agentId: worker.id, issueId: child.id, wakeReason: "issue_assigned" });
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, source.runId));
+    const [card] = await db.insert(issueThreadInteractions).values({ companyId, issueId: parent.id, kind: "request_confirmation",
+      createdByAgentId: worker.id, addresseeAgentId: agentId, sourceRunId: source.runId, effectiveResolverPolicy: "not_creator",
+      payload: { version: 1, prompt: "Disposition existing evidence" } }).returning();
+    const context = { issueId: parent.id, source: "issue.interaction.created", wakeReason: "interaction_pending", interactionId: card.id, interactionKind: card.kind };
+    const old = await seedQueuedRun({ companyId, agentId, issueId: parent.id, wakeReason: "interaction_pending", contextExtras: context });
+    await db.update(heartbeatRuns).set({ status: "cancelled", finishedAt: new Date(), errorCode: "issue_interaction_changed" }).where(eq(heartbeatRuns.id, old.runId));
+    await db.update(agentWakeupRequests).set({ status: "cancelled", finishedAt: new Date(), idempotencyKey: `interaction-pending:${card.id}`,
+      payload: { issueId: parent.id, mutation: "interaction", _paperclipWakeContext: context } }).where(eq(agentWakeupRequests.id, old.wakeupRequestId));
+    await db.update(agents).set({ status: "paused" }).where(eq(agents.id, agentId));
+    const [receipt] = await db.insert(agentWakeupRequests).values({ companyId, agentId, source: "assignment", triggerDetail: "system",
+      reason: "issue_execution_deferred", status: "deferred_issue_execution", requestedByActorType: "system",
+      idempotencyKey: `interaction-pending:${card.id}`, payload: { issueId: parent.id, mutation: "interaction", _paperclipWakeContext: context } }).returning();
+    const restarted = heartbeatService(db, { runtimeEnv: { ...process.env, PAPERCLIP_IN_WORKTREE: "false" } });
+    await restarted.resumeQueuedRuns();
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+    await db.update(agents).set({ status: "idle" }).where(eq(agents.id, agentId));
+    await restarted.resumeQueuedRuns();
+    const delivered = () => db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, receipt.id)).then(rows => rows[0]);
+    const resumed = await waitForCondition(async () => Boolean((await delivered()).runId), 15_000);
+    expect(resumed, JSON.stringify({ receipt: await delivered(), runs: await db.select({ id: heartbeatRuns.id, status: heartbeatRuns.status, error: heartbeatRuns.errorCode }).from(heartbeatRuns).where(eq(heartbeatRuns.issueId, parent.id)) })).toBe(true);
+    await restarted.waitForRunExecutionDrain((await delivered()).runId!, { timeoutMs: 30_000 });
+    await restarted.resumeQueuedRuns();
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+    expect(await restarted.getRun((await delivered()).runId!)).toMatchObject({ status: "succeeded", contextSnapshot: context });
+  }, 75_000);
+
+  it("deduplicates a blocked parent disposition while the parent execution is occupied", async () => {
+    const { companyId, agentId } = await seedCompanyAndAgent();
+    const [worker] = await db.insert(agents).values({ companyId, name: "Worker", role: "engineer", status: "idle", adapterType: "codex_local" }).returning();
+    const [parent] = await db.insert(issues).values({ companyId, title: "Busy parent", status: "blocked", assigneeAgentId: agentId }).returning();
+    const [child] = await db.insert(issues).values({ companyId, title: "Current source", status: "blocked", assigneeAgentId: worker.id }).returning();
+    await db.insert(issueRelations).values({ companyId, issueId: child.id, relatedIssueId: parent.id, type: "blocks" });
+    const source = await seedQueuedRun({ companyId, agentId: worker.id, issueId: child.id, wakeReason: "issue_assigned" });
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, source.runId));
+    const [card] = await db.insert(issueThreadInteractions).values({ companyId, issueId: parent.id, kind: "request_confirmation",
+      createdByAgentId: worker.id, addresseeAgentId: agentId, sourceRunId: source.runId, effectiveResolverPolicy: "not_creator",
+      payload: { version: 1, prompt: "Disposition current saved evidence" } }).returning();
+    const occupied = await seedQueuedRun({ companyId, agentId: worker.id, issueId: parent.id, wakeReason: "issue_commented" });
+    await db.update(heartbeatRuns).set({ status: "running", startedAt: new Date() }).where(eq(heartbeatRuns.id, occupied.runId));
+    await db.update(issues).set({ executionRunId: occupied.runId }).where(eq(issues.id, parent.id));
+    const request = { source: "automation" as const, triggerDetail: "system" as const, reason: "interaction_pending",
+      requestedByActorType: "agent" as const, requestedByActorId: worker.id, idempotencyKey: `interaction-pending:${card.id}`,
+      payload: { issueId: parent.id, interactionId: card.id, interactionKind: card.kind, mutation: "interaction" },
+      contextSnapshot: { issueId: parent.id, source: "issue.interaction.created", wakeReason: "interaction_pending", interactionId: card.id, interactionKind: card.kind } };
+    await Promise.all([heartbeat.wakeup(agentId, request), heartbeat.wakeup(agentId, request)]);
+    const pending = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, request.idempotencyKey));
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatchObject({ status: "deferred_issue_execution", runId: null });
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, occupied.runId));
+    await db.update(issues).set({ executionRunId: null }).where(eq(issues.id, parent.id));
+    const restarted = heartbeatService(db, { runtimeEnv: { ...process.env, PAPERCLIP_IN_WORKTREE: "false" } });
+    await restarted.resumeQueuedRuns();
+    expect(await waitForCondition(async () => mockAdapterExecute.mock.calls.length === 1, 30_000)).toBe(true);
+    await restarted.drainActiveRunExecutions();
+    await restarted.wakeup(agentId, request);
+    await restarted.resumeQueuedRuns();
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+    const [receipt] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, pending[0]!.id));
+    expect(receipt?.runId).toBeTruthy();
+    expect(await restarted.getRun(receipt!.runId!)).toMatchObject({ status: "succeeded", contextSnapshot: request.contextSnapshot });
+  }, 75_000);
 
   it.each(["queued", "scheduled_retry"] as const)("retains a valid %s addressed question when a worker wake arrives", async status => {
     const { companyId, agentId } = await seedCompanyAndAgent({ heartbeatConfig: { enabled: false } });
