@@ -52,7 +52,7 @@ export async function inSubtree(db: Db | Tx, companyId: string, issueId: string,
   return false;
 }
 export async function currentFence(db: Db | Tx, issue: typeof issues.$inferSelect, policyRevision: string) {
-  return { statusVersion: issue.statusVersion, assigneeAgentId: issue.assigneeAgentId,
+  return { statusVersion: issue.statusVersion, assigneeAgentId: issue.assigneeAgentId, projectId: issue.projectId,
     execStateHash: runnerRecoveryHash(issue.executionState), planRevisionId: await planRevision(db, issue.companyId, issue.id), policyRevision };
 }
 function publicDisposition(row: ResultRow) {
@@ -148,6 +148,8 @@ export function runnerPolicyRecovery(db: Db, deps: RunnerRecoveryDependencies) {
       const target = issue.assigneeAgentId;
       const [agent] = target ? await tx.select().from(agents).where(and(eq(agents.id, target), eq(agents.companyId, ctx.companyId))) : [];
       if (!agent || !await canActorReadIssuePrivacy(tx, { type: "agent", agentId: agent.id, companyId: ctx.companyId }, issue)) return finish("deferred", "no_agent_responsible", attribution);
+      // A signed producer mismatch is a deferred hold, never assignment authority (T2/U2).
+      if (agent.id !== value.agentId) return finish("deferred", "ownership_changed", attribution);
       if (!await deps.guard(ctx.companyId, issue.id, agent.id)) return finish("deferred", "guard_held", attribution);
       const [action] = await tx.insert(issueRecoveryActions).values({ companyId: ctx.companyId, sourceIssueId: issue.id,
         kind: "runner_result", cause: "runner_result_policy_recovery", fingerprint: data.fingerprint,

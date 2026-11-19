@@ -50,7 +50,7 @@ const support = await getRecoveryPostgresSupport();
     const r = await row(f), id = randomUUID();
     await db.insert(agentWakeupRequests).values({ id: r.wakeupRequestId!, companyId: f.companyId, agentId: f.agentId, source: "assignment", reason: "runner_policy_recovery", idempotencyKey: r.wakeIdempotencyKey });
     const [run] = await db.insert(heartbeatRuns).values({ id, companyId: f.companyId, agentId: f.agentId, invocationSource: "assignment", status: "queued", wakeupRequestId: r.wakeupRequestId,
-      contextSnapshot: { issueId: f.issueId, runnerRecoveryResultId: r.id, wakeReason: "runner_policy_recovery" } }).returning();
+      contextSnapshot: { projectId: JSON.parse(Buffer.from(f.input.envelope.payload, "base64").toString("utf8")).projectId, issueId: f.issueId, runnerRecoveryResultId: r.id, wakeReason: "runner_policy_recovery" } }).returning();
     return run;
   }
   async function second(f: Awaited<ReturnType<typeof fixture>>, fingerprint = "f".repeat(64)) {
@@ -272,6 +272,45 @@ const support = await getRecoveryPostgresSupport();
     expect(resumed.wakeIdempotencyKey).toBe(original.wakeIdempotencyKey);
     expect(f.wake).toHaveBeenCalledTimes(3);
     expect(await db.select().from(issueRecoveryActions).where(and(eq(issueRecoveryActions.companyId, f.companyId), eq(issueRecoveryActions.status, "active")))).toHaveLength(1);
+  });
+
+  it.each(["project_move", "queued_project", "missing_queued_project", "signed_project", "unchanged"])("B1 claim binds signed, current and queued project: %s", async change => {
+    const f = await fixture();
+    await f.service.routeRunnerResult(f, f.input);
+    const run = await nativeRun(f), before = await row(f);
+    const { projects } = await import("@paperclipai/db");
+    const [other] = await db.insert(projects).values({ companyId: f.companyId, name: "Other open project" }).returning();
+    if (change === "project_move") await db.update(issues).set({ projectId: other.id }).where(eq(issues.id, f.issueId));
+    if (change === "queued_project" || change === "missing_queued_project") {
+      run.contextSnapshot = { ...run.contextSnapshot, projectId: change === "queued_project" ? other.id : null };
+      await db.update(heartbeatRuns).set({ contextSnapshot: run.contextSnapshot }).where(eq(heartbeatRuns.id, run.id));
+    }
+    if (change === "signed_project") {
+      const value = JSON.parse(Buffer.from(f.input.envelope.payload, "base64").toString("utf8"));
+      value.projectId = other.id; value.data.projectId = other.id;
+      const envelope = signed(value);
+      await db.update(runnerRecoveryResults).set({ envelopeBytes: JSON.stringify(envelope) }).where(eq(runnerRecoveryResults.id, before.id));
+      await db.update(pluginState).set({ valueJson: envelope }).where(and(eq(pluginState.pluginId, f.pluginId), eq(pluginState.namespace, "runner-results")));
+    }
+    expect(await db.transaction(tx => claimRunnerPolicyRecovery(tx, run, f.trust))).toBe(change === "unchanged");
+    const after = await row(f);
+    expect(after.state).toBe(change === "unchanged" ? "routed" : "deferred");
+    expect(after.id).toBe(before.id);
+    if (change !== "unchanged") {
+      expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id)))[0].status).toBe("cancelled");
+      expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, run.wakeupRequestId!)))[0].status).toBe("skipped");
+      expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, before.recoveryActionId!)))[0]).toMatchObject({ status: "cancelled", outcome: "not_admitted" });
+      if (change !== "signed_project") expect(after.envelopeBytes).toBe(before.envelopeBytes);
+    }
+  });
+  it("T2 defers a different valid same-company producer without changing assignment", async () => {
+    const f = await fixture(), otherId = randomUUID();
+    await db.insert(agents).values({ id: otherId, companyId: f.companyId, name: "Current responsible agent", adapterType: "process", status: "idle" });
+    await db.update(issues).set({ assigneeAgentId: otherId }).where(eq(issues.id, f.issueId));
+    expect(await f.service.routeRunnerResult(f, f.input)).toMatchObject({ state: "deferred", reason: "ownership_changed" });
+    expect(f.wake).not.toHaveBeenCalled();
+    expect((await db.select().from(issues).where(eq(issues.id, f.issueId)))[0].assigneeAgentId).toBe(otherId);
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.companyId, f.companyId))).toHaveLength(0);
   });
 
 });

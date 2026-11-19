@@ -27,6 +27,7 @@ export async function claimRunnerPolicyRecovery(tx: Tx, run: typeof heartbeatRun
     if (!payload.success || payload.data.expiresAt && new Date(payload.data.expiresAt) <= new Date()) reason = "policy_changed";
     else if (!await inSubtree(tx, run.companyId, issue.id, policy.rootIssueId) ||
       !await canActorReadIssuePrivacy(tx, { type: "agent", agentId: run.agentId, companyId: run.companyId }, issue)) reason = "scope_changed";
+    else if (run.contextSnapshot?.projectId !== issue.projectId) reason = "scope_changed";
     else if (issue.status === "in_review" || issue.executionState?.status === "pending" || issue.executionState?.reviewEscalated) reason = "review_pending";
     else if (runnerRecoveryHash(await currentFence(tx, issue, policy.revision)) !== runnerRecoveryHash(row.fence)) reason = "fence_changed";
     if (!reason) {
@@ -37,7 +38,10 @@ export async function claimRunnerPolicyRecovery(tx: Tx, run: typeof heartbeatRun
         const [latestRow] = await tx.select().from(pluginState).where(and(eq(pluginState.pluginId, row.pluginId),
           eq(pluginState.scopeKind, "issue"), eq(pluginState.scopeId, issue.id), eq(pluginState.namespace, "runner-results"), eq(pluginState.stateKey, row.jobId)));
         const latest = latestRow ? verifyRunnerEnvelope(latestRow.valueJson, trust!) : null;
-        if (!latest || latest.sequence !== envelope.sequence || runnerRecoveryHash(latest) !== runnerRecoveryHash(envelope)) reason = "newer_sequence";
+        // Recheck signed execution scope against both the locked task and queued workspace.
+        if (envelope.projectId !== issue.projectId || envelope.projectId !== run.contextSnapshot?.projectId ||
+          envelope.agentId !== run.agentId) reason = "scope_changed";
+        else if (!latest || latest.sequence !== envelope.sequence || runnerRecoveryHash(latest) !== runnerRecoveryHash(envelope)) reason = "newer_sequence";
       }
     }
   }
