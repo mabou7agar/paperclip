@@ -46,6 +46,14 @@ export const agentWakeupRequests = pgTable(
       .defaultNow(),
   },
   (table) => ({
+    runnerRecoveryIdempotencyUq: uniqueIndex("agent_wakeup_requests_runner_recovery_uq")
+      .on(table.companyId, table.idempotencyKey)
+      .concurrently()
+      .where(sql`${table.idempotencyKey} LIKE 'runner-recovery:%' AND ${table.status} <> 'skipped'`),
+    runnerResultIdempotencyUq: uniqueIndex("agent_wakeup_requests_runner_result_uq")
+      .on(table.companyId, table.idempotencyKey)
+      .concurrently()
+      .where(sql`${table.idempotencyKey} LIKE 'runner-result:%' AND ${table.status} <> 'skipped'`),
     taskRetryIdempotencyUq: uniqueIndex("agent_wakeup_requests_task_retry_idempotency_uq")
       .on(table.companyId, table.idempotencyKey)
       .where(sql`${table.idempotencyKey} LIKE 'task-retry:%'`),
