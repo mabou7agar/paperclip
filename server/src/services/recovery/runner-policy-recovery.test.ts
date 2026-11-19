@@ -23,7 +23,7 @@ const support = await getRecoveryPostgresSupport();
     await db.insert(projects).values({ id: projectId, companyId, name: "Recovery project" });
     await db.insert(issues).values({ id: issueId, companyId, projectId, title: "Original plan", assigneeAgentId: agentId,
       status: options.review ? "in_review" : "in_progress" });
-    await db.insert(plugins).values({ id: pluginId, pluginKey: "runner-fixture-" + pluginId, packageName: "runner-fixture", version: "1", packagePath: "/tmp/fixture", manifestJson: {} });
+    await db.insert(plugins).values({ id: pluginId, pluginKey: "runner-fixture-" + pluginId, packageName: "runner-fixture", version: "1", packagePath: "/tmp/fixture", manifestJson: { id: "runner-fixture", apiVersion: 1, version: "1.0.0", displayName: "Runner fixture", description: "Isolated recovery test", author: "Test", categories: [], capabilities: [], entrypoints: { worker: "worker.mjs" } } });
     const payload = { policyKey: "owner-recovery", sourceCommentId: runnerRecoverySourceCommentId,
       scope: { issueTreeRootId: issueId, profiles: ["reviewed"] }, statuses: ["failed"], allowedActions: ["route_recovery_wake"] };
     await db.insert(runnerRecoveryPolicies).values({ companyId, policyKey: "owner-recovery", revision: "a".repeat(64), sourceCommentId: runnerRecoverySourceCommentId,

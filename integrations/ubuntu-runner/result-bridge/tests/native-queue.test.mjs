@@ -187,3 +187,20 @@ test('recovered control completion preserves facts through the unchanged webhook
   assert.match([...f.docs.values()][0].body,/recoveredCompletion/);
   assert.match([...f.docs.values()][0].body,/executionRepeated/);
 });
+
+test('review binding receipt refusal is pre-admission evidence, never an asynchronous failed result', async () => {
+  const f = fixture();
+  const first = await f.client.call('submit', f.request);
+  let resultDeliveries = 0;
+  f.service.deliverResult = async () => { resultDeliveries++; throw new Error('must not route a result'); };
+  await f.client.receive(f.envelope('admission', { jobId: first.jobId, state: 'not_admitted',
+    code: 'job_reviewer_packet_binding_missing' }), f.actor, f.service);
+  assert.equal(resultDeliveries, 0);
+  assert.equal(await f.ctx.state.get(requestKey(f.request.taskId, first.jobId, 'runner-results')), null);
+  const document = f.docs.get(`runner-admission-${first.jobId}`);
+  assert.match(document.body, /No attempt or test was started/);
+  assert.match(document.body, /job_reviewer_packet_binding_missing/);
+  assert.equal([...f.wakes.keys()][0], `runner-admission:${first.jobId}`);
+  assert.equal((await f.client.call('status', { jobId: first.jobId, companyId: f.request.companyId,
+    agentId: f.request.agentId })).state, 'not_admitted');
+});

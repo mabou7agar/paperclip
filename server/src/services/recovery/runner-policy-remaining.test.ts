@@ -26,7 +26,7 @@ const support = await getRecoveryPostgresSupport();
     await db.insert(projects).values({ id: projectId, companyId, name: "Recovery project" });
     await db.insert(issues).values({ id: issueId, companyId, projectId, title: "Original plan", assigneeAgentId: agentId,
       status: options.review ? "in_review" : "in_progress" });
-    await db.insert(plugins).values({ id: pluginId, pluginKey: "runner-fixture-" + pluginId, packageName: "runner-fixture", version: "1", packagePath: "/tmp/fixture", manifestJson: {} });
+    await db.insert(plugins).values({ id: pluginId, pluginKey: "runner-fixture-" + pluginId, packageName: "runner-fixture", version: "1", packagePath: "/tmp/fixture", manifestJson: { id: "runner-fixture", apiVersion: 1, version: "1.0.0", displayName: "Runner fixture", description: "Isolated recovery test", author: "Test", categories: [], capabilities: [], entrypoints: { worker: "worker.mjs" } } });
     const payload = { policyKey: "owner-recovery", sourceCommentId: runnerRecoverySourceCommentId,
       scope: { issueTreeRootId: issueId, profiles: ["reviewed"] }, statuses: ["failed"], allowedActions: ["route_recovery_wake"] };
     await db.insert(runnerRecoveryPolicies).values({ companyId, policyKey: "owner-recovery", revision: "a".repeat(64), sourceCommentId: runnerRecoverySourceCommentId,
@@ -39,7 +39,7 @@ const support = await getRecoveryPostgresSupport();
     await db.insert(pluginState).values([ { pluginId, scopeKind: "issue", scopeId: issueId, namespace: "runner-admissions", stateKey: jobId,
       valueJson: signed({ ...common, kind: "admission", sequence: 0, data: { jobId, state: "queued" } }) },
       { pluginId, scopeKind: "issue", scopeId: issueId, namespace: "runner-results", stateKey: jobId, valueJson: envelope } ]);
-    const wake = vi.fn(async (_row: import("./runner-policy-recovery.js").ResultRow) => ({ wakeupRequestId: randomUUID() })), guard = vi.fn(async () => true);
+    const wake = vi.fn(async (_row: import("./runner-policy-recovery.js").ResultRow): Promise<{ wakeupRequestId: string | null }> => ({ wakeupRequestId: randomUUID() })), guard = vi.fn(async () => true);
     const trust = vi.fn(async () => ({ pluginId, publicKey }));
     const service = runnerPolicyRecovery(db, { trust, wake, guard });
     return { companyId, issueId, pluginId, jobId, agentId, trust, guard, wake, service, input: { envelope, jobId, receiptSha256: data.receiptSha256 } };
@@ -63,8 +63,9 @@ const support = await getRecoveryPostgresSupport();
   }
   it("T1/T3/T12/T20 preserves one intent through concurrent deliveries and ACK replay", async () => {
     const f = await fixture();
-    f.wake.mockImplementation(async r => ({ wakeupRequestId: r.wakeupRequestId }));
+    f.wake.mockImplementation(async r => ({ wakeupRequestId: r.wakeupRequestId! }));
     const outcomes = await Promise.all([f.service.routeRunnerResult(f, f.input), f.service.routeRunnerResult(f, f.input)]);
+    if (!outcomes[0].enabled || !outcomes[1].enabled) throw new Error("Expected enabled recovery outcomes");
     expect(outcomes[0].id).toBe(outcomes[1].id);
     const run = await nativeRun(f);
     expect(await db.transaction(tx => claimRunnerPolicyRecovery(tx, run, f.trust))).toBe(true);
@@ -101,7 +102,7 @@ const support = await getRecoveryPostgresSupport();
     const [policy] = await db.select().from(runnerRecoveryPolicies).where(eq(runnerRecoveryPolicies.companyId, f.companyId));
     await db.update(runnerRecoveryPolicies).set({ payload: { ...policy.payload, maxRecoveries: 1 } }).where(eq(runnerRecoveryPolicies.id, policy.id));
     const outcomes = await Promise.all([f.service.routeRunnerResult(f, f.input), f.service.routeRunnerResult(f, next)]);
-    expect(outcomes.map(r => r.state).sort()).toEqual(["exhausted", "routing"]);
+    expect(outcomes.map(r => { if (!r.enabled) throw new Error("Expected enabled recovery"); return r.state; }).sort()).toEqual(["exhausted", "routing"]);
     expect(f.wake).toHaveBeenCalledTimes(1);
   });
   it("T14/T21 redelivery cannot release a hold; one native event can", async () => {
@@ -119,14 +120,14 @@ const support = await getRecoveryPostgresSupport();
     await f.service.reevaluateDeferred(f.companyId, f.issueId, "policy_activated"); expect(f.wake).toHaveBeenCalledTimes(1);
   });
   it("T22 a policy edit or overlap cannot replay a consumed receipt", async () => {
-    const f = await fixture(); f.wake.mockImplementation(async r => ({ wakeupRequestId: r.wakeupRequestId }));
+    const f = await fixture(); f.wake.mockImplementation(async r => ({ wakeupRequestId: r.wakeupRequestId! }));
     await f.service.routeRunnerResult(f, f.input); const run = await nativeRun(f);
     await db.transaction(tx => claimRunnerPolicyRecovery(tx, run, f.trust));
     await db.update(runnerRecoveryPolicies).set({ revision: "f".repeat(64) }).where(eq(runnerRecoveryPolicies.companyId, f.companyId));
     expect(await f.service.routeRunnerResult(f, f.input)).toMatchObject({ state: "routed" }); expect(f.wake).toHaveBeenCalledTimes(1);
   });
   it.each(["assignee", "policy", "subtree", "review", "status"])("T15/T19/T24/T25/T26 claim refuses a changed %s fence", async change => {
-    const f = await fixture(); f.wake.mockImplementation(async r => ({ wakeupRequestId: r.wakeupRequestId }));
+    const f = await fixture(); f.wake.mockImplementation(async r => ({ wakeupRequestId: r.wakeupRequestId! }));
     await f.service.routeRunnerResult(f, f.input); const run = await nativeRun(f);
     if (change === "policy") await db.update(runnerRecoveryPolicies).set({ revokedAt: new Date() }).where(eq(runnerRecoveryPolicies.companyId, f.companyId));
     else if (change === "subtree") {
@@ -139,7 +140,7 @@ const support = await getRecoveryPostgresSupport();
     expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, run.id)))[0].status).toBe("cancelled");
   });
   it("T27 keeps signed bytes when a newer sequence supersedes an unclaimed result", async () => {
-    const f = await fixture(); f.wake.mockImplementation(async r => ({ wakeupRequestId: r.wakeupRequestId }));
+    const f = await fixture(); f.wake.mockImplementation(async r => ({ wakeupRequestId: r.wakeupRequestId! }));
     await f.service.routeRunnerResult(f, f.input); const run = await nativeRun(f);
     const value = JSON.parse(Buffer.from(f.input.envelope.payload, "base64").toString("utf8")); value.sequence = 2;
     await db.update(pluginState).set({ valueJson: signed(value) }).where(and(eq(pluginState.pluginId, f.pluginId), eq(pluginState.namespace, "runner-results")));
@@ -183,7 +184,7 @@ const support = await getRecoveryPostgresSupport();
     expect(f.wake).not.toHaveBeenCalled();
   });
   it("T31 claim-time verifier unavailability is deferred without fallback", async () => {
-    const f = await fixture(); f.wake.mockImplementation(async r => ({ wakeupRequestId: r.wakeupRequestId }));
+    const f = await fixture(); f.wake.mockImplementation(async r => ({ wakeupRequestId: r.wakeupRequestId! }));
     await f.service.routeRunnerResult(f, f.input); const run = await nativeRun(f);
     f.trust.mockRejectedValueOnce(new Error("keys unavailable"));
     expect(await db.transaction(tx => claimRunnerPolicyRecovery(tx, run, f.trust))).toBe(false);
@@ -219,7 +220,7 @@ const support = await getRecoveryPostgresSupport();
     expect(f.wake).not.toHaveBeenCalled();
   });
   it("T15 a real plan revision change defers claim", async () => {
-    const f = await fixture(); f.wake.mockImplementation(async r => ({ wakeupRequestId: r.wakeupRequestId }));
+    const f = await fixture(); f.wake.mockImplementation(async r => ({ wakeupRequestId: r.wakeupRequestId! }));
     await f.service.routeRunnerResult(f, f.input); const run = await nativeRun(f);
     const { documents, issueDocuments } = await import("@paperclipai/db");
     const [doc] = await db.insert(documents).values({ companyId: f.companyId, title: "Accepted plan", latestBody: "revised", latestRevisionId: randomUUID() }).returning();
@@ -255,14 +256,14 @@ const support = await getRecoveryPostgresSupport();
   });
 
   it("T21 reconciles a cancelled unclaimed receipt within the same bounded release event", async () => {
-    const f = await fixture(); f.wake.mockImplementation(async r => ({ wakeupRequestId: r.wakeupRequestId }));
+    const f = await fixture(); f.wake.mockImplementation(async r => ({ wakeupRequestId: r.wakeupRequestId! }));
     await f.service.routeRunnerResult(f, f.input); const original = await row(f);
     f.wake.mockImplementationOnce(async r => {
       await db.transaction(async tx => {
         await tx.update(runnerRecoveryResults).set({ state: "deferred", reason: "guard_held", stateVersion: r.stateVersion + 1 }).where(eq(runnerRecoveryResults.id, r.id));
         await tx.update(issueRecoveryActions).set({ status: "cancelled", resolvedAt: new Date() }).where(eq(issueRecoveryActions.id, r.recoveryActionId!));
       });
-      return { wakeupRequestId: r.wakeupRequestId };
+      return { wakeupRequestId: r.wakeupRequestId! };
     });
     await f.service.reevaluateDeferred(f.companyId, f.issueId, "admission_released");
     const resumed = await row(f);

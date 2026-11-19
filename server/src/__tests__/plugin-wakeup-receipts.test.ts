@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { and, eq } from "drizzle-orm";
@@ -111,10 +112,34 @@ databaseSuite("durable plugin result wakeups", () => {
 
   it("permanently refuses ambiguous legacy receipts rather than minting a third", async () => {
     const f = await fixture();
+    // Reconstruct the pre-0461 boundary only in this disposable database.
+    // Seed history before applying the real migration, not around its guard.
+    await db.$client.unsafe('DROP TRIGGER guard_runner_result_wake_key ON agent_wakeup_requests; DROP FUNCTION guard_runner_result_wake_key(); DROP TABLE runner_result_wake_keys; DROP INDEX agent_wakeup_requests_runner_recovery_uq');
     for (let i = 0; i < 2; i++) await db.insert(agentWakeupRequests).values({ companyId: f.companyId, agentId: f.agentId,
       source: "assignment", reason: f.reason, requestedByActorType: "system", requestedByActorId: f.pluginId,
       idempotencyKey: f.idempotencyKey, status: "completed", payload: { issueId: f.issueId, pluginId: f.pluginId, contextSource: f.contextSource } });
+    const history = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, f.companyId));
+    const upgrade = readFileSync(new URL("../../../packages/db/src/migrations/0461_runner_recovery_wake_indexes.sql", import.meta.url), "utf8");
+    const connection = await db.$client.reserve();
+    try { for (const statement of upgrade.split("--> statement-breakpoint")) await connection.unsafe(statement); }
+    finally { await connection.release(); }
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, f.companyId))).toEqual(history);
     await expect(preparePluginWakeupReceipt(db, f.input)).rejects.toThrow("ambiguous prior delivery");
+    await expect(db.insert(agentWakeupRequests).values({ companyId: f.companyId, agentId: f.agentId,
+      source: "assignment", idempotencyKey: f.idempotencyKey, status: "completed" })).rejects.toThrow();
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, f.companyId))).toHaveLength(2);
+  });
+
+  it("reserves new runner-result keys atomically and releases only skipped unambiguous receipts", async () => {
+    const f = await fixture();
+    const insert = () => db.insert(agentWakeupRequests).values({ companyId: f.companyId, agentId: f.agentId,
+      source: "assignment", idempotencyKey: f.idempotencyKey, status: "queued" }).returning();
+    const results = await Promise.allSettled([insert(), insert()]);
+    expect(results.filter(r => r.status === "fulfilled")).toHaveLength(1);
+    expect(results.filter(r => r.status === "rejected")).toHaveLength(1);
+    const [receipt] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.companyId, f.companyId));
+    await db.update(agentWakeupRequests).set({ status: "skipped" }).where(eq(agentWakeupRequests.id, receipt.id));
+    expect(await insert()).toHaveLength(1);
   });
 
   it("executes the operator reader SQL against the actual migrated native schema", async () => {

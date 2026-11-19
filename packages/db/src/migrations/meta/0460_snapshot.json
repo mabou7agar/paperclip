@@ -3857,28 +3857,6 @@
           "method": "btree",
           "with": {}
         },
-        "agent_wakeup_requests_runner_result_uq": {
-          "name": "agent_wakeup_requests_runner_result_uq",
-          "columns": [
-            {
-              "expression": "company_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "idempotency_key",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "where": "\"agent_wakeup_requests\".\"idempotency_key\" LIKE 'runner-result:%' AND \"agent_wakeup_requests\".\"status\" <> 'skipped'",
-          "concurrently": true,
-          "method": "btree",
-          "with": {}
-        },
         "agent_wakeup_requests_task_retry_idempotency_uq": {
           "name": "agent_wakeup_requests_task_retry_idempotency_uq",
           "columns": [
@@ -68604,6 +68582,59 @@
           "value": "\"prompt_injection_invocations\".\"status\" in ('running', 'succeeded', 'failed', 'unknown')"
         }
       },
+      "isRLSEnabled": false
+    },
+    "public.runner_result_wake_keys": {
+      "name": "runner_result_wake_keys",
+      "schema": "",
+      "columns": {
+        "company_id": {
+          "name": "company_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "idempotency_key": {
+          "name": "idempotency_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "wakeup_request_id": {
+          "name": "wakeup_request_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {
+        "runner_result_wake_keys_company_id_companies_id_fk": {
+          "name": "runner_result_wake_keys_company_id_companies_id_fk",
+          "tableFrom": "runner_result_wake_keys",
+          "tableTo": "companies",
+          "columnsFrom": [
+            "company_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "no action",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "runner_result_wake_keys_pkey": {
+          "name": "runner_result_wake_keys_pkey",
+          "columns": [
+            "company_id",
+            "idempotency_key"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
       "isRLSEnabled": false
     }
   },

@@ -8,6 +8,7 @@ import {
   integer,
   index,
   uniqueIndex,
+  primaryKey,
 } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
@@ -50,10 +51,6 @@ export const agentWakeupRequests = pgTable(
       .on(table.companyId, table.idempotencyKey)
       .concurrently()
       .where(sql`${table.idempotencyKey} LIKE 'runner-recovery:%' AND ${table.status} <> 'skipped'`),
-    runnerResultIdempotencyUq: uniqueIndex("agent_wakeup_requests_runner_result_uq")
-      .on(table.companyId, table.idempotencyKey)
-      .concurrently()
-      .where(sql`${table.idempotencyKey} LIKE 'runner-result:%' AND ${table.status} <> 'skipped'`),
     taskRetryIdempotencyUq: uniqueIndex("agent_wakeup_requests_task_retry_idempotency_uq")
       .on(table.companyId, table.idempotencyKey)
       .where(sql`${table.idempotencyKey} LIKE 'task-retry:%'`),
@@ -120,3 +117,11 @@ export const agentWakeupRequests = pgTable(
     ),
   }),
 );
+
+/** Unique reservations include ambiguous legacy keys without changing receipt history.
+ * Maintained only by the migration-installed wake-row trigger. */
+export const runnerResultWakeKeys = pgTable("runner_result_wake_keys", {
+  companyId: uuid("company_id").notNull().references(() => companies.id),
+  idempotencyKey: text("idempotency_key").notNull(),
+  wakeupRequestId: uuid("wakeup_request_id"),
+}, table => ({ key: primaryKey({ name: "runner_result_wake_keys_pkey", columns: [table.companyId, table.idempotencyKey] }) }));
