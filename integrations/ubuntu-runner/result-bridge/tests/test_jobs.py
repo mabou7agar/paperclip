@@ -1,3 +1,4 @@
+import hashlib
 import pathlib
 import sys
 import tempfile
@@ -5,9 +6,11 @@ import unittest
 from unittest.mock import Mock, patch
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'broker'))
 from contracts import Refusal, digest
+from configuration import validate_required_packet_inputs
 from job_service import JobService
 from repository import JobRepository
 from test_repository import request
+from test_packet import fixture
 
 
 class JobTests(unittest.TestCase):
@@ -46,6 +49,63 @@ class JobTests(unittest.TestCase):
         self.assertEqual(self.repo.get(second)['state'], 'queued')
         self.remote.stage.assert_not_called()
         self.native.notify.assert_not_called()
+
+    def test_required_packet_inputs_reject_self_consistent_incomplete_packets_before_staging(self):
+        name = 'qualification-q1/retained-evidence.json'
+        exact = b'{"outcome":"retained"}'
+        self.profile['requiredPacketInputs'] = {
+            'qualification-{key}/retained-evidence.json': hashlib.sha256(exact).hexdigest(),
+        }
+        self.service.load_packet = JobService.load_packet.__get__(self.service)
+
+        for files, prefix, code in (
+            ({}, 'q1', 'job_required_packet_input_missing'),
+            ({name: b'{"outcome":"replaced"}'}, 'q1', 'job_required_packet_input_digest_mismatch'),
+            ({name: exact}, 'q2', None),
+        ):
+            with self.subTest(code=code):
+                self.remote.reset_mock()
+                # The fixture rewrites archive paths for the new key.
+                raw, sha, packet_profile = fixture(source_patch=files, prefix=prefix)
+                self.profile.update(packet_profile)
+                self.native.read.side_effect = [
+                    [{'id': self.request['attachmentId'], 'sha256': sha, 'byteSize': len(raw)}],
+                    raw,
+                ] * 2
+                job_id = self.register({**self.request, 'packetSha256': sha})
+                if code is None:
+                    self.terminal()
+                self.service.execute(job_id)
+                if code is not None:
+                    saved = self.repo.get(job_id)
+                    self.assertEqual(saved['state'], 'terminal')
+                    result = saved['result']['result']
+                    self.assertEqual(result['status'], 'failed')
+                    self.assertEqual(result['code'], code)
+                    self.assertFalse(result['executionStarted'])
+                    self.remote.stage.assert_not_called()
+                    self.remote.launch.assert_not_called()
+                else:
+                    self.remote.stage.assert_called_once()
+                    self.remote.launch.assert_called_once()
+                    self.assertIn('qualification-q2/retained-evidence.json', self.remote.stage.call_args.args[3].files)
+
+    def test_required_packet_inputs_profile_rejects_invalid_pins(self):
+        valid = {'qualification-{key}/retained-evidence.json': 'a' * 64}
+        validate_required_packet_inputs({'allowReviewedController': True})
+        validate_required_packet_inputs({'allowReviewedController': True, 'requiredPacketInputs': valid})
+        invalid = [[], {}, {f'file{i}': 'a' * 64 for i in range(129)},
+                   {'../evidence.json': 'a' * 64}, {'root//file.json': 'a' * 64},
+                   {'/file.json': 'a' * 64}, {'root/': 'a' * 64}, {'root/./file.json': 'a' * 64},
+                   {'root/..': 'a' * 64}, {'.hidden': 'a' * 64}, {'a' * 241: 'a' * 64},
+                   {1: 'a' * 64}, {'qualification-{ke}/file.json': 'a' * 64},
+                   {'{key}/{key}.json': 'a' * 64}, {'file.json': 'A' * 64},
+                   {'file.json': None}, {'file.json': 'bad'}]
+        for pins in invalid:
+            with self.subTest(pins_type=type(pins)), self.assertRaisesRegex(Refusal, 'broker_required_packet_inputs_invalid'):
+                validate_required_packet_inputs({'allowReviewedController': True, 'requiredPacketInputs': pins})
+        with self.assertRaisesRegex(Refusal, 'broker_required_packet_inputs_invalid'):
+            validate_required_packet_inputs({'allowReviewedController': False, 'requiredPacketInputs': valid})
 
     def test_restart_after_launch_reconciles_same_job_without_second_execution(self):
         identity = self.register()

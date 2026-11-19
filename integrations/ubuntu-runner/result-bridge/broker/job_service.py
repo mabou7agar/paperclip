@@ -85,6 +85,11 @@ class JobService:
         packet = self.load_packet(request, profile)
         if request['kind'] == 'reviewed_controller':
             require(profile.get('allowReviewedController') is True, 'job_controller_not_enabled')
+            controller_key = packet.directory.removeprefix('qualification-')
+            for path_template, expected in profile.get('requiredPacketInputs', {}).items():
+                name = path_template.replace('{key}', controller_key)
+                require(name in packet.files, 'job_required_packet_input_missing')
+                require(packet.file_sha(name) == expected, 'job_required_packet_input_digest_mismatch')
             if profile.get('setupContainment'):
                 from supervision_policy import SetupOwnership
                 try:SetupOwnership.from_plan({'jobId': identity, 'profile': profile}, packet)
