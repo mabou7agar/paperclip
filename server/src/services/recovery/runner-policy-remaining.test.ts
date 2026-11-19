@@ -413,4 +413,32 @@ const support = await getRecoveryPostgresSupport();
     expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, foreignWake.id)))[0].status).toBe("queued");
   });
 
+  it.each(["revoked_merge", "cleared_context", "valid_merge"])("TL14 receipt identity survives ordinary wake context replacement: %s", async change => {
+    const f = await fixture(), n = await nativeQueue(f);
+    await n.service.routeRunnerResult(f, f.input);
+    const r = await row(f);
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, r.wakeupRequestId!));
+    const [queued] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, wake.runId!));
+    if (change !== "valid_merge") await db.update(runnerRecoveryPolicies).set({ revokedAt: new Date() }).where(eq(runnerRecoveryPolicies.companyId, f.companyId));
+    await n.queue.trackWakeup(f.agentId, { source: "assignment", reason: "issue_assigned", contextSnapshot: {
+      issueId: f.issueId, taskId: f.issueId, projectId: queued.contextSnapshot?.projectId, wakeReason: "issue_assigned" } });
+    const [merged] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, queued.id));
+    expect(merged.contextSnapshot?.wakeReason).toBe("issue_assigned");
+    expect(merged.wakeupRequestId).toBe(r.wakeupRequestId);
+    if (change === "cleared_context") {
+      const { runnerRecoveryResultId: _removed, ...ordinary } = merged.contextSnapshot!;
+      merged.contextSnapshot = ordinary;
+      await db.update(heartbeatRuns).set({ contextSnapshot: ordinary }).where(eq(heartbeatRuns.id, merged.id));
+    }
+    const claimed = await n.queue.claimQueuedRun(merged);
+    if (change === "valid_merge") {
+      expect(claimed?.id).toBe(queued.id);
+      expect((await row(f)).state).toBe("routed");
+    } else {
+      expect(claimed).toBeNull();
+      expect((await row(f)).state).toBe("deferred");
+      expect((await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.id, r.recoveryActionId!)))[0]).toMatchObject({ status: "cancelled", outcome: "not_admitted" });
+    }
+  });
+
 });

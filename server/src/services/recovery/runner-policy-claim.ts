@@ -10,10 +10,18 @@ type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 /** Joins the native queue's final claim transaction, never substitutes for native admission. */
 export async function claimRunnerPolicyRecovery(tx: Tx, run: typeof heartbeatRuns.$inferSelect,
   trustLoader: () => Promise<RunnerTrust>) {
-  if (run.contextSnapshot?.wakeReason !== "runner_policy_recovery") return true;
-  const resultId = run.contextSnapshot.runnerRecoveryResultId;
-  const [issue] = await tx.select().from(issues).where(and(eq(issues.id, String(run.contextSnapshot.issueId)), eq(issues.companyId, run.companyId))).for("update");
-  const [row] = await tx.select().from(runnerRecoveryResults).where(and(eq(runnerRecoveryResults.id, String(resultId)),
+  // Mutable/coalesced context is never the authority for deciding whether a
+  // recovery receipt needs its final recheck. Resolve its owner from storage.
+  const hasRecoveryContext = run.contextSnapshot?.wakeReason === "runner_policy_recovery" ||
+    Boolean(run.contextSnapshot?.runnerRecoveryResultId);
+  if (!run.wakeupRequestId) return !hasRecoveryContext;
+  const owners = await tx.select({ id: runnerRecoveryResults.id, issueId: runnerRecoveryResults.issueId })
+    .from(runnerRecoveryResults).where(and(eq(runnerRecoveryResults.wakeupRequestId, run.wakeupRequestId),
+      eq(runnerRecoveryResults.companyId, run.companyId))).limit(2);
+  if (!owners.length) return !hasRecoveryContext;
+  if (owners.length !== 1) return false;
+  const [issue] = await tx.select().from(issues).where(and(eq(issues.id, owners[0].issueId), eq(issues.companyId, run.companyId))).for("update");
+  const [row] = await tx.select().from(runnerRecoveryResults).where(and(eq(runnerRecoveryResults.id, owners[0].id),
     eq(runnerRecoveryResults.companyId, run.companyId))).for("update");
   // Context merging must never grant authority to cancel a different native receipt.
   if (!row || row.wakeupRequestId !== run.wakeupRequestId || row.targetAgentId !== run.agentId ||
@@ -23,6 +31,7 @@ export async function claimRunnerPolicyRecovery(tx: Tx, run: typeof heartbeatRun
     eq(runnerRecoveryPolicies.companyId, run.companyId))).for("share") : [];
   if (!row || row.state !== "routing" || row.wakeupRequestId !== run.wakeupRequestId || !issue || row.issueId !== issue.id ||
     row.targetAgentId !== run.agentId || issue.assigneeAgentId !== run.agentId) reason = "ownership_changed";
+  else if (run.contextSnapshot?.issueId !== row.issueId) reason = "scope_changed";
   else if (!await runnerRecoveryEnabled(tx, run.companyId) || !policy?.activatedAt || policy.revokedAt ||
     policy.revision !== row.policyRevision) reason = "policy_changed";
   else {
