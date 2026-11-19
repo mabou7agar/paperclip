@@ -1,3 +1,12 @@
+import { dispatchRunnerRecoveryWake } from "./runner-policy-runtime.js";
+import { mergeCoalescedContextSnapshot } from "../heartbeat/run-preparation.js";
+import { createWakeQueue } from "../../modules/wake-queue/index.js";
+import { shouldDeferFollowupWakeForSameIssue, shouldQueueFollowupForRunningIssueWake } from "../heartbeat/queue.js";
+import { createHeartbeatQueue } from "../heartbeat/queue.js";
+import { createHeartbeatQueueTestDependencies } from "../../__tests__/helpers/heartbeat-queue.js";
+const native = vi.hoisted(() => ({ wakeup: vi.fn(), trust: vi.fn() }));
+vi.mock("../heartbeat.js", () => ({ heartbeatService: () => native }));
+vi.mock("./runner-policy-trust.js", () => ({ loadRunnerPolicyTrust: () => native.trust() }));
 import { runnerPolicyAdministration } from "./runner-policy-administration.js";
 import { projectRunnerCheckReferences, runnerSessionReceipt } from "./runner-policy-continuation.js";
 import { claimRunnerPolicyRecovery } from "./runner-policy-claim.js";
@@ -311,6 +320,97 @@ const support = await getRecoveryPostgresSupport();
     expect(f.wake).not.toHaveBeenCalled();
     expect((await db.select().from(issues).where(eq(issues.id, f.issueId)))[0].assigneeAgentId).toBe(otherId);
     expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.companyId, f.companyId))).toHaveLength(0);
+  });
+
+  async function nativeQueue(f: Awaited<ReturnType<typeof fixture>>) {
+    const [agent] = await db.select().from(agents).where(eq(agents.id, f.agentId));
+    const deps = createHeartbeatQueueTestDependencies(db);
+    deps.getAgent.mockResolvedValue(agent);
+    deps.instanceSettings.getExperimental.mockResolvedValue({ enableIsolatedWorkspaces: false, enableCases: false } as never);
+    deps.issuesSvc.getDependencyReadiness.mockResolvedValue({ ready: true, blockers: [] } as never);
+    deps.getSchedulingSuppression.mockResolvedValue({ suppressed: true, reason: "task_drain" });
+    deps.resolveSessionBeforeForWakeup = vi.fn(async () => "preserved-session");
+    const { authUsers, companyMemberships } = await import("@paperclipai/db");
+    await db.insert(authUsers).values({ id: f.companyId, name: "Owner", email: f.companyId + "@test.invalid", createdAt: new Date(), updatedAt: new Date() });
+    await db.insert(companyMemberships).values({ companyId: f.companyId, principalType: "user", principalId: f.companyId, status: "active", membershipRole: "member" });
+    await db.update(companies).set({ defaultResponsibleUserId: f.companyId }).where(eq(companies.id, f.companyId));
+    const wakeQueue = createWakeQueue(db, {
+      resolveResponsibleUserId: async () => f.companyId,
+      getRoutineEnv: async () => ({ routineId: null, env: null, responsibleUserId: null }),
+      resolveSessionBeforeForWakeup: async () => "preserved-session",
+      wakeAdmissionHelpers: { filterZombieCoalesceTarget: deps.filterZombieCoalesceTarget, mergeCoalescedContextSnapshot,
+        shouldDeferFollowupWakeForSameIssue, shouldQueueFollowupForRunningIssueWake },
+      recovery: { escalateStrandedAssignedIssue: async () => undefined,
+        escalateStrandedRecoveryIssueInPlace: async () => { throw new Error("Unexpected stranded recovery escalation"); } },
+    });
+    deps.wakeQueue.createAdmissionTransactionScope.mockImplementation(wakeQueue.createAdmissionTransactionScope);
+    deps.wakeQueue.admitWakeBehindIssueExecution.mockImplementation(wakeQueue.admitWakeBehindIssueExecution);
+    const queue = createHeartbeatQueue(db, deps);
+    native.trust.mockImplementation(f.trust);
+    native.wakeup.mockImplementation((id, options) => queue.trackWakeup(id, options));
+    const service = runnerPolicyRecovery(db, { trust: f.trust, guard: f.guard, wake: r => dispatchRunnerRecoveryWake(db, r) });
+    return { queue, service };
+  }
+  it("TL1 pending comment remains separate and revoked policy cannot claim through the queue", async () => {
+    const f = await fixture(), n = await nativeQueue(f), commentId = randomUUID();
+    const [commentWake] = await db.insert(agentWakeupRequests).values({ companyId: f.companyId, agentId: f.agentId, source: "assignment", reason: "issue_commented", status: "deferred_issue_execution",
+      payload: { issueId: f.issueId, commentId, queuedCommentIds: [commentId], _paperclipWakeContext: { issueId: f.issueId, wakeReason: "issue_commented", commentId, wakeCommentIds: [commentId] } } }).returning();
+    await n.service.routeRunnerResult(f, f.input);
+    const r = await row(f);
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, r.wakeupRequestId!));
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, wake.runId!));
+    expect(native.wakeup.mock.calls.at(-1)![1].allowRunCoalescing).toBe(false);
+    expect(run.contextSnapshot?.wakeCommentIds ?? []).toEqual([]);
+    await db.update(runnerRecoveryPolicies).set({ revokedAt: new Date() }).where(eq(runnerRecoveryPolicies.companyId, f.companyId));
+    expect(await n.queue.claimQueuedRun(run)).toBeNull();
+    expect((await row(f)).state).toBe("deferred");
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, commentWake.id)))[0].status).toBe("deferred_issue_execution");
+  });
+  it("TL1 existing queued native run and its wake remain intact", async () => {
+    const f = await fixture(), n = await nativeQueue(f);
+    const [wake] = await db.insert(agentWakeupRequests).values({ companyId: f.companyId, agentId: f.agentId, source: "assignment", reason: "issue_assigned", status: "queued" }).returning();
+    const projectId = JSON.parse(Buffer.from(f.input.envelope.payload, "base64").toString()).projectId;
+    const [q] = await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.agentId, status: "queued", invocationSource: "assignment", wakeupRequestId: wake.id, contextSnapshot: { issueId: f.issueId, projectId, wakeReason: "issue_assigned" } }).returning();
+    await db.update(agentWakeupRequests).set({ runId: q.id }).where(eq(agentWakeupRequests.id, wake.id));
+    await n.service.routeRunnerResult(f, f.input);
+    expect(native.wakeup.mock.calls.at(-1)![1].allowRunCoalescing).toBe(false);
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, q.id)))[0]).toMatchObject({ status: "queued", wakeupRequestId: wake.id, contextSnapshot: q.contextSnapshot });
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, wake.id)))[0].status).toBe("queued");
+  });
+  it.each(["coalesced", "deferred_issue_execution"])("TL1 non-admitted %s receipt defers without cancelling a foreign run", async status => {
+    const f = await fixture();
+    await f.service.routeRunnerResult(f, f.input); const r = await row(f);
+    const [foreign] = await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.agentId, status: "queued" }).returning();
+    native.wakeup.mockImplementation(async () => {
+      await db.insert(agentWakeupRequests).values({ id: r.wakeupRequestId!, companyId: f.companyId, agentId: f.agentId, source: "assignment", reason: "runner_policy_recovery", idempotencyKey: r.wakeIdempotencyKey, status, runId: foreign.id });
+      return foreign;
+    });
+    await dispatchRunnerRecoveryWake(db, r);
+    expect((await row(f)).state).toBe("deferred");
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, foreign.id)))[0].status).toBe("queued");
+  });
+
+  it("TL1 queued-comment claim still rechecks a retained recovery context", async () => {
+    const f = await fixture(), n = await nativeQueue(f);
+    // Force a dedicated enqueue even on the pre-fix dispatcher, then reconstruct
+    // the legacy adopted-comment shape to exercise the actual alternative claim.
+    native.wakeup.mockImplementation((id, options) => n.queue.trackWakeup(id, { ...options, allowRunCoalescing: false }));
+    await n.service.routeRunnerResult(f, f.input); const r = await row(f);
+    const [wake] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, r.wakeupRequestId!));
+    const [run] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, wake.runId!));
+    run.contextSnapshot = { ...run.contextSnapshot, wakeCommentIds: [randomUUID()] };
+    await db.update(heartbeatRuns).set({ contextSnapshot: run.contextSnapshot }).where(eq(heartbeatRuns.id, run.id));
+    await db.update(runnerRecoveryPolicies).set({ revokedAt: new Date() }).where(eq(runnerRecoveryPolicies.companyId, f.companyId));
+    expect(await n.queue.claimQueuedRun(run)).toBeNull();
+    expect((await row(f)).state).toBe("deferred");
+  });
+  it("TL1 a mismatched foreign receipt cannot be cancelled by recovery claim", async () => {
+    const f = await fixture(); await f.service.routeRunnerResult(f, f.input); const own = await nativeRun(f);
+    const [foreignWake] = await db.insert(agentWakeupRequests).values({ companyId: f.companyId, agentId: f.agentId, source: "assignment", reason: "issue_assigned", status: "queued" }).returning();
+    const [foreign] = await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.agentId, status: "queued", wakeupRequestId: foreignWake.id, contextSnapshot: own.contextSnapshot }).returning();
+    expect(await db.transaction(tx => claimRunnerPolicyRecovery(tx, foreign, f.trust))).toBe(false);
+    expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, foreign.id)))[0].status).toBe("queued");
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, foreignWake.id)))[0].status).toBe("queued");
   });
 
 });

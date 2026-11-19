@@ -15,6 +15,9 @@ export async function claimRunnerPolicyRecovery(tx: Tx, run: typeof heartbeatRun
   const [issue] = await tx.select().from(issues).where(and(eq(issues.id, String(run.contextSnapshot.issueId)), eq(issues.companyId, run.companyId))).for("update");
   const [row] = await tx.select().from(runnerRecoveryResults).where(and(eq(runnerRecoveryResults.id, String(resultId)),
     eq(runnerRecoveryResults.companyId, run.companyId))).for("update");
+  // Context merging must never grant authority to cancel a different native receipt.
+  if (!row || row.wakeupRequestId !== run.wakeupRequestId || row.targetAgentId !== run.agentId ||
+    row.issueId !== issue?.id) return false;
   let reason: string | null = null;
   const [policy] = row?.policyId ? await tx.select().from(runnerRecoveryPolicies).where(and(eq(runnerRecoveryPolicies.id, row.policyId),
     eq(runnerRecoveryPolicies.companyId, run.companyId))).for("share") : [];

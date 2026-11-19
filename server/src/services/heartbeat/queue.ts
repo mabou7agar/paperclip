@@ -1340,6 +1340,11 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                 return { kind: "stale" as const, run: null };
               }
 
+              // Retained recovery contexts must pass the same final recheck on
+              // the comment branch as on an ordinary claim.
+              if (!await claimRunnerPolicyRecovery(tx, lockedRun, loadRunnerPolicyTrust))
+                return { kind: "stale" as const, run: null };
+
               if (lockedRun.invocationSource === "automation") {
                 const admission = readChatControlRecoveryAdmission(lockedRun);
                 if (admission === "invalid")
