@@ -14,6 +14,22 @@ manifest-approved synthetic PNG/WebM/JSON evidence. That convention is not a
 universal Paperclip requirement. Other execution protocols should use another
 admission/packet adapter; never loosen its checks for an incompatible project.
 
+When registering a reviewed controller that uses retained data, record each
+required archive-relative path and exact SHA-256 from its accepted source in
+the operator-owned `requiredPacketInputs` profile map. Capture the list from the
+reviewed input contract before the producer builds the archive. The archive's
+own inventory only describes what it contains. The broker checks these pins
+after validating that inventory and before staging or claiming an execution
+attempt. Missing or changed input terminates the submission with a named
+refusal. Correct the package and use a fresh review and scope. Keep the map
+with the versioned profile. A path such as
+`qualification-{key}/retained-evidence.json` uses the verified controller key so
+the same pinned bytes apply across qualification revisions. Enroll or change a
+profile when it has no unfinished jobs. Omit the map for controllers with no
+retained inputs or existing profiles that have not been enrolled.
+Use path components that start with an ASCII letter or digit and contain only
+ASCII letters, digits, underscores, hyphens or dots after key substitution.
+
 `control_checks` executes a registered changed-input pure recipe in a disposable,
 non-root, networkless container using an existing image. It has no workspace,
 secret, database or Docker socket mounts. Passed matching recipe/input/image

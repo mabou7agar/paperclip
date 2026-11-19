@@ -18,6 +18,19 @@ def private_file(path):
     return p
 
 
+def validate_required_packet_inputs(profile):
+    if 'requiredPacketInputs' not in profile:
+        return
+    required_inputs = profile['requiredPacketInputs']
+    path_pattern = r'[A-Za-z0-9][A-Za-z0-9_.-]*(?:/[A-Za-z0-9][A-Za-z0-9_.-]*)*'
+    require(profile['allowReviewedController'] and isinstance(required_inputs, dict) and
+            0 < len(required_inputs) <= 128 and
+            all(isinstance(name, str) and len(name) <= 240 and name.count('{key}') <= 1 and
+                re.fullmatch(path_pattern, name.replace('{key}', 'key')) and
+                isinstance(sha, str) and SHA.fullmatch(sha) for name, sha in required_inputs.items()),
+            'broker_required_packet_inputs_invalid')
+
+
 def load(path):
     config = closed_json(private_file(path).read_bytes())
     base = {"stateRoot", "socketPath", "socketGid", "pluginAuthFile", "apiBaseUrl", "tokenFile", "databaseContainer",
@@ -65,7 +78,8 @@ def validate_profile(key, profile):
                 'targetDocumentKey', 'reviewDocumentKey', 'actualAcpDocumentKey', 'allowedModes',
                 'sourceDecisionFingerprints', 'authorityRoot', 'trialRoot', 'continuationPattern',
                 'executionIdPattern', 'authoritySchemaTemplate', 'allowReviewedController', 'privilegedCodeDigests', 'privilegedCodeApproval', 'allowControlChecks', 'controlInputs', 'preparedImage'}
-    require(isinstance(profile, dict) and required <= set(profile) <= required | {'setupContainment'}, 'broker_profile_fields_invalid')
+    optional = {'setupContainment', 'requiredPacketInputs'}
+    require(isinstance(profile, dict) and required <= set(profile) <= required | optional, 'broker_profile_fields_invalid')
     require(KEY.fullmatch(key), 'broker_profile_key_invalid')
     require(type(profile['concurrency']) is int and profile['concurrency'] == 1, 'broker_profile_concurrency_invalid')
     require(re.fullmatch(r'[a-zA-Z0-9_.@-]+', profile['sshTarget']) and not profile['sshTarget'].startswith('-'), 'broker_ssh_target_invalid')
@@ -111,6 +125,7 @@ def validate_profile(key, profile):
             profile['fixedTrialFields'].get('harnessIssueId') in profile['taskIds'], 'broker_trial_identity_invalid')
 
     require(type(profile['allowReviewedController']) is bool, 'broker_controller_policy_invalid')
+    validate_required_packet_inputs(profile)
     pins = profile['privilegedCodeDigests']
     require(isinstance(pins, dict) and 1 <= len(pins) <= 128 and
             all(re.fullmatch(r'[a-z][a-z0-9_.{}-]+\.py', name) and SHA.fullmatch(sha) for name, sha in pins.items()),
