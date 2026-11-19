@@ -118,6 +118,83 @@ class JobTests(unittest.TestCase):
         self.assertEqual(self.repo.pending(), [identity])
         self.native.notify.assert_called_once_with(identity)
 
+    def test_functional_phase_entry_is_new_evidence_once(self):
+        self.profile['setupContainment'] = {'required': True}
+        outcome = {'status': 'failed', 'kind': 'reviewed_controller', 'cleanupComplete': True, 'auditComplete': False,
+                   'steps': [{'phase': 'runtime', 'exit': 0}], 'diagnostic': None}
+        result_receipts = []
+        for index, phase in enumerate(({}, {'functionalCasesStarted': False},
+                                       {'functionalCasesStarted': True}, {'functionalCasesStarted': True})):
+            request = {**self.request, 'packetSha256': str(index + 1) * 64}
+            identity = self.register(request)
+            self.repo.claim(identity)
+            self.remote.inspect.return_value = {'phase': 'terminal', 'result': {
+                **outcome, **phase, 'driverSha256': str(index + 1) * 64,
+            }}
+            self.service.execute(identity)
+            receipt = self.repo.get(identity)['result']
+            self.assertEqual(receipt['result'].get('functionalCasesStarted'), phase.get('functionalCasesStarted'))
+            result_receipts.append(receipt)
+        setup, setup_again, functional, functional_again = result_receipts
+        self.assertEqual(setup['fingerprint'], setup_again['fingerprint'])
+        self.assertNotEqual(setup['fingerprint'], functional['fingerprint'])
+        self.assertEqual(functional['fingerprint'], functional_again['fingerprint'])
+        self.assertNotEqual(functional['receiptSha256'], functional_again['receiptSha256'])
+        self.assertEqual([x['newEvidence'] for x in result_receipts], [True, False, True, False])
+        self.assertEqual(self.native.notify.call_count, 4)
+        self.remote.stage.assert_not_called()
+        self.remote.launch.assert_not_called()
+
+    def test_recovers_pre_upgrade_functional_receipt_without_wake_or_rewrite(self):
+        self.profile['setupContainment'] = {'required': True}
+        outcome = {'status': 'failed', 'kind': 'reviewed_controller', 'cleanupComplete': False,
+                   'auditComplete': False, 'functionalCasesStarted': True}
+        request = self.request
+        identity = self.register()
+        self.repo.claim(identity)
+        old = self.repo.terminal(identity, {
+            'jobId': identity, 'companyId': request['companyId'], 'projectId': request['projectId'],
+            'issueId': request['taskId'], 'agentId': request['agentId'], 'profile': request['profile'],
+            'status': outcome['status'], 'receiptSha256': digest(outcome),
+            'fingerprint': digest({k: v for k, v in outcome.items() if k != 'functionalCasesStarted'}),
+            'result': outcome,
+        })
+        self.repo.acknowledge(identity, old['receiptSha256'])
+        self.remote.inspect.return_value = {'phase': 'terminal', 'result': outcome}
+
+        self.service.execute(identity)
+
+        saved = self.repo.get(identity)
+        self.assertEqual(saved['state'], 'quarantined')
+        self.assertEqual(saved['result'], old)
+        self.assertEqual(self.repo.pending(), [])
+        self.native.notify.assert_not_called()
+        self.remote.launch.assert_not_called()
+
+    def test_pre_upgrade_functional_failure_suppresses_equivalent_new_job(self):
+        self.profile['setupContainment'] = {'required': True}
+        outcome = {'status': 'failed', 'kind': 'reviewed_controller', 'cleanupComplete': True,
+                   'auditComplete': False, 'functionalCasesStarted': True}
+        request = self.request
+        identity = self.register()
+        self.repo.claim(identity)
+        legacy = self.repo.terminal(identity, {
+            'jobId': identity, 'companyId': request['companyId'], 'projectId': request['projectId'],
+            'issueId': request['taskId'], 'agentId': request['agentId'], 'profile': request['profile'],
+            'status': outcome['status'], 'receiptSha256': digest(outcome),
+            'fingerprint': digest({k: v for k, v in outcome.items() if k != 'functionalCasesStarted'}),
+            'result': outcome,
+        })
+        next_id = self.register({**request, 'packetSha256': 'c' * 64})
+        self.repo.claim(next_id)
+        self.remote.inspect.return_value = {'phase': 'terminal', 'result': {**outcome, 'driverSha256': 'a' * 64}}
+        self.service.execute(next_id)
+        current = self.repo.get(next_id)['result']
+        self.assertNotEqual(legacy['fingerprint'], current['fingerprint'])
+        self.assertFalse(current['newEvidence'])
+        self.assertEqual(self.repo.get(identity)['result'], legacy)
+        self.remote.launch.assert_not_called()
+
     def test_ambiguous_launch_transport_waits_then_read_only_reconciles_without_a_wake(self):
         identity = self.register()
         self.remote.launch.side_effect = Refusal('remote_transport_unconfirmed')

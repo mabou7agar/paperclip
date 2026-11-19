@@ -214,11 +214,19 @@ class JobService:
             meaningful.update({key: outcome[key] for key in ['cleanupComplete', 'auditComplete'] if key in outcome})
         if outcome.get('kind') == 'control_checks':
             meaningful['facts'] = outcome.get('facts', {}).get('checks')
+        legacy_fingerprint = None
+        if (request['kind'] == outcome.get('kind') == 'reviewed_controller' and
+                outcome.get('functionalCasesStarted') is True):
+            # A measured functional-phase entry is progress beyond setup. The
+            # legacy fingerprint still identifies exact receipts on recovery.
+            legacy_fingerprint = digest(meaningful)
+            meaningful['functionalCasesStarted'] = True
         result = {'jobId': identity, 'companyId': request['companyId'], 'projectId': request['projectId'],
                   'issueId': request['taskId'], 'agentId': request['agentId'], 'profile': request['profile'],
                   'status': outcome['status'], 'receiptSha256': digest(outcome), 'fingerprint': digest(meaningful), 'result': outcome}
-        self.repository.terminal(identity, result)
-        self.native.notify(identity)
+        saved = self.repository.terminal(identity, result, legacy_fingerprint=legacy_fingerprint)
+        if saved['fingerprint'] == result['fingerprint']:
+            self.native.notify(identity)
 
     def status(self, value):
         saved = self.repository.get(value['jobId'])
