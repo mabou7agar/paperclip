@@ -1,3 +1,4 @@
+import { runnerPolicyRuntime } from "./recovery/runner-policy-runtime.js";
 import { conflict } from "../errors.js";
 import { projectGitAuthorizationService } from "./project-git-authorization.js";
 import { preparePluginWakeupReceipt } from "./plugin-wakeup-receipts.js";
@@ -770,6 +771,7 @@ export function buildHostServices(
     heartbeatRuntimeEnv?: Record<string, string | undefined>;
   } = {},
 ): HostServices & { dispose(): void } {
+  const recoveryRouter = pluginKey === "paperclip.ubuntu-runner-results" ? runnerPolicyRuntime(db, pluginId) : null;
   const registry = pluginRegistryService(db);
   const stateStore = pluginStateStore(db, { notifyCommittedChanges: options.manifest?.capabilities.includes("plugin.state.notify") === true });
   const pluginDb = pluginDatabaseService(db);
@@ -2417,6 +2419,12 @@ export function buildHostServices(
             : {}),
         };
       },
+      async routeRunnerResult(params) {
+        const companyId = ensureCompanyId(params.companyId);
+        await ensurePluginAvailableForCompany(companyId);
+        if (!recoveryRouter) throw new Error("runner_recovery_plugin_forbidden");
+        return recoveryRouter.routeRunnerResult({ companyId, pluginId }, params);
+      },
       async requestWakeup(params) {
         const companyId = ensureCompanyId(params.companyId);
         await ensurePluginAvailableForCompany(companyId);
@@ -3758,6 +3766,7 @@ export function buildHostServices(
      */
     dispose() {
       disposed = true;
+      recoveryRouter?.dispose();
 
       // Clear event bus subscriptions to prevent accumulation on worker restart.
       // Without this, each crash/restart cycle adds duplicate subscriptions.

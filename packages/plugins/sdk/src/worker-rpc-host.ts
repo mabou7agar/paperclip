@@ -931,6 +931,7 @@ export function startWorkerRpcHost(options: WorkerRpcHostOptions): WorkerRpcHost
           });
         },
 
+        async routeRunnerResult(companyId, input) { return callHost("issues.routeRunnerResult", { ...input, companyId }); },
         async requestWakeup(issueId: string, companyId: string, options) {
           return callHost("issues.requestWakeup", {
             issueId,

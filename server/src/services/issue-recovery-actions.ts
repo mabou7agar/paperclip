@@ -345,6 +345,7 @@ export function issueRecoveryActionService(db: DbOrTransaction) {
     try {
       const created = await db.transaction(async (tx) => {
         await notifyAttentionRetentionWork(tx, { companyId: input.companyId });
+        await notifyDeliveryWork(tx, DELIVERY_QUEUES.runnerPolicyRecovery, input.companyId);
         await notifyIssueRecovery(tx, { companyId: input.companyId });
         await notifyNativeRecoveryNotices(tx, { companyId: input.companyId, issueId: input.sourceIssueId });
         await notifyDeliveryWork(tx, DELIVERY_QUEUES.executionDisposition);
@@ -623,6 +624,7 @@ export function issueRecoveryActionService(db: DbOrTransaction) {
       const pending = await tx.select({ id: issueRecoveryActions.id }).from(issueRecoveryActions)
         .where(and(...predicates)).limit(1);
       if (!pending.length) return [];
+      await notifyDeliveryWork(tx, DELIVERY_QUEUES.runnerPolicyRecovery, input.companyId);
       await notifyIssueRecovery(tx, { companyId: input.companyId });
       await notifyNativeRecoveryNotices(tx, { companyId: input.companyId, issueId: input.sourceIssueId });
       await notifyUnsafeWorkspaceExportRecovery(tx, { companyId: input.companyId, issueId: input.sourceIssueId });

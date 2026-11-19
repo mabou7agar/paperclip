@@ -125,3 +125,41 @@ test('repeated unknown observations never self-block an admitted execution', asy
   await f.service().deliver(f.result.jobId);
   assert.equal(f.providers, 0); assert.equal(f.issue.status, 'in_progress');
 });
+
+test('disabled policy routing preserves original document bytes, wake options and ACK output', async () => {
+  const original = fixture(), disabled = fixture();
+  Object.assign(disabled.issue, original.issue); Object.assign(disabled.result, original.result);
+  let consulted = 0;
+  disabled.ctx.issues.routeRunnerResult = async () => { consulted++; return { enabled: false }; };
+  const a = await original.service().deliverResult(original.result);
+  const b = await disabled.service().deliverResult(disabled.result, { payload: 'signed', signature: 'signature' });
+  assert.equal(consulted, 1); assert.equal(disabled.writes[0].body, original.writes[0].body);
+  assert.deepEqual(disabled.calls, original.calls); assert.deepEqual(b, a);
+});
+test('enabled policy owns the failed signed outcome without a legacy wake', async () => {
+  const f = fixture(); let calls = 0;
+  f.ctx.issues.routeRunnerResult = async (companyId, input) => {
+    assert.equal(companyId, f.result.companyId); assert.equal(input.receiptSha256, f.result.receiptSha256); calls++;
+    return { enabled: true, state: 'deferred', reason: 'review_pending' };
+  };
+  await f.service().deliverResult(f.result, { payload: 'signed', signature: 'signature' });
+  assert.equal(calls, 1); assert.equal(f.writes.length, 1); assert.equal(f.calls.length, 0);
+});
+test('passed checks keep their original continuation without entering failed-result recovery', async () => {
+  const f = fixture(); f.result.status = 'passed';
+  f.ctx.issues.routeRunnerResult = async () => { throw new Error('must not route passing result'); };
+  await f.service().deliverResult(f.result, { payload: 'signed', signature: 'signature' });
+  assert.equal(f.calls.length, 1); assert.equal(f.calls[0].reason, 'runner_result_received');
+});
+
+test('enabled false-evidence suppression preserves the native wait without touching a closed task or another owner', async () => {
+  for (const state of ['in_progress', 'done', 'other_owner']) {
+    const f = fixture(); f.result.newEvidence = false;
+    if (state === 'other_owner') f.issue.assigneeAgentId = randomUUID();
+    else f.issue.status = state;
+    f.ctx.issues.routeRunnerResult = async () => ({ enabled: true, state: 'no_new_evidence' });
+    await f.service().deliverResult(f.result, { payload: 'signed', signature: 'signature' });
+    assert.equal(f.calls.length, 0);
+    assert.equal(f.issue.status, state === 'in_progress' ? 'blocked' : state === 'done' ? 'done' : 'in_progress');
+  }
+});

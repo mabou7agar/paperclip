@@ -1,3 +1,5 @@
+import { claimRunnerPolicyRecovery } from "../recovery/runner-policy-claim.js";
+import { loadRunnerPolicyTrust } from "../recovery/runner-policy-trust.js";
 import { pendingAddressedInteractionReceiptSql } from "../../repositories/addressed-interactions.js";
 import { completionReceiptSourceReady, taskCompletionReceiptState, TASK_COMPLETION_RECEIPT_REASON } from "../task-completion-receipts.js";
 import { addressedInteractionWakeState, addressedInteractionWakeAlreadyConsumed, blockingDispositionContinuationAllowed } from "../addressed-interaction-wake.js";
@@ -1626,6 +1628,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             startedAt: run.startedAt ?? claimedAt,
             updatedAt: claimedAt,
           };
+          if (nativeReviewContext && context.wakeReason === "runner_policy_recovery") return null;
           if (nativeReviewContext) {
             if (run.scheduledRetryReason === "native_provider_overloaded") {
               const predecessor = await lockIssueExecutionClaim(tx);
@@ -1646,6 +1649,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId), eq(heartbeatRuns.agentId, run.agentId),
             )).for("update");
             if (!lockedRun || lockedRun.status !== "queued") return null;
+            if (!await claimRunnerPolicyRecovery(claimTx, lockedRun, loadRunnerPolicyTrust)) return null;
             await withExternalAdmissionGuard(claimTx, run.companyId, run.agentId, () => assertNoExternalOverlap(claimTx, run.companyId, run.agentId));
             await notifyChatRunMilestones(claimTx, { companyId: run.companyId, runId: run.id, issueId: issueId ?? undefined });
             const claimedRun = await claimTx.update(heartbeatRuns).set(claimValues).where(and(

@@ -389,6 +389,7 @@ export const ISSUE_SURFACE_VISIBILITIES = ["default", "plugin_operation"] as con
 export type IssueSurfaceVisibility = (typeof ISSUE_SURFACE_VISIBILITIES)[number];
 
 export const ISSUE_RECOVERY_ACTION_KINDS = [
+  "runner_result",
   "missing_disposition",
   "deliberate_wait_without_target",
   "stranded_assigned_issue",
@@ -1764,3 +1765,9 @@ export const PLUGIN_BRIDGE_ERROR_CODES = [
   "UNKNOWN",
 ] as const;
 export type PluginBridgeErrorCode = (typeof PLUGIN_BRIDGE_ERROR_CODES)[number];
+
+/** Closed runner-result recovery contracts; these grant no execution authority. */
+export const RUNNER_POLICY_RECOVERY_WAKE_REASON = "runner_policy_recovery" as const;
+export const RUNNER_POLICY_RECOVERY_ACTIONS = ["route_recovery_wake"] as const;
+export const RUNNER_POLICY_RECOVERY_STATES = ["ingested", "deferred", "routing", "routed", "invalid", "not_terminal", "no_new_evidence", "disabled", "out_of_policy", "replay_suppressed", "identical_fingerprint", "exhausted", "superseded", "not_routable"] as const;
+export const RUNNER_POLICY_RECOVERY_DEFERRED_REASONS = ["guard_held", "review_pending", "active_recovery_present", "no_policy", "stale_plan", "policy_changed", "no_agent_responsible", "verification_unavailable", "ownership_changed", "scope_changed", "fence_changed"] as const;

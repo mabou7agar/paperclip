@@ -1552,6 +1552,7 @@ export interface PluginIssuesClient {
     companyId: string,
     options?: PluginIssueSubtreeOptions,
   ): Promise<PluginIssueSubtree>;
+  routeRunnerResult(companyId: string, input: Omit<{ companyId: string; envelope: unknown; jobId: string; receiptSha256: string }, "companyId">): Promise<{ enabled: boolean; id?: string; state?: string; reason?: string | null; wakeupRequestId?: string | null; recoveryActionId?: string | null; jobId?: string; receiptSha256?: string }>;
   requestWakeup(
     issueId: string,
     companyId: string,

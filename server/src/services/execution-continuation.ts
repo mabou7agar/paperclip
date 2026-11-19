@@ -1,3 +1,4 @@
+import { runnerRecoveryOutcomes } from "./recovery/runner-policy-continuation.js";
 import { createHash } from "node:crypto";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { z } from "zod";
@@ -532,12 +533,12 @@ export async function buildExecutionContinuation(input: {
   return {
     ...(interruptedRunId ? { interruptedRunId } : {}),
     ...(resumeDelta ? { resumeDelta } : {}),
-    recoveryOutcomes: reconciliations
+    recoveryOutcomes: [...await runnerRecoveryOutcomes(db, companyId, issueId, input.agentId), ...reconciliations
       .filter((row) => row.evidence.executionReconciliation)
       .map((row) => ({
         recoveryActionId: row.id,
         decision: row.evidence.executionReconciliation,
-      })),
+      }))],
     version: 1,
     companyId,
     issueId,

@@ -15,7 +15,7 @@ export const runnerRecoveryPolicySchema = z.object({
 }).strict();
 export type RunnerRecoveryPolicy = z.infer<typeof runnerRecoveryPolicySchema>;
 export interface RunnerTrust { pluginId: string; publicKey: KeyObject }
-const identity = z.object({
+export const runnerEnvelopeIdentity = z.object({
   schema: z.literal("paperclip.runner-envelope.v1"), pluginKey: z.literal("paperclip.ubuntu-runner-results"),
   pluginId: z.string().uuid(), companyId: z.string().uuid(), kind: z.enum(["admission", "result"]),
   jobId: z.string().uuid(), issueId: z.string().uuid(), projectId: z.string().uuid(), agentId: z.string().uuid(),
@@ -31,7 +31,7 @@ export function verifyRunnerEnvelope(input: unknown, trust: RunnerTrust) {
     !verify(null, Buffer.concat([Buffer.from(runnerEnvelopeDomain), bytes]), trust.publicKey, Buffer.from(envelope.signature, "base64"))) {
     throw new Error("runner_native_signature_invalid");
   }
-  const result = identity.parse(JSON.parse(bytes.toString("utf8")));
+  const result = runnerEnvelopeIdentity.parse(JSON.parse(bytes.toString("utf8")));
   if (result.pluginId !== trust.pluginId || (result.kind === "admission" ? result.sequence !== 0 : result.sequence <= 0)) {
     throw new Error("runner_native_envelope_scope_invalid");
   }

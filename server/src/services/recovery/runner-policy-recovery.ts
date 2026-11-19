@@ -1,15 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
-import { and, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, lte, sql } from "drizzle-orm";
 import { z } from "zod";
-import { agents, documents, issueDocuments, issues, issueRecoveryActions, pluginState,
+import { agentWakeupRequests, agents, documents, issueDocuments, issues, issueRecoveryActions, pluginState,
   runnerRecoveryCompanySettings, runnerRecoveryPolicies, runnerRecoveryResults, type Db } from "@paperclipai/db";
 import { canonicalJson } from "@paperclipai/shared/portability-hash";
 import { canActorReadIssuePrivacy } from "../authorization.js";
-import { runnerRecoveryPolicySchema, verifyRunnerEnvelope, type RunnerTrust } from "./runner-policy-contract.js";
+import { runnerRecoveryPolicySchema, runnerEnvelopeIdentity, verifyRunnerEnvelope, type RunnerTrust } from "./runner-policy-contract.js";
 
-type ResultRow = typeof runnerRecoveryResults.$inferSelect;
+export type ResultRow = typeof runnerRecoveryResults.$inferSelect;
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
-const hash = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex");
+export const runnerRecoveryHash = (value: unknown) => createHash("sha256").update(canonicalJson(value)).digest("hex");
 const dataSchema = z.object({ jobId: z.string().uuid(), companyId: z.string().uuid(), issueId: z.string().uuid(),
   projectId: z.string().uuid(), agentId: z.string().uuid(), receiptSha256: z.string().regex(/^[a-f0-9]{64}$/),
   fingerprint: z.string().regex(/^[a-f0-9]{64}$/), profile: z.string(), newEvidence: z.boolean(),
@@ -28,14 +28,18 @@ export async function runnerRecoveryEnabled(db: Db | Tx, companyId: string) {
   return settings?.runnerPolicyRecovery.enabled === true;
 }
 
-async function planRevision(db: Db | Tx, companyId: string, issueId: string) {
+export async function planRevision(db: Db | Tx, companyId: string, issueId: string) {
   const [plan] = await db.select({ revision: documents.latestRevisionId }).from(issueDocuments)
     .innerJoin(documents, eq(documents.id, issueDocuments.documentId)).where(and(eq(issueDocuments.companyId, companyId),
       eq(issueDocuments.issueId, issueId), eq(issueDocuments.key, "plan"), eq(documents.companyId, companyId)));
   return plan?.revision ?? null;
 }
-async function inSubtree(db: Db | Tx, companyId: string, issueId: string, rootId: string) {
+export async function inSubtree(db: Db | Tx, companyId: string, issueId: string, rootId: string) {
   // Bounded by the actual tree, cycle-safe; never follows a cross-company parent.
+  const [subject] = await db.select({ privacyRoot: issues.privacyRootIssueId }).from(issues).where(and(eq(issues.id, issueId), eq(issues.companyId, companyId)));
+  const [root] = await db.select({ privacyRoot: issues.privacyRootIssueId }).from(issues).where(and(eq(issues.id, rootId), eq(issues.companyId, companyId)));
+  // A public ancestor does not silently authorize automatic recovery inside a new private subtree.
+  if (!subject || !root || issueId !== rootId && subject.privacyRoot !== root.privacyRoot) return false;
   const seen = new Set<string>(); let next: string | null = issueId;
   while (next && !seen.has(next)) {
     seen.add(next);
@@ -47,9 +51,9 @@ async function inSubtree(db: Db | Tx, companyId: string, issueId: string, rootId
   }
   return false;
 }
-async function currentFence(db: Db | Tx, issue: typeof issues.$inferSelect, policyRevision: string) {
+export async function currentFence(db: Db | Tx, issue: typeof issues.$inferSelect, policyRevision: string) {
   return { statusVersion: issue.statusVersion, assigneeAgentId: issue.assigneeAgentId,
-    execStateHash: hash(issue.executionState), planRevisionId: await planRevision(db, issue.companyId, issue.id), policyRevision };
+    execStateHash: runnerRecoveryHash(issue.executionState), planRevisionId: await planRevision(db, issue.companyId, issue.id), policyRevision };
 }
 function publicDisposition(row: ResultRow) {
   return { id: row.id, state: row.state, reason: row.reason, wakeupRequestId: row.wakeupRequestId,
@@ -58,13 +62,15 @@ function publicDisposition(row: ResultRow) {
 
 /** The only writer to routing state; it has no reference to policy administration. */
 export function runnerPolicyRecovery(db: Db, deps: RunnerRecoveryDependencies) {
-  async function routeRunnerResult(ctx: { companyId: string; pluginId: string }, input: { envelope: unknown; jobId: string; receiptSha256: string }) {
+  async function routeRunnerResult(ctx: { companyId: string; pluginId: string }, input: { envelope: unknown; jobId: string; receiptSha256: string }, resume = false) {
     // Off is observationally inert: no intent, recovery action, task mutation or wake.
     if (!await runnerRecoveryEnabled(db, ctx.companyId)) return { enabled: false as const };
     const envelopeBytes = JSON.stringify(input.envelope);
     if (Buffer.byteLength(envelopeBytes) > 192 * 1024) throw new Error("runner_envelope_invalid");
-    const trust = await deps.trust();
-    const value = verifyRunnerEnvelope(input.envelope, trust);
+    let trust: RunnerTrust | null = null;
+    try { trust = await deps.trust(); } catch { /* No unsigned authority: only retain a deferred observation. */ }
+    const value = trust ? verifyRunnerEnvelope(input.envelope, trust) : runnerEnvelopeIdentity.parse(JSON.parse(Buffer.from(
+      z.object({ payload: z.string().max(180000) }).passthrough().parse(input.envelope).payload, "base64").toString("utf8")));
     const data = dataSchema.parse(value.data);
     if (value.kind !== "result" || value.companyId !== ctx.companyId || value.pluginId !== ctx.pluginId ||
       value.jobId !== input.jobId || data.receiptSha256 !== input.receiptSha256 ||
@@ -72,25 +78,26 @@ export function runnerPolicyRecovery(db: Db, deps: RunnerRecoveryDependencies) {
       throw new Error("runner_result_scope_invalid");
     }
     // Retained host-owned state authenticates admission and latest sequence independently of the callback.
-    const retained = await db.select().from(pluginState).where(and(eq(pluginState.pluginId, ctx.pluginId),
+    const retained = trust ? await db.select().from(pluginState).where(and(eq(pluginState.pluginId, ctx.pluginId),
       eq(pluginState.scopeKind, "issue"), eq(pluginState.scopeId, value.issueId), eq(pluginState.stateKey, value.jobId),
-      inArray(pluginState.namespace, ["runner-admissions", "runner-results"])));
+      inArray(pluginState.namespace, ["runner-admissions", "runner-results"]))) : [];
     const admissionRow = retained.find(r => r.namespace === "runner-admissions");
     const latestRow = retained.find(r => r.namespace === "runner-results");
-    if (!admissionRow || !latestRow) throw new Error("runner_retained_admission_required");
-    const admission = verifyRunnerEnvelope(admissionRow.valueJson, trust), latest = verifyRunnerEnvelope(latestRow.valueJson, trust);
+    if (trust && (!admissionRow || !latestRow)) throw new Error("runner_retained_admission_required");
+    const admission = trust ? verifyRunnerEnvelope(admissionRow!.valueJson, trust) : value, latest = trust ? verifyRunnerEnvelope(latestRow!.valueJson, trust) : value;
     for (const saved of [admission, latest]) if (["companyId", "pluginId", "jobId", "issueId", "projectId", "agentId", "requestDigest"].some(k => saved[k] !== value[k])) throw new Error("runner_retained_binding_invalid");
-    if (admission.kind !== "admission" || latest.kind !== "result" || latest.sequence < value.sequence ||
-      latest.sequence === value.sequence && hash(latest) !== hash(value)) throw new Error("runner_sequence_invalid");
+    if (trust && (admission.kind !== "admission" || latest.kind !== "result" || latest.sequence < value.sequence ||
+      latest.sequence === value.sequence && runnerRecoveryHash(latest) !== runnerRecoveryHash(value))) throw new Error("runner_sequence_invalid");
     const row = await db.transaction(async tx => {
       const [issue] = await tx.select().from(issues).where(and(eq(issues.id, value.issueId), eq(issues.companyId, ctx.companyId))).for("update");
       if (!issue || issue.projectId !== value.projectId) throw new Error("runner_issue_scope_invalid");
       const [existing] = await tx.select().from(runnerRecoveryResults).where(and(eq(runnerRecoveryResults.companyId, ctx.companyId),
         eq(runnerRecoveryResults.issueId, issue.id), eq(runnerRecoveryResults.jobId, value.jobId), eq(runnerRecoveryResults.receiptSha256, input.receiptSha256))).for("update");
-      if (existing && !["ingested", "deferred"].includes(existing.state)) return existing;
+      if (existing && runnerRecoveryHash(JSON.parse(existing.envelopeBytes)) !== runnerRecoveryHash(input.envelope)) throw new Error("runner_receipt_identity_conflict");
+      if (existing && (existing.state === "deferred" && !resume || !["ingested", "deferred"].includes(existing.state))) return existing;
       const [created] = existing ? [existing] : await tx.insert(runnerRecoveryResults).values({ companyId: ctx.companyId,
         pluginId: ctx.pluginId, issueId: issue.id, jobId: value.jobId, receiptSha256: input.receiptSha256,
-        resultFingerprint: data.fingerprint, sequence: value.sequence, envelopeBytes, envelopeSha256: hash(input.envelope) }).returning();
+        resultFingerprint: data.fingerprint, sequence: value.sequence, envelopeBytes, envelopeSha256: createHash("sha256").update(envelopeBytes).digest("hex") }).returning();
       const finish = async (state: string, reason: string, fields: Partial<typeof runnerRecoveryResults.$inferInsert> = {}) => {
         const [result] = await tx.update(runnerRecoveryResults).set({ ...fields, state, reason,
           stateVersion: created.stateVersion + 1, resumeOn: state === "deferred" ? resumable : null, updatedAt: new Date() })
@@ -98,16 +105,35 @@ export function runnerPolicyRecovery(db: Db, deps: RunnerRecoveryDependencies) {
         if (!result) throw new Error("runner_result_state_conflict");
         return result;
       };
+      if (!trust) return finish("deferred", "verification_unavailable");
       if (latest.sequence > value.sequence) return finish("superseded", "newer_sequence");
       if (data.status !== "failed" || data.result.cleanupComplete !== true) return finish("not_terminal", "not_terminal");
       if (data.newEvidence !== true) return finish("no_new_evidence", "no_new_evidence");
+      // Enabling the feature cannot spend a result already delivered by the legacy native path.
+      const priorDelivery = await tx.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
+        eq(agentWakeupRequests.companyId, ctx.companyId), eq(agentWakeupRequests.idempotencyKey, `runner-result:${value.jobId}:${input.receiptSha256}`),
+        sql`${agentWakeupRequests.status} <> 'skipped'`)).limit(1);
+      if (priorDelivery.length) return finish("replay_suppressed", "legacy_result_already_delivered");
       const policies = await tx.select().from(runnerRecoveryPolicies).where(and(eq(runnerRecoveryPolicies.companyId, ctx.companyId),
         isNotNull(runnerRecoveryPolicies.activatedAt), isNull(runnerRecoveryPolicies.revokedAt))).orderBy(desc(runnerRecoveryPolicies.activatedAt)).for("update");
       let matched: typeof runnerRecoveryPolicies.$inferSelect | undefined;
+      let excluded: typeof runnerRecoveryPolicies.$inferSelect | undefined;
       for (const policy of policies) {
         const parsed = runnerRecoveryPolicySchema.safeParse(policy.payload);
         if (parsed.success && (!parsed.data.expiresAt || new Date(parsed.data.expiresAt) > new Date()) &&
+          await inSubtree(tx, ctx.companyId, issue.id, policy.rootIssueId) && !parsed.data.scope.profiles.includes(data.profile)) excluded = policy;
+        if (parsed.success && (!parsed.data.expiresAt || new Date(parsed.data.expiresAt) > new Date()) &&
           parsed.data.scope.profiles.includes(data.profile) && await inSubtree(tx, ctx.companyId, issue.id, policy.rootIssueId)) { matched = policy; break; }
+      }
+      if (!matched && excluded) {
+        const noticeFingerprint = "runner-policy-scope:" + excluded.policyKey;
+        const priorNotice = await tx.select({ id: issueRecoveryActions.id }).from(issueRecoveryActions).where(and(
+          eq(issueRecoveryActions.companyId, ctx.companyId), eq(issueRecoveryActions.sourceIssueId, issue.id),
+          eq(issueRecoveryActions.cause, "runner_result_out_of_policy"), eq(issueRecoveryActions.fingerprint, noticeFingerprint))).limit(1);
+        if (!priorNotice.length) await tx.insert(issueRecoveryActions).values({ companyId: ctx.companyId, sourceIssueId: issue.id,
+          kind: "runner_result", status: "escalated", ownerType: "board", cause: "runner_result_out_of_policy", fingerprint: noticeFingerprint,
+          nextAction: "Lead disposition required: signed runner result is outside the recorded recovery policy", evidence: { policyId: excluded.id, resultId: created.id } }).onConflictDoNothing();
+        return finish("out_of_policy", "out_of_policy", { policyId: excluded.id, policyKey: excluded.policyKey, policyRevision: excluded.revision });
       }
       if (!matched) return finish("deferred", "no_policy");
       const policy = runnerRecoveryPolicySchema.parse(matched.payload);
@@ -129,24 +155,38 @@ export function runnerPolicyRecovery(db: Db, deps: RunnerRecoveryDependencies) {
         evidence: { runnerRecoveryResultId: created.id, policyId: matched.id, policyRevision: matched.revision,
           jobId: value.jobId, receiptSha256: input.receiptSha256 }, status: "active" }).onConflictDoNothing().returning();
       if (!action) return finish("deferred", "active_recovery_present", attribution);
+      await tx.update(runnerRecoveryResults).set({ state: "superseded", reason: "newest_result_selected", supersededBy: created.id,
+        stateVersion: sql`${runnerRecoveryResults.stateVersion} + 1`, updatedAt: new Date() }).where(and(
+        eq(runnerRecoveryResults.companyId, ctx.companyId), eq(runnerRecoveryResults.issueId, issue.id),
+        eq(runnerRecoveryResults.state, "deferred"), sql`${runnerRecoveryResults.id} <> ${created.id}`,
+        sql`${runnerRecoveryResults.resultFingerprint} <> ${data.fingerprint}`, lte(runnerRecoveryResults.createdAt, created.createdAt)));
       return finish("routing", "intent_committed", { ...attribution, targetAgentId: agent.id,
         fence: await currentFence(tx, issue, matched.revision), recoveryActionId: action.id,
+        wakeupRequestId: randomUUID(),
         wakeIdempotencyKey: `runner-recovery:${ctx.companyId}:${issue.id}:${value.jobId}:${input.receiptSha256}` });
     });
     if (row.state === "routing") {
       const wake = await deps.wake(row);
       await db.update(runnerRecoveryResults).set({ wakeupRequestId: wake.wakeupRequestId, updatedAt: new Date() })
         .where(and(eq(runnerRecoveryResults.id, row.id), eq(runnerRecoveryResults.state, "routing")));
-      return { enabled: true as const, ...publicDisposition({ ...row, wakeupRequestId: wake.wakeupRequestId }) };
+      const [saved] = await db.select().from(runnerRecoveryResults).where(eq(runnerRecoveryResults.id, row.id));
+      return { enabled: true as const, ...publicDisposition(saved) };
     }
     return { enabled: true as const, ...publicDisposition(row) };
   }
   async function reevaluateDeferred(companyId: string, issueId: string, event: string) {
     if (!resumable.includes(event) || !await runnerRecoveryEnabled(db, companyId)) return;
     const rows = await db.select().from(runnerRecoveryResults).where(and(eq(runnerRecoveryResults.companyId, companyId),
-      eq(runnerRecoveryResults.issueId, issueId), eq(runnerRecoveryResults.state, "deferred"))).orderBy(desc(runnerRecoveryResults.createdAt), desc(runnerRecoveryResults.sequence));
+      eq(runnerRecoveryResults.issueId, issueId), inArray(runnerRecoveryResults.state, ["deferred", "routing"]))).orderBy(desc(runnerRecoveryResults.createdAt), desc(runnerRecoveryResults.sequence));
     for (const row of rows) {
-      const outcome = await routeRunnerResult({ companyId, pluginId: row.pluginId }, { envelope: JSON.parse(row.envelopeBytes), jobId: row.jobId, receiptSha256: row.receiptSha256 });
+      const ctx = { companyId, pluginId: row.pluginId };
+      const input = { envelope: JSON.parse(row.envelopeBytes), jobId: row.jobId, receiptSha256: row.receiptSha256 };
+      let outcome = await routeRunnerResult(ctx, input, true);
+      // The release can discover an old cancelled, never-claimed native receipt.
+      // Retiring that receipt is reconciliation, not a new release event. Reconsider
+      // its now-deferred result once within this same native event; all gates rerun.
+      if (row.state === "routing" && "state" in outcome && outcome.state === "deferred" && outcome.reason === "guard_held")
+        outcome = await routeRunnerResult(ctx, input, true);
       if ("state" in outcome && ["routing", "routed"].includes(outcome.state)) break;
     }
   }

@@ -39,14 +39,14 @@ export class ResultService {
     return this.deliverResult(delivery(await this.broker.call('result', { jobId })));
   }
 
-  async deliverResult(value) {
+  async deliverResult(value, envelope) {
     const result = delivery(value), key = `${result.jobId}:${result.receiptSha256}`;
     if (this.pending.has(key)) return this.pending.get(key);
-    const work = this.writeResult(result).finally(() => this.pending.delete(key));
+    const work = this.writeResult(result, envelope).finally(() => this.pending.delete(key));
     this.pending.set(key, work); return work;
   }
 
-  async writeResult(result) {
+  async writeResult(result, envelope) {
     const jobId = result.jobId;
     if (!profiles(await this.ctx.config.get(result.companyId)).has(result.profile)) throw new Error('runner_profile_not_enabled');
     const issue = await this.ctx.issues.get(result.issueId, result.companyId);
@@ -63,6 +63,19 @@ export class ResultService {
     if (existing && existing.body !== body) throw new Error('runner_result_document_conflict');
     if (!existing) await this.ctx.issues.documents.upsert({ companyId: result.companyId, issueId: issue.id,
       key, title: 'Runner result', format: 'markdown', body });
+    if (envelope && result.status !== 'passed' && typeof this.ctx.issues.routeRunnerResult === 'function') {
+      const recovery = await this.ctx.issues.routeRunnerResult(result.companyId, { envelope, jobId, receiptSha256: result.receiptSha256 });
+      if (recovery.enabled) {
+        // Preserve the existing native wait for a measured unchanged failure.
+        // Closed tasks and a new responsible agent retain their current state.
+        if (recovery.state === 'no_new_evidence' && !['done', 'cancelled', 'blocked'].includes(issue.status) &&
+            issue.assigneeAgentId === result.agentId && result.status !== 'unknown') {
+          await this.ctx.issues.update(issue.id, { status: 'blocked' }, result.companyId);
+        }
+        return this.broker.call('acknowledge', { jobId, receiptSha256: result.receiptSha256,
+          disposition: recovery.state === 'routed' ? 'native_continuation' : 'recorded_only' });
+      }
+    }
     if (['done', 'cancelled'].includes(issue.status) || issue.assigneeAgentId !== result.agentId) {
       return this.broker.call('acknowledge', { jobId, receiptSha256: result.receiptSha256, disposition: 'recorded_only' });
     }

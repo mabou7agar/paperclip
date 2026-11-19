@@ -474,3 +474,21 @@ describe("project Git credentials", () => {
     expect(resolveGitCredential).toHaveBeenCalledWith(params, context);
   });
 });
+
+describe("runner recovery host boundary", () => {
+  it("derives company scope from the host invocation and requires both wake capabilities", async () => {
+    const routeRunnerResult = vi.fn(async () => ({ enabled: false }));
+    const services = { issues: { routeRunnerResult } } as unknown as HostServices;
+    const input = { companyId: "company-a", envelope: {}, jobId: "job", receiptSha256: "receipt" };
+    for (const capabilities of [[], ["issues.wakeup"], ["issues.wakeup.durable"]] as const) {
+      const handlers = createHostClientHandlers({ pluginId: "runner", capabilities: [...capabilities], services });
+      await expect(handlers["issues.routeRunnerResult"](input, { invocationScope: { companyId: "company-a" } })).rejects.toBeInstanceOf(CapabilityDeniedError);
+    }
+    const handlers = createHostClientHandlers({ pluginId: "runner", capabilities: ["issues.wakeup", "issues.wakeup.durable"], services });
+    await expect(handlers["issues.routeRunnerResult"](input)).rejects.toBeInstanceOf(InvocationScopeDeniedError);
+    await expect(handlers["issues.routeRunnerResult"](input, { invocationScope: { companyId: "company-b" } })).rejects.toBeInstanceOf(InvocationScopeDeniedError);
+    expect(routeRunnerResult).not.toHaveBeenCalled();
+    await expect(handlers["issues.routeRunnerResult"](input, { invocationScope: { companyId: "company-a" } })).resolves.toEqual({ enabled: false });
+    expect(routeRunnerResult).toHaveBeenCalledTimes(1);
+  });
+});

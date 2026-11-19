@@ -245,6 +245,7 @@ export interface HostServices {
     removeBlockers(params: WorkerToHostMethods["issues.relations.removeBlockers"][0]): Promise<WorkerToHostMethods["issues.relations.removeBlockers"][1]>;
     assertCheckoutOwner(params: WorkerToHostMethods["issues.assertCheckoutOwner"][0]): Promise<WorkerToHostMethods["issues.assertCheckoutOwner"][1]>;
     getSubtree(params: WorkerToHostMethods["issues.getSubtree"][0]): Promise<WorkerToHostMethods["issues.getSubtree"][1]>;
+    routeRunnerResult(params: WorkerToHostMethods["issues.routeRunnerResult"][0]): Promise<WorkerToHostMethods["issues.routeRunnerResult"][1]>;
     requestWakeup(params: WorkerToHostMethods["issues.requestWakeup"][0]): Promise<WorkerToHostMethods["issues.requestWakeup"][1]>;
     requestWakeups(params: WorkerToHostMethods["issues.requestWakeups"][0]): Promise<WorkerToHostMethods["issues.requestWakeups"][1]>;
     getOrchestrationSummary(params: WorkerToHostMethods["issues.summaries.getOrchestration"][0]): Promise<WorkerToHostMethods["issues.summaries.getOrchestration"][1]>;
@@ -472,6 +473,7 @@ const METHOD_CAPABILITY_MAP: Record<WorkerToHostMethodName, PluginCapability | n
   "issues.relations.removeBlockers": "issue.relations.write",
   "issues.assertCheckoutOwner": "issues.checkout",
   "issues.getSubtree": "issue.subtree.read",
+  "issues.routeRunnerResult": "issues.wakeup",
   "issues.requestWakeup": "issues.wakeup",
   "issues.requestWakeups": "issues.wakeup",
   "issues.summaries.getOrchestration": "issues.orchestration.read",
@@ -707,8 +709,8 @@ export function createHostClientHandlers(
   ): HostHandler<M> {
     return async (params: WorkerToHostMethods[M][0], context?: WorkerHostCallContext) => {
       requireCapability(method);
-      if ((method === "issues.requestWakeup" || method === "issues.requestWakeups") &&
-          (params as { durable?: boolean }).durable === true && !capabilitySet.has("issues.wakeup.durable")) {
+      if ((method === "issues.routeRunnerResult" || (method === "issues.requestWakeup" || method === "issues.requestWakeups") &&
+          (params as { durable?: boolean }).durable === true) && !capabilitySet.has("issues.wakeup.durable")) {
         throw new CapabilityDeniedError(pluginId, method, "issues.wakeup.durable");
       }
       requireInvocationCompanyScope(method, params, context);
@@ -937,6 +939,7 @@ export function createHostClientHandlers(
     "issues.getSubtree": gated("issues.getSubtree", async (params) => {
       return services.issues.getSubtree(params);
     }),
+    "issues.routeRunnerResult": gated("issues.routeRunnerResult", async params => services.issues.routeRunnerResult(params)),
     "issues.requestWakeup": gated("issues.requestWakeup", async (params) => {
       return services.issues.requestWakeup(params);
     }),

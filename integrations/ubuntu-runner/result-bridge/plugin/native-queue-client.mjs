@@ -149,7 +149,7 @@ export class NativeQueueClient {
       }
       await this.ctx.state.set(resultKey,envelope);return true;
     });
-    return current ? service.deliverResult(result) : {recorded:true,stale:true};
+    return current ? service.deliverResult(result, envelope) : {recorded:true,stale:true};
     });
   }
 }

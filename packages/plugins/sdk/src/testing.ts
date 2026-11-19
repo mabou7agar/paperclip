@@ -1731,6 +1731,7 @@ export function createTestHarness(options: TestHarnessOptions): TestHarness {
           adoptedFromRunId: null,
         };
       },
+      async routeRunnerResult() { return { enabled: false }; },
       async requestWakeup(issueId, companyId, options) {
         requireCapability(manifest, capabilitySet, "issues.wakeup");
         if (options?.durable) requireCapability(manifest, capabilitySet, "issues.wakeup.durable");

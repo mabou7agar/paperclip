@@ -1,3 +1,4 @@
+import { DELIVERY_QUEUES, notifyDeliveryWork } from "../delivery-work-notifications.js";
 import { createHash } from "node:crypto";
 import { and, eq, isNull } from "drizzle-orm";
 import { agents, issueComments, issues, runnerRecoveryPolicies, runnerRecoveryCompanySettings, activityLog, type Db } from "@paperclipai/db";
@@ -29,7 +30,8 @@ export function runnerPolicyAdministration(db: Db) {
           sourceCommentId: source.id, sourceAuthorUserId: source.authorUserId, sourceBodySha256, rootIssueId: root.id,
           payload, registeredBy: actorId }).onConflictDoNothing().returning();
         if (!row) throw conflict("Policy revision is already registered");
-        await tx.insert(activityLog).values({ companyId, actorType: actor.type === "board" ? "user" : "agent", actorId,
+        await tx.insert(activityLog).values({ companyId, actorType: actor.type === "board" ? "user" : "agent", actorId: actor.type === "board" ? actor.userId : actor.agentId,
+          agentId: actor.type === "agent" ? actor.agentId : null,
           action: "runner_recovery.policy_registered", entityType: "runner_recovery_policy", entityId: row.id,
           details: { revision, sourceCommentId: source.id } });
         return row;
@@ -42,8 +44,10 @@ export function runnerPolicyAdministration(db: Db) {
           .where(and(eq(runnerRecoveryPolicies.id, id), eq(runnerRecoveryPolicies.companyId, companyId),
             isNull(runnerRecoveryPolicies.activatedAt), isNull(runnerRecoveryPolicies.revokedAt))).returning();
         if (!row) throw conflict("Policy cannot be activated");
-        await tx.insert(activityLog).values({ companyId, actorType: actor.type === "board" ? "user" : "agent", actorId,
+        await tx.insert(activityLog).values({ companyId, actorType: actor.type === "board" ? "user" : "agent", actorId: actor.type === "board" ? actor.userId : actor.agentId,
+          agentId: actor.type === "agent" ? actor.agentId : null,
           action: "runner_recovery.policy_activated", entityType: "runner_recovery_policy", entityId: id, details: { revision: row.revision } });
+        await notifyDeliveryWork(tx, DELIVERY_QUEUES.runnerPolicyRecovery, companyId);
         // Deliberately no company flag write in this transaction.
         return row;
       });
@@ -56,7 +60,8 @@ export function runnerPolicyAdministration(db: Db) {
         const [revoked] = await tx.update(runnerRecoveryPolicies).set({ revokedBy: actorId, revokedAt: new Date() })
           .where(and(eq(runnerRecoveryPolicies.id, id), eq(runnerRecoveryPolicies.companyId, companyId), isNull(runnerRecoveryPolicies.revokedAt))).returning();
         if (!revoked) return row;
-        await tx.insert(activityLog).values({ companyId, actorType: actor.type === "board" ? "user" : "agent", actorId,
+        await tx.insert(activityLog).values({ companyId, actorType: actor.type === "board" ? "user" : "agent", actorId: actor.type === "board" ? actor.userId : actor.agentId,
+          agentId: actor.type === "agent" ? actor.agentId : null,
           action: "runner_recovery.policy_revoked", entityType: "runner_recovery_policy", entityId: id, details: { revision: row.revision } });
         return revoked;
       });
@@ -67,7 +72,8 @@ export function runnerPolicyAdministration(db: Db) {
         await tx.insert(runnerRecoveryCompanySettings).values({ companyId, runnerPolicyRecovery: { enabled }, updatedBy: actorId })
           .onConflictDoUpdate({ target: runnerRecoveryCompanySettings.companyId,
             set: { runnerPolicyRecovery: { enabled }, updatedBy: actorId, updatedAt: new Date() } });
-        await tx.insert(activityLog).values({ companyId, actorType: actor.type === "board" ? "user" : "agent", actorId,
+        await tx.insert(activityLog).values({ companyId, actorType: actor.type === "board" ? "user" : "agent", actorId: actor.type === "board" ? actor.userId : actor.agentId,
+          agentId: actor.type === "agent" ? actor.agentId : null,
           action: "runner_recovery.enabled_changed", entityType: "company", entityId: companyId, details: { enabled } });
       });
     },

@@ -2026,6 +2026,7 @@ export interface WorkerToHostMethods {
     },
     result: PluginIssueSubtree,
   ];
+  "issues.routeRunnerResult": [params: { companyId: string; envelope: unknown; jobId: string; receiptSha256: string }, result: { enabled: boolean; id?: string; state?: string; reason?: string | null; wakeupRequestId?: string | null; recoveryActionId?: string | null; jobId?: string; receiptSha256?: string }];
   "issues.requestWakeup": [
     params: {
       issueId: string;
