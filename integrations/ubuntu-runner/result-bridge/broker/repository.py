@@ -78,7 +78,7 @@ class JobRepository:
         with self.connection() as db:
             return db.execute("UPDATE jobs SET state='launching',wait_code=NULL WHERE id=? AND state='queued'", (identity,)).rowcount == 1
 
-    def terminal(self, identity, result):
+    def terminal(self, identity, result, *, legacy_fingerprint=None):
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             current = db.execute("SELECT state,result_json,input_json FROM jobs WHERE id=?", (identity,)).fetchone()
@@ -86,12 +86,28 @@ class JobRepository:
             old = db.execute("SELECT result_json FROM deliveries WHERE job_id=? AND receipt_sha=?", (identity, result['receiptSha256'])).fetchone()
             if old:
                 saved = json.loads(old[0])
-                require({k: v for k, v in saved.items() if k != "newEvidence"} == result, "job_terminal_conflict")
+                prior = {k: v for k, v in saved.items() if k != "newEvidence"}
+                if legacy_fingerprint is not None and prior['fingerprint'] == legacy_fingerprint:
+                    prior['fingerprint'] = result['fingerprint']
+                require(prior == result, "job_terminal_conflict")
                 return saved
             require(current['state'] != 'terminal', 'job_terminal_conflict')
             request = json.loads(current["input_json"])
             scope = digest([request["companyId"], request["taskId"], request["kind"]])
             fresh = result["status"] == "passed" or db.execute("INSERT OR IGNORE INTO observations(scope,fingerprint)VALUES(?,?)", (scope, result["fingerprint"])).rowcount == 1
+            if fresh and result["status"] != "passed" and legacy_fingerprint is not None:
+                # Carry forward functional failures from before this phase had
+                # its own fingerprint. Setup-only history cannot seed it.
+                prior_functional = db.execute("""
+                    SELECT 1 FROM deliveries
+                    WHERE json_extract(result_json, '$.companyId') = ?
+                      AND json_extract(result_json, '$.issueId') = ?
+                      AND json_extract(result_json, '$.result.kind') = ?
+                      AND json_extract(result_json, '$.fingerprint') = ?
+                      AND json_type(result_json, '$.result.functionalCasesStarted') = 'true'
+                    LIMIT 1
+                """, (request["companyId"], request["taskId"], request["kind"], legacy_fingerprint)).fetchone()
+                fresh = prior_functional is None
             result = {**result, "newEvidence": fresh}
             state = 'quarantined' if result['status'] == 'unknown' or result['result'].get('cleanupComplete') is False else 'terminal'
             db.execute("INSERT INTO deliveries(job_id,receipt_sha,result_json)VALUES(?,?,?)", (identity, result['receiptSha256'], canonical(result).decode()))
