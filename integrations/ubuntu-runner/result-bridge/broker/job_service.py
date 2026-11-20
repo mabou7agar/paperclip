@@ -8,6 +8,13 @@ from admission import ReviewAdmissionService
 
 
 class JobService:
+    def assert_remote_readiness(self, profile, identity):
+        readiness = self.remote.readiness(profile, identity)
+        if readiness.get('ready') is False and readiness.get('code') == 'reviewed_attempt_already_exists':
+            raise Refusal('reviewed_attempt_already_exists')
+        if readiness.get('ready') is not True:
+            raise AdmissionWait('runner_setup_readiness_pending')
+
     def __init__(self, config, repository, native, remote):
         self.config, self.repository, self.native, self.remote = config, repository, native, remote
         self.admission = ReviewAdmissionService(native)
@@ -119,8 +126,7 @@ class JobService:
             # before confirmed staging cannot consume the execution identity.
             self.remote.stage(profile, identity, request, packet, admission)
             if request['kind'] == 'reviewed_controller' and profile.get('setupContainment'):
-                readiness = self.remote.readiness(profile, identity)
-                if readiness.get('ready') is not True:raise AdmissionWait('runner_setup_readiness_pending')
+                self.assert_remote_readiness(profile, identity)
             # Re-verify the ENTIRE admission, including current target/verdict,
             # after staging and immediately before the first launch.
             current_packet, current_admission, _ = self.prepare(request, profile, identity)
@@ -178,9 +184,7 @@ class JobService:
                 packet, admission, _ = self.prepare(request, profile, identity)
                 self.remote.stage(profile, identity, request, packet, admission)
                 if request['kind'] == 'reviewed_controller' and profile.get('setupContainment'):
-                    readiness = self.remote.readiness(profile, identity)
-                    if readiness.get('ready') is not True:
-                        return self.repository.release_unlaunched(identity, 'runner_setup_readiness_pending')
+                    self.assert_remote_readiness(profile, identity)
             except AdmissionWait as error:
                 return self.repository.release_unlaunched(identity, error.code)
             except Refusal as error:

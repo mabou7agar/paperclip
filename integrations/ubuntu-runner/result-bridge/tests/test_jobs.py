@@ -224,6 +224,20 @@ class JobTests(unittest.TestCase):
         self.remote.launch.assert_not_called()
         self.native.notify.assert_not_called()
 
+    def test_stale_reviewed_path_is_a_terminal_preexecution_failure(self):
+        self.profile['setupContainment'] = {'required': True}
+        self.remote.readiness.return_value = {'ready': False, 'code': 'reviewed_attempt_already_exists'}
+        identity = self.register()
+        with patch('supervision_policy.SetupOwnership.from_plan'):
+            self.service.execute(identity)
+            self.service.execute(identity)
+        saved = self.repo.get(identity)
+        self.assertEqual(saved['state'], 'terminal')
+        self.assertEqual(saved['result']['result']['code'], 'reviewed_attempt_already_exists')
+        self.assertFalse(saved['result']['result']['executionStarted'])
+        self.remote.readiness.assert_called_once()
+        self.remote.launch.assert_not_called()
+
     def test_invalid_setup_registration_waits_before_staging_or_attempt(self):
         self.profile['setupContainment'] = {'required': True}
         identity = self.register()
