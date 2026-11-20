@@ -43,6 +43,11 @@ SQLite state; no application/proof tests or paid provider calls.
 The host must implement `issues.wakeup.durable`; older stock hosts reject this
 plugin capability. Existing plugins' keyed wakes retain their prior semantics.
 Only this explicit opt-in reserves durable same-task receipts.
+When a signed result hands off to native runner recovery, the broker accepts
+the exact result receipt from the native policy ledger. A lost webhook reply
+can then reconcile without sending the handled callback again. Settle pending
+deliveries before rotating the signing key. A receipt signed with the prior
+key needs reconciliation against those original signed bytes.
 
 Current integration validation covers the real JobService, Unix authentication,
 HTTP completion, task-document persistence, native receipt admission, lost ACK

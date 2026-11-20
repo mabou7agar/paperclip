@@ -131,12 +131,29 @@ class NativeTransport:
                 # Native ACK is checked before another push after an ambiguous
                 # response or broker restart. No provider ever gets a second key.
                 key = 'runner-result:'+identity+':'+result['receiptSha256']
-                if not self.native_wake_ack(request,key,'runner_result_received','ubuntu.runner.result') and not self.recorded_only(request,result):
+                acknowledged = self.result_acknowledged(request, result, key)
+                if not acknowledged:
                     self.push(request,'result',result)
-                if self.native_wake_ack(request,key,'runner_result_received','ubuntu.runner.result') or self.recorded_only(request,result):
+                    acknowledged = self.result_acknowledged(request, result, key)
+                if acknowledged:
                     self.service.repository.acknowledge(identity,result['receiptSha256'])
             except Exception:
                 continue
+
+    def result_acknowledged(self, request, result, key):
+        if self.native_wake_ack(request,key,'runner_result_received','ubuntu.runner.result') or self.recorded_only(request,result):
+            return True
+        if result['status'] == 'passed':
+            return False
+        envelope = self.envelope(request, 'result', result)
+        try:
+            return self.reader.policy_result_matches(request, result, envelope)
+        except Refusal as error:
+            # Optional policy read permission must not prevent the existing
+            # signed callback and legacy acknowledgment paths.
+            if error.code == 'native_attestation_unavailable':
+                return False
+            raise
 
     def closed_admission_ack(self,request,response):
         issue = self.native.read('/api/issues/'+request['taskId'])
