@@ -17,7 +17,15 @@ admission/packet adapter; never loosen its checks for an incompatible project.
 `control_checks` executes a registered changed-input pure recipe in a disposable,
 non-root, networkless container using an existing image. It has no workspace,
 secret, database or Docker socket mounts. Passed matching recipe/input/image
-checks are reused only inside the same company, profile and operator policy. These controls do not count as application acceptance.
+checks are reused only inside the same company, profile and operator policy.
+These controls do not count as application acceptance.
+
+For a new control-only profile with `allowReviewedController: false`, set its
+optional `controlPacket` to the approved `attachmentId`, `packetSha256`, and
+`recipe` entrypoint. The broker checks all three before recording a job and
+again before staging or launching it, including launch reconciliation.
+Use a new reviewed profile for a different packet. Existing profiles without
+this field retain their admission contract.
 
 Validation from the repository root:
 

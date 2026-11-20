@@ -7,9 +7,10 @@ import json
 from unittest.mock import Mock, patch
 from types import SimpleNamespace
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'broker'))
-from configuration import load
+from configuration import load, validate_profile
 from supervision_policy import SetupOwnership
 from contracts import Refusal
+from test_admission import fixture as admission_fixture
 
 
 def fixture():
@@ -67,3 +68,35 @@ class SupervisionPolicyTests(unittest.TestCase):
                 if second_mysql == 'mysql-one':
                     with self.assertRaisesRegex(Refusal, 'broker_setup_namespace_overlap'):load('/private/config')
                 else:self.assertEqual(len(load('/private/config')['profiles']), 2)
+
+
+class ControlPacketProfileTests(unittest.TestCase):
+    def test_only_a_closed_pin_on_a_control_only_profile_is_valid(self):
+        admission = admission_fixture()
+        profile = {**admission.profile, 'concurrency': 1, 'sshTarget': 'runner@example',
+            'sshIdentityFile': '/private/identity', 'sshKnownHostsFile': '/private/hosts',
+            'remoteInstall': '/opt/paperclip-ubuntu-runner-results', 'remoteState': '/var/lib/paperclip-ubuntu-runner-results',
+            'runner': 'runner', 'uid': 1001, 'gid': 999, 'authorityRoot': '/tmp/example/authority',
+            'trialRoot': '/tmp/example/trial', 'continuationPattern': 'example-q1', 'executionIdPattern': 'example-1',
+            'authoritySchemaTemplate': 'example-{key}-verified.v2', 'allowReviewedController': False,
+            'allowControlChecks': True, 'controlInputs': ['candidate.json'], 'preparedImage': 'sha256:' + 'b' * 64}
+        profile['fixedTrialFields'] = {'uid': profile['uid'], 'gid': profile['gid'], 'runner': profile['runner'],
+            'companyId': profile['companyId'], 'harnessIssueId': admission.job['taskId']}
+        pin = {'attachmentId': admission.job['attachmentId'], 'packetSha256': 'a' * 64, 'recipe': 'checks-new.py'}
+        with patch('configuration.private_file'):
+            validate_profile('example', profile)
+            validate_profile('example', {**profile, 'controlPacket': pin})
+            rejected = [
+                {'controlPacket': None},
+                {'controlPacket': {**pin, 'extra': True}},
+                {'controlPacket': {key: value for key, value in pin.items() if key != 'recipe'}},
+                {'controlPacket': {**pin, 'attachmentId': False}},
+                {'controlPacket': {**pin, 'attachmentId': 'wrong'}},
+                {'controlPacket': {**pin, 'packetSha256': 'wrong'}},
+                {'controlPacket': {**pin, 'recipe': '../checks-new.py'}},
+                {'allowControlChecks': False, 'controlPacket': pin},
+                {'allowReviewedController': True, 'controlPacket': pin},
+            ]
+            for change in rejected:
+                with self.subTest(change=change), self.assertRaisesRegex(Refusal, 'broker_control_packet_invalid'):
+                    validate_profile('example', {**profile, **change})
