@@ -195,3 +195,31 @@ class OldControlReconciliationTests(unittest.TestCase):
             self.assertEqual(reconcile.call_count,1)
             execute.assert_not_called()
             self.assertEqual(json.loads((self.root/'result.json').read_text()),old)
+
+    def test_attaches_only_closed_evidence_for_a_failed_started_controller(self):
+        driver_path = self.state / 'driver.json'
+        report_root = self.state / 'runtime'
+        driver = {'wholePacketSha256': 'a' * 64, 'continuationId': 'fixture',
+            'attempt': 1, 'maxAttempts': 1, 'status': 'failed', 'functionalCasesStarted': True,
+            'cleanup': {'complete': True, 'auditComplete': False}}
+        packet = SimpleNamespace(trial={'driverReceiptPath': str(driver_path),
+            'runtimeReceiptRoot': str(report_root), 'continuationId': 'fixture'})
+        classification = {'stage': 'phase-assertions', 'category': 'OTHER'}
+        with (
+            patch.object(worker, 'inventory', return_value={}),
+            patch.object(worker, 'case_failure_summary', return_value=classification) as summary,
+            patch.object(worker, 'private_bytes', return_value=b'{ "bound": true }') as read,
+        ):
+            driver_path.write_text(json.dumps(driver))
+            result = worker.controller_result(self.plan, packet, 1)
+            self.assertEqual(result['caseFailure'], classification)
+            self.assertEqual(result['status'], 'failed')
+            self.assertFalse(result['auditComplete'])
+            read.assert_called_once_with(self.root / 'effective-admission.json', self.root, 128 * 1024)
+            self.assertEqual(summary.call_args.args, (packet, driver, self.identity, 'a' * 64, worker.digest({'bound': True})))
+            read.side_effect = FileNotFoundError
+            self.assertNotIn('caseFailure', worker.controller_result(self.plan, packet, 1))
+            driver.pop('functionalCasesStarted')
+            driver_path.write_text(json.dumps(driver))
+            self.assertNotIn('caseFailure', worker.controller_result(self.plan, packet, 1))
+            summary.assert_called_once()

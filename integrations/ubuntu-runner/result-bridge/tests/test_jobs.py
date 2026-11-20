@@ -258,3 +258,22 @@ class JobTests(unittest.TestCase):
         self.service.finish(identity, self.request, {**first, 'cleanupComplete': True, 'auditComplete': True})
         self.assertEqual(original['fingerprint'], self.repo.get(identity)['result']['fingerprint'])
         self.assertFalse(self.repo.get(identity)['result']['newEvidence'])
+
+    def test_closed_case_evidence_is_novel_once_without_crediting_changed_categories(self):
+        original = {'status': 'failed', 'kind': 'reviewed_controller', 'steps': [], 'diagnostic': None}
+        first = self.register()
+        self.service.finish(first, self.request, original)
+        old_fingerprint = self.repo.get(first)['result']['fingerprint']
+        statuses = []
+        for index, classification in enumerate(({'stage': 'phase-assertions', 'category': 'OTHER'},
+                {'stage': 'phase-assertions', 'category': 'ASSERTION'}, {'extra': 'invalid'}), start=1):
+            request = {**self.request, 'packetSha256': str(index) * 64}
+            identity = self.register(request)
+            self.service.finish(identity, request, {**original, 'caseFailure': classification})
+            saved = self.repo.get(identity)['result']
+            statuses.append(saved['newEvidence'])
+            if index == 3:
+                self.assertNotIn('caseFailure', saved['result'])
+                self.assertEqual(saved['fingerprint'], old_fingerprint)
+        self.assertEqual(statuses, [True, False, False])
+        self.remote.launch.assert_not_called()

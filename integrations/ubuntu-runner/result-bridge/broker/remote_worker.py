@@ -29,7 +29,7 @@ sys.path.insert(0, str(_HERE))
 from contracts import UUID, canonical, closed_json, closed_diagnostic, digest, require, Refusal, SHA
 from packet import Packet
 from bounded_process import capture
-from evidence import inventory, descriptors, private_bytes, LIMIT
+from evidence import case_failure_summary, inventory, descriptors, private_bytes, LIMIT
 from control_runner import control_checks, reconcile_control
 
 STATE = pathlib.Path('/var/lib/paperclip-ubuntu-runner-results')
@@ -296,6 +296,15 @@ def controller_result(plan, packet, exit_code):
         # a passing test/feature verdict from an interrupted driver.
         outcome.update(status='failed', cleanupComplete=True, auditComplete=ownership.get('auditComplete') is True,
                        supervisorReceiptSha256=hashlib.sha256(ownership_path.read_bytes()).hexdigest())
+    if outcome['status'] == 'failed' and outcome.get('functionalCasesStarted') is True:
+        try:
+            effective = private_bytes(job_root / 'effective-admission.json', job_root, 128 * 1024)
+            summary = case_failure_summary(packet, driver, plan['jobId'], plan['request']['packetSha256'],
+                                           digest(closed_json(effective)))
+        except (Refusal, ValueError, OSError):
+            summary = None
+        if summary:
+            outcome['caseFailure'] = summary
     outcome['artifacts'] = descriptors(inventory(packet, driver))
     return outcome
 

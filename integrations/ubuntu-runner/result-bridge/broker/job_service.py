@@ -3,6 +3,7 @@ import hashlib
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contracts import canonical, digest, job_request, require, Refusal, AdmissionWait, closed_diagnostic
+from evidence import case_failure_classification
 from packet import Packet
 from admission import ReviewAdmissionService
 
@@ -209,6 +210,14 @@ class JobService:
         # Exclude timestamps, process IDs, output hashes, packet identities and
         # counters from failure progress. A new attempt alone is not progress.
         meaningful = {k: outcome.get(k) for k in ['status', 'code', 'kind', 'diagnostic', 'steps', 'checks', 'recipeSha256'] if k in outcome}
+        if 'caseFailure' in outcome:
+            outcome = dict(outcome)
+            classification = case_failure_classification(outcome.pop('caseFailure'))
+            if classification and outcome.get('status') == 'failed' and outcome.get('kind') == 'reviewed_controller':
+                outcome['caseFailure'] = classification
+                # Discovery of closed diagnostics is progress once. Different
+                # labels or attempt receipts cannot create another wake.
+                meaningful['caseFailureClassified'] = True
         if self.profile(request).get('setupContainment'):
             meaningful.update({key: outcome[key] for key in ['cleanupComplete', 'auditComplete'] if key in outcome})
         if outcome.get('kind') == 'control_checks':
