@@ -1,0 +1,32 @@
+meta {
+  name: Disable recovery policy routing
+  type: http
+  seq: 5
+}
+put {
+  url: {{baseUrl}}/api/companies/{{companyId}}/runner-policy-recovery
+  body: json
+  auth: bearer
+}
+auth:bearer {
+  token: {{apiKey}}
+}
+body:json {
+  { "enabled": false }
+}
+tests {
+  test("Disabling preserves pending native delivery", function () {
+    const expected = Number(bru.getVar("expectedStatus") || 200);
+    expect(res.getStatus()).to.equal(expected);
+    if (expected === 409) {
+      expect(res.getBody().error).to.equal("runner_recovery_disable_requires_settlement");
+    } else {
+      expect(res.getBody().enabled).to.equal(false);
+    }
+  });
+}
+docs {
+  Use a board or CTO credential for the selected company. This request
+  changes company configuration when no recovery wake is pending.
+  Set expectedStatus to 409 when testing an existing unclaimed recovery.
+}

@@ -163,3 +163,45 @@ test('enabled false-evidence suppression preserves the native wait without touch
     assert.equal(f.issue.status, state === 'in_progress' ? 'blocked' : state === 'done' ? 'done' : 'in_progress');
   }
 });
+
+
+test('an unrelated signed failure still produces one durable legacy wake when recovery is available', async () => {
+  const f = fixture();
+  const signed = { payload: 'signed', signature: 'signature' };
+  f.ctx.issues.routeRunnerResult = async () => ({ enabled: false });
+  f.failAcknowledgement = true;
+  await assert.rejects(f.service().deliverResult(f.result, signed), /lost ACK/);
+  f.failAcknowledgement = false;
+  await f.service().deliverResult(f.result, signed);
+  assert.equal(f.writes.length, 1);
+  assert.equal(f.providers, 1);
+  assert.equal(f.calls[0].idempotencyKey, f.calls[1].idempotencyKey);
+});
+
+test('recording an unchanged failure leaves active and pending review status intact', async () => {
+  for (const patch of [{ status: 'in_review' }, { executionState: { status: 'pending' } },
+    { executionState: { reviewEscalated: true } }]) {
+    for (const enabled of [false, true]) {
+      const f = fixture();
+      Object.assign(f.issue, patch);
+      const status = f.issue.status;
+      f.result.newEvidence = false;
+      f.ctx.issues.routeRunnerResult = async () => enabled ? { enabled, state: 'no_new_evidence' } : { enabled };
+      await f.service().deliverResult(f.result, { payload: 'signed', signature: 'signature' });
+      assert.equal(f.issue.status, status);
+      assert.equal(f.providers, 0);
+    }
+  }
+});
+
+
+test('signed cancelled and unknown outcomes keep the native reconciliation path', async () => {
+  for (const status of ['cancelled', 'unknown']) {
+    const f = fixture();
+    f.result.status = status;
+    f.ctx.issues.routeRunnerResult = async () => { throw new Error('failed-result recovery only'); };
+    await f.service().deliverResult(f.result, { payload: 'signed', signature: 'signature' });
+    assert.equal(f.providers, 1);
+    assert.equal(f.calls[0].reason, 'runner_result_received');
+  }
+});

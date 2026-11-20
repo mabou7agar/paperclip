@@ -97,3 +97,19 @@ Archives a company. Archived companies are hidden from default listings.
 | `budgetMonthlyCents` | number | Monthly budget limit |
 | `createdAt` | string | ISO timestamp |
 | `updatedAt` | string | ISO timestamp |
+
+## Set runner policy recovery
+
+```
+PUT /api/companies/{companyId}/runner-policy-recovery
+{ "enabled": false }
+```
+
+A board user or eligible CTO can set this company flag. A successful request
+returns `200` with the saved `enabled` value.
+
+If any recovery intent is awaiting native dispatch, a disable request returns
+`409` with `error: "runner_recovery_disable_requires_settlement"`. The flag
+stays enabled while those intents settle through the native wake queue. Once
+settled, disabling preserves their delivery receipts and prevents a redelivered
+result from waking the worker again.
