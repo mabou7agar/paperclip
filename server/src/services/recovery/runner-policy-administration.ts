@@ -1,7 +1,7 @@
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "../delivery-work-notifications.js";
 import { createHash } from "node:crypto";
 import { and, eq, isNull } from "drizzle-orm";
-import { agents, issueComments, issues, runnerRecoveryPolicies, runnerRecoveryCompanySettings, activityLog, type Db } from "@paperclipai/db";
+import { agents, issueComments, issues, runnerRecoveryPolicies, runnerRecoveryCompanySettings, runnerRecoveryResults, activityLog, type Db } from "@paperclipai/db";
 import { canonicalJson } from "@paperclipai/shared/portability-hash";
 import { forbidden, conflict, notFound } from "../../errors.js";
 import { runnerRecoveryPolicySchema } from "./runner-policy-contract.js";
@@ -69,6 +69,14 @@ export function runnerPolicyAdministration(db: Db) {
     async setEnabled(companyId: string, actor: Actor, enabled: boolean) {
       const actorId = await authority(companyId, actor);
       return db.transaction(async tx => {
+        if (!enabled) {
+          await tx.select({ companyId: runnerRecoveryCompanySettings.companyId })
+            .from(runnerRecoveryCompanySettings)
+            .where(eq(runnerRecoveryCompanySettings.companyId, companyId)).for("update");
+          const unfinished = await tx.select({ id: runnerRecoveryResults.id }).from(runnerRecoveryResults)
+            .where(and(eq(runnerRecoveryResults.companyId, companyId), eq(runnerRecoveryResults.state, "routing"))).limit(1);
+          if (unfinished.length) throw conflict("runner_recovery_disable_requires_settlement");
+        }
         await tx.insert(runnerRecoveryCompanySettings).values({ companyId, runnerPolicyRecovery: { enabled }, updatedBy: actorId })
           .onConflictDoUpdate({ target: runnerRecoveryCompanySettings.companyId,
             set: { runnerPolicyRecovery: { enabled }, updatedBy: actorId, updatedAt: new Date() } });

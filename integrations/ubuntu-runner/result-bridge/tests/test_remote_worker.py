@@ -97,6 +97,76 @@ class RemoteWorkerTests(unittest.TestCase):
         self.assertFalse((self.root / 'ownership-lease.json').exists())
         self.assertEqual(worker.readiness.__name__, 'readiness')
 
+    def test_stale_authority_path_settles_once_before_attempt_or_controller(self):
+        self.plan['request']['kind'] = 'reviewed_controller'
+        self.plan['profile'].update(authorityRoot=str(self.state), setupContainment={'required': True})
+        (self.root / 'plan.json').write_text(json.dumps(self.plan))
+        names = ('ownerRoot', 'driverReceiptPath', 'runtimeReceiptRoot', 'externalAuthorityPath',
+                 'preexecutionAdmissionPath', 'caseArchivePath')
+        trial = {name: str(self.state / name) for name in names}
+        stale = pathlib.Path(trial['externalAuthorityPath'])
+        stale.symlink_to(self.state / 'missing')
+        packet = SimpleNamespace(trial=trial)
+        with patch.object(worker, 'Packet', return_value=packet), patch.object(worker, 'capture') as capture, \
+             patch.object(worker, 'reviewed_controller') as controller:
+            self.assertEqual(worker.readiness(self.identity),
+                             {'ready': False, 'code': 'reviewed_attempt_already_exists'})
+            first = worker.run(self.identity)
+            self.assertEqual(first['phase'], 'terminal')
+            self.assertEqual(first['result']['code'], 'reviewed_attempt_already_exists')
+            self.assertFalse(first['result']['executionStarted'])
+            self.assertFalse((self.root / 'attempt.json').exists())
+            self.assertFalse((self.root / 'ownership-lease.json').exists())
+            self.assertTrue(stale.is_symlink())
+            stale.unlink()
+            self.assertEqual(worker.run(self.identity), first)
+            capture.assert_not_called()
+            controller.assert_not_called()
+
+    def test_recovery_readiness_ignores_paths_created_by_the_same_started_job(self):
+        self.plan['request']['kind'] = 'reviewed_controller'
+        self.plan['profile']['setupContainment'] = {'required': True}
+        (self.root / 'plan.json').write_text(json.dumps(self.plan))
+        marker = self.root / 'attempt.json'
+
+        def already_launched(*args):
+            marker.write_text('{}')
+            raise worker.Refusal('reviewed_attempt_already_exists')
+
+        with patch.object(worker, 'Packet'), patch.object(worker, 'assert_fresh_reviewed_paths',
+                side_effect=already_launched) as fresh:
+            self.assertEqual(worker.readiness(self.identity), {'ready': True})
+            self.assertEqual(worker.readiness(self.identity), {'ready': True})
+            fresh.assert_called_once()
+        self.assertTrue(marker.exists())
+        self.assertFalse((self.root / 'result.json').exists())
+
+    def test_successful_preflight_precedes_the_exclusive_controller_attempt(self):
+        self.plan['request']['kind'] = 'reviewed_controller'
+        self.plan['profile']['authorityRoot'] = str(self.state)
+        (self.root / 'plan.json').write_text(json.dumps(self.plan))
+        names = ('ownerRoot', 'driverReceiptPath', 'runtimeReceiptRoot', 'externalAuthorityPath',
+                 'preexecutionAdmissionPath', 'caseArchivePath')
+        packet = SimpleNamespace(directory='qualification', trial={name: str(self.state / name) for name in names})
+        attempt = self.root / 'attempt.json'
+
+        def preflight(*args, **kwargs):
+            self.assertFalse(attempt.exists())
+            self.assertEqual(args[0][-1], '--preflight-only')
+            return {'exit': 0, 'timedOut': False, 'stdout': {'overflow': False}, 'stderr': {'overflow': False}}
+
+        def execute(*args):
+            self.assertTrue(attempt.exists())
+            return {'status': 'passed', 'kind': 'reviewed_controller', 'cleanupComplete': True}
+
+        with patch.object(worker, 'Packet', return_value=packet), patch.object(worker, 'capture', side_effect=preflight) as check, \
+             patch.object(worker, 'reviewed_controller', side_effect=execute) as controller:
+            first = worker.run(self.identity)
+            self.assertEqual(first['result']['status'], 'passed')
+            self.assertEqual(worker.run(self.identity), first)
+            check.assert_called_once()
+            controller.assert_called_once()
+
     def test_legacy_profile_still_requires_audit_to_release_reconciliation(self):
         self.plan['request']['kind'] = 'reviewed_controller'
         (self.root / 'plan.json').write_text(json.dumps(self.plan))
@@ -125,3 +195,31 @@ class OldControlReconciliationTests(unittest.TestCase):
             self.assertEqual(reconcile.call_count,1)
             execute.assert_not_called()
             self.assertEqual(json.loads((self.root/'result.json').read_text()),old)
+
+    def test_attaches_only_closed_evidence_for_a_failed_started_controller(self):
+        driver_path = self.state / 'driver.json'
+        report_root = self.state / 'runtime'
+        driver = {'wholePacketSha256': 'a' * 64, 'continuationId': 'fixture',
+            'attempt': 1, 'maxAttempts': 1, 'status': 'failed', 'functionalCasesStarted': True,
+            'cleanup': {'complete': True, 'auditComplete': False}}
+        packet = SimpleNamespace(trial={'driverReceiptPath': str(driver_path),
+            'runtimeReceiptRoot': str(report_root), 'continuationId': 'fixture'})
+        classification = {'stage': 'phase-assertions', 'category': 'OTHER'}
+        with (
+            patch.object(worker, 'inventory', return_value={}),
+            patch.object(worker, 'case_failure_summary', return_value=classification) as summary,
+            patch.object(worker, 'private_bytes', return_value=b'{ "bound": true }') as read,
+        ):
+            driver_path.write_text(json.dumps(driver))
+            result = worker.controller_result(self.plan, packet, 1)
+            self.assertEqual(result['caseFailure'], classification)
+            self.assertEqual(result['status'], 'failed')
+            self.assertFalse(result['auditComplete'])
+            read.assert_called_once_with(self.root / 'effective-admission.json', self.root, 128 * 1024)
+            self.assertEqual(summary.call_args.args, (packet, driver, self.identity, 'a' * 64, worker.digest({'bound': True})))
+            read.side_effect = FileNotFoundError
+            self.assertNotIn('caseFailure', worker.controller_result(self.plan, packet, 1))
+            driver.pop('functionalCasesStarted')
+            driver_path.write_text(json.dumps(driver))
+            self.assertNotIn('caseFailure', worker.controller_result(self.plan, packet, 1))
+            summary.assert_called_once()

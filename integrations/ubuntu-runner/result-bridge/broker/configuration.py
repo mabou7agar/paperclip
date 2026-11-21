@@ -5,7 +5,7 @@ import pathlib
 import re
 import stat
 from urllib.parse import urlsplit
-from contracts import require, digest, UUID, SHA, KEY, closed_json
+from contracts import CONTROL_RECIPE, require, digest, UUID, SHA, KEY, closed_json
 
 
 def private_file(path):
@@ -65,7 +65,7 @@ def validate_profile(key, profile):
                 'targetDocumentKey', 'reviewDocumentKey', 'actualAcpDocumentKey', 'allowedModes',
                 'sourceDecisionFingerprints', 'authorityRoot', 'trialRoot', 'continuationPattern',
                 'executionIdPattern', 'authoritySchemaTemplate', 'allowReviewedController', 'privilegedCodeDigests', 'privilegedCodeApproval', 'allowControlChecks', 'controlInputs', 'preparedImage'}
-    require(isinstance(profile, dict) and required <= set(profile) <= required | {'setupContainment'}, 'broker_profile_fields_invalid')
+    require(isinstance(profile, dict) and required <= set(profile) <= required | {'setupContainment', 'controlPacket'}, 'broker_profile_fields_invalid')
     require(KEY.fullmatch(key), 'broker_profile_key_invalid')
     require(type(profile['concurrency']) is int and profile['concurrency'] == 1, 'broker_profile_concurrency_invalid')
     require(re.fullmatch(r'[a-zA-Z0-9_.@-]+', profile['sshTarget']) and not profile['sshTarget'].startswith('-'), 'broker_ssh_target_invalid')
@@ -101,6 +101,14 @@ def validate_profile(key, profile):
     require(type(profile['allowControlChecks']) is bool and isinstance(profile['controlInputs'], list) and
             1 <= len(profile['controlInputs']) <= 64 and
             all(re.fullmatch(r'[a-z][a-z0-9_.-]{0,95}', x) for x in profile['controlInputs']), 'broker_control_inputs_invalid')
+    if 'controlPacket' in profile:
+        packet = profile['controlPacket']
+        require(profile['allowControlChecks'] and profile['allowReviewedController'] is False and
+                isinstance(packet, dict) and
+                set(packet) == {'attachmentId', 'packetSha256', 'recipe'} and
+                all(isinstance(value, str) for value in packet.values()) and
+                UUID.fullmatch(packet['attachmentId']) and SHA.fullmatch(packet['packetSha256']) and
+                CONTROL_RECIPE.fullmatch(packet['recipe']), 'broker_control_packet_invalid')
     require(re.fullmatch(r'sha256:[a-f0-9]{64}', profile['preparedImage']), 'broker_prepared_image_invalid')
     require(isinstance(profile['fixedTrialFields'], dict) and isinstance(profile['sourceAuthority'], dict) and
             isinstance(profile['sourceDecisionFingerprints'], dict) and 0 < len(profile['sourceDecisionFingerprints']) <= 16,

@@ -9,7 +9,7 @@ import uuid
 from unittest.mock import Mock, patch
 
 sys.path.insert(0,str(pathlib.Path(__file__).resolve().parents[1]/'broker'))
-from contracts import canonical, digest, job_id
+from contracts import Refusal, canonical, digest, job_id
 from native_transport import NativeTransport, wake_receipt
 from repository import JobRepository
 
@@ -20,12 +20,17 @@ class NativeFixture:
         self.rows=[{'key':job_id(request),'issue':request['taskId'],'value':request,'withinRun':True,'sourceMatches':True}]
         self.actions=[];self.admissions={};self.http_only=False;self.wake=False;self.lose_result_response=False
         self.issue={'companyId':request['companyId'],'projectId':request['projectId'],'assigneeAgentId':request['agentId'],'status':'in_progress'}
-        self.document=None
+        self.document=None;self.policy_enabled=False;self.policy_receipt=None;self.policy_owned=False
 
     def query(self,sql):
         if 'FROM plugins ' in sql:return [{'id':self.plugin,'status':'ready','key':'paperclip.ubuntu-runner-results'}]
         if 'FROM plugin_state s LEFT' in sql:return self.rows
         if "namespace='runner-admissions'" in sql:return [{'matches':bool(self.admissions)}] if self.admissions else []
+        if 'to_regclass' in sql:return [{'available':self.policy_enabled}]
+        if 'FROM runner_recovery_results r' in sql:
+            if not self.policy_receipt or "r.envelope_sha256='%s'" % self.policy_receipt not in sql:
+                return []
+            return [{'matches':self.policy_owned}]
         if 'FROM agent_wakeup_requests' in sql:return [{'matches':self.wake}] if self.wake else []
         return []
 
@@ -36,7 +41,10 @@ class NativeFixture:
         self.actions.append(value)
         if value['kind']=='admission':self.rows=[];self.admissions[value['jobId']]=envelope
         else:
-            self.wake=True
+            if self.policy_enabled:
+                self.policy_receipt=digest(envelope)
+            else:
+                self.wake=True
             if self.lose_result_response:raise OSError('lost response after native receipt commit')
         return {'data':{'recorded':True}}
 
@@ -107,6 +115,46 @@ class NativeTransportTest(unittest.TestCase):
         restarted=NativeTransport(self.config,self.service,self.native);restarted.deliver()
         self.assertEqual(len([x for x in self.native.actions if x['kind']=='result']),1)
         self.assertEqual(self.repo.pending(),[]);self.assertEqual(self.created,1)
+
+    def test_exact_policy_receipt_recovers_lost_response_without_legacy_wake(self):
+        self.transport.receive();self.transport.deliver()
+        identity=job_id(self.request)
+        result={'jobId':identity,'companyId':self.request['companyId'],'projectId':self.request['projectId'],
+            'issueId':self.request['taskId'],'agentId':self.request['agentId'],'profile':'fixture','status':'failed',
+            'receiptSha256':'b'*64,'fingerprint':'c'*64,'newEvidence':True,
+            'result':{'status':'failed','cleanupComplete':True}}
+        self.repo.terminal(identity,result)
+        self.native.policy_enabled=True
+        self.native.lose_result_response=True
+        self.transport.deliver()
+        self.assertEqual(self.repo.pending(),[identity])
+        self.assertFalse(self.native.wake)
+
+        # Only the same committed result and a positive native handoff can
+        # settle the broker delivery. A different signed receipt stays pending.
+        self.native.policy_owned=True
+        native_receipt=self.native.policy_receipt
+        self.native.policy_receipt='0'*64
+        self.assertFalse(self.transport.result_acknowledged(self.request,result,'runner-result:'+identity+':'+result['receiptSha256']))
+        self.native.policy_receipt=native_receipt
+        restarted=NativeTransport(self.config,self.service,self.native)
+        restarted.deliver()
+        self.assertEqual(self.repo.pending(),[])
+        self.assertEqual(len([x for x in self.native.actions if x['kind']=='result']),1)
+        self.assertEqual(self.created,1)
+
+    def test_optional_policy_read_failure_does_not_block_ordinary_callback(self):
+        self.transport.receive();self.transport.deliver()
+        identity=job_id(self.request)
+        self.repo.terminal(identity,{'jobId':identity,'companyId':self.request['companyId'],'projectId':self.request['projectId'],
+            'issueId':self.request['taskId'],'agentId':self.request['agentId'],'profile':'fixture','status':'failed',
+            'receiptSha256':'b'*64,'fingerprint':'c'*64,'newEvidence':True,
+            'result':{'status':'failed','cleanupComplete':True}})
+        with patch.object(self.transport.reader,'policy_result_matches',side_effect=Refusal('native_attestation_unavailable')):
+            self.transport.deliver()
+        self.assertTrue(self.native.wake)
+        self.assertEqual(self.repo.pending(),[])
+        self.assertEqual(len([x for x in self.native.actions if x['kind']=='result']),1)
 
     def test_webhook_http_success_alone_cannot_ack_admission_or_result(self):
         self.transport.receive();self.native.http_only=True

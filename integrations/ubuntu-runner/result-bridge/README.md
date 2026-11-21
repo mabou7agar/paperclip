@@ -17,7 +17,15 @@ admission/packet adapter; never loosen its checks for an incompatible project.
 `control_checks` executes a registered changed-input pure recipe in a disposable,
 non-root, networkless container using an existing image. It has no workspace,
 secret, database or Docker socket mounts. Passed matching recipe/input/image
-checks are reused only inside the same company, profile and operator policy. These controls do not count as application acceptance.
+checks are reused only inside the same company, profile and operator policy.
+These controls do not count as application acceptance.
+
+For a new control-only profile with `allowReviewedController: false`, set its
+optional `controlPacket` to the approved `attachmentId`, `packetSha256`, and
+`recipe` entrypoint. The broker checks all three before recording a job and
+again before staging or launching it, including launch reconciliation.
+Use a new reviewed profile for a different packet. Existing profiles without
+this field retain their admission contract.
 
 Validation from the repository root:
 
@@ -35,6 +43,11 @@ SQLite state; no application/proof tests or paid provider calls.
 The host must implement `issues.wakeup.durable`; older stock hosts reject this
 plugin capability. Existing plugins' keyed wakes retain their prior semantics.
 Only this explicit opt-in reserves durable same-task receipts.
+When a signed result hands off to native runner recovery, the broker accepts
+the exact result receipt from the native policy ledger. A lost webhook reply
+can then reconcile without sending the handled callback again. Settle pending
+deliveries before rotating the signing key. A receipt signed with the prior
+key needs reconciliation against those original signed bytes.
 
 Current integration validation covers the real JobService, Unix authentication,
 HTTP completion, task-document persistence, native receipt admission, lost ACK

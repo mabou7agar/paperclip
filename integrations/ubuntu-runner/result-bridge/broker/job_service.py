@@ -3,11 +3,19 @@ import hashlib
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contracts import canonical, digest, job_request, require, Refusal, AdmissionWait, closed_diagnostic
+from evidence import case_failure_classification
 from packet import Packet
 from admission import ReviewAdmissionService
 
 
 class JobService:
+    def assert_remote_readiness(self, profile, identity):
+        readiness = self.remote.readiness(profile, identity)
+        if readiness.get('ready') is False and readiness.get('code') == 'reviewed_attempt_already_exists':
+            raise Refusal('reviewed_attempt_already_exists')
+        if readiness.get('ready') is not True:
+            raise AdmissionWait('runner_setup_readiness_pending')
+
     def __init__(self, config, repository, native, remote):
         self.config, self.repository, self.native, self.remote = config, repository, native, remote
         self.admission = ReviewAdmissionService(native)
@@ -119,8 +127,7 @@ class JobService:
             # before confirmed staging cannot consume the execution identity.
             self.remote.stage(profile, identity, request, packet, admission)
             if request['kind'] == 'reviewed_controller' and profile.get('setupContainment'):
-                readiness = self.remote.readiness(profile, identity)
-                if readiness.get('ready') is not True:raise AdmissionWait('runner_setup_readiness_pending')
+                self.assert_remote_readiness(profile, identity)
             # Re-verify the ENTIRE admission, including current target/verdict,
             # after staging and immediately before the first launch.
             current_packet, current_admission, _ = self.prepare(request, profile, identity)
@@ -178,9 +185,7 @@ class JobService:
                 packet, admission, _ = self.prepare(request, profile, identity)
                 self.remote.stage(profile, identity, request, packet, admission)
                 if request['kind'] == 'reviewed_controller' and profile.get('setupContainment'):
-                    readiness = self.remote.readiness(profile, identity)
-                    if readiness.get('ready') is not True:
-                        return self.repository.release_unlaunched(identity, 'runner_setup_readiness_pending')
+                    self.assert_remote_readiness(profile, identity)
             except AdmissionWait as error:
                 return self.repository.release_unlaunched(identity, error.code)
             except Refusal as error:
@@ -205,6 +210,14 @@ class JobService:
         # Exclude timestamps, process IDs, output hashes, packet identities and
         # counters from failure progress. A new attempt alone is not progress.
         meaningful = {k: outcome.get(k) for k in ['status', 'code', 'kind', 'diagnostic', 'steps', 'checks', 'recipeSha256'] if k in outcome}
+        if 'caseFailure' in outcome:
+            outcome = dict(outcome)
+            classification = case_failure_classification(outcome.pop('caseFailure'))
+            if classification and outcome.get('status') == 'failed' and outcome.get('kind') == 'reviewed_controller':
+                outcome['caseFailure'] = classification
+                # Discovery of closed diagnostics is progress once. Different
+                # labels or attempt receipts cannot create another wake.
+                meaningful['caseFailureClassified'] = True
         if self.profile(request).get('setupContainment'):
             meaningful.update({key: outcome[key] for key in ['cleanupComplete', 'auditComplete'] if key in outcome})
         if outcome.get('kind') == 'control_checks':

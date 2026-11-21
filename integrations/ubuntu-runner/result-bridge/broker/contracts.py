@@ -7,6 +7,7 @@ import uuid
 UUID = re.compile(r"^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$")
 SHA = re.compile(r"^[a-f0-9]{64}$")
 KEY = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+CONTROL_RECIPE = re.compile(r"[a-z][a-z0-9-]{0,95}-new\.py")
 
 
 class Refusal(Exception):
@@ -58,7 +59,7 @@ def job_request(value):
     else:
         require(all(value[k] is None for k in ["scopeIssueId", "scopeCommentId", "ackCommentId"]) and
                 isinstance(value["recipe"], str) and
-                re.fullmatch(r"[a-z][a-z0-9-]{0,95}-new\.py", value["recipe"]), "job_recipe_invalid")
+                CONTROL_RECIPE.fullmatch(value["recipe"]), "job_recipe_invalid")
     return dict(value)
 
 

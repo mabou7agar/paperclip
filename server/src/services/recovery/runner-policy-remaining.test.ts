@@ -122,11 +122,64 @@ const support = await getRecoveryPostgresSupport();
     await f.service.reevaluateDeferred(f.companyId, f.issueId, "admission_released");
     expect(f.wake).toHaveBeenCalledTimes(1);
   });
-  it("T18 routes a saved no-policy result only on native policy activation", async () => {
-    const f = await fixture(); await db.update(runnerRecoveryPolicies).set({ activatedAt: null }).where(eq(runnerRecoveryPolicies.companyId, f.companyId));
-    expect(await f.service.routeRunnerResult(f, f.input)).toMatchObject({ reason: "no_policy" });
+  it("T18 keeps ordinary delivery available before policy activation without saving a replayable intent", async () => {
+    const f = await fixture();
+    await db.update(runnerRecoveryPolicies).set({ activatedAt: null }).where(eq(runnerRecoveryPolicies.companyId, f.companyId));
+    expect(await f.service.routeRunnerResult(f, f.input)).toEqual({ enabled: false });
+    expect((await db.select().from(runnerRecoveryResults).where(eq(runnerRecoveryResults.companyId, f.companyId)))).toEqual([]);
     await db.update(runnerRecoveryPolicies).set({ activatedAt: new Date() }).where(eq(runnerRecoveryPolicies.companyId, f.companyId));
-    await f.service.reevaluateDeferred(f.companyId, f.issueId, "policy_activated"); expect(f.wake).toHaveBeenCalledTimes(1);
+    await f.service.reevaluateDeferred(f.companyId, f.issueId, "policy_activated");
+    expect(f.wake).not.toHaveBeenCalled();
+  });
+  it("never uses a later policy to resume a result retained for a revoked policy", async () => {
+    const f = await fixture();
+    f.guard.mockResolvedValue(false);
+    expect(await f.service.routeRunnerResult(f, f.input)).toMatchObject({ state: "deferred" });
+    const [original] = await db.select().from(runnerRecoveryPolicies).where(eq(runnerRecoveryPolicies.companyId, f.companyId));
+    const { id, ...replacement } = original;
+    await db.update(runnerRecoveryPolicies).set({ revokedAt: new Date() }).where(eq(runnerRecoveryPolicies.id, id));
+    await db.insert(runnerRecoveryPolicies).values({ ...replacement, revision: "8".repeat(64), activatedAt: new Date() });
+    f.guard.mockResolvedValue(true);
+    await f.service.reevaluateDeferred(f.companyId, f.issueId, "policy_activated");
+    expect(await row(f)).toMatchObject({ state: "out_of_policy", reason: "original_policy_unavailable", policyId: id });
+    expect(f.wake).not.toHaveBeenCalled();
+  });
+  it("blocks disabling pending recovery and keeps a routed receipt out of legacy delivery", async () => {
+    const f = await fixture();
+    f.wake.mockImplementation(async result => ({ wakeupRequestId: result.wakeupRequestId! }));
+    const pending = await f.service.routeRunnerResult(f, f.input);
+    expect(pending).toMatchObject({ state: "routing" });
+    const admin = runnerPolicyAdministration(db);
+    const actor = { type: "board", userId: "owner" } as const;
+    await expect(admin.setEnabled(f.companyId, actor, false)).rejects.toThrow("runner_recovery_disable_requires_settlement");
+    expect((await db.select().from(runnerRecoveryCompanySettings)
+      .where(eq(runnerRecoveryCompanySettings.companyId, f.companyId)))[0].runnerPolicyRecovery.enabled).toBe(true);
+    const run = await nativeRun(f);
+    expect(await db.transaction(tx => claimRunnerPolicyRecovery(tx, run, f.trust))).toBe(true);
+    await admin.setEnabled(f.companyId, actor, false);
+    expect(await f.service.routeRunnerResult(f, f.input)).toMatchObject({ enabled: true, state: "routed" });
+    expect(f.wake).toHaveBeenCalledTimes(1);
+  });
+  it("serializes disablement against an in-flight recovery reservation", async () => {
+    const f = await fixture();
+    let reachedGuard!: () => void;
+    let finishGuard!: () => void;
+    const entered = new Promise<void>(resolve => { reachedGuard = resolve; });
+    const release = new Promise<void>(resolve => { finishGuard = resolve; });
+    f.guard.mockImplementationOnce(async () => {
+      reachedGuard();
+      await release;
+      return true;
+    });
+    const result = f.service.routeRunnerResult(f, f.input);
+    // Surface an unexpected early failure without leaving the other promise hanging.
+    await Promise.race([entered, result.then(() => { throw new Error("Reservation did not reach its guard"); })]);
+    const disable = runnerPolicyAdministration(db).setEnabled(f.companyId, { type: "board", userId: "owner" }, false);
+    const refused = expect(disable).rejects.toThrow("runner_recovery_disable_requires_settlement");
+    finishGuard();
+    await expect(result).resolves.toMatchObject({ state: "routing" });
+    await refused;
+    expect(f.wake).toHaveBeenCalledTimes(1);
   });
   it("T22 a policy edit or overlap cannot replay a consumed receipt", async () => {
     const f = await fixture(); f.wake.mockImplementation(async r => ({ wakeupRequestId: r.wakeupRequestId! }));
@@ -217,8 +270,8 @@ const support = await getRecoveryPostgresSupport();
     const f = await fixture();
     const [policy] = await db.select().from(runnerRecoveryPolicies).where(eq(runnerRecoveryPolicies.companyId, f.companyId));
     await db.update(runnerRecoveryPolicies).set({ payload: { ...policy.payload, scope: { issueTreeRootId: f.issueId, profiles: ["different"] } } }).where(eq(runnerRecoveryPolicies.id, policy.id));
-    expect(await f.service.routeRunnerResult(f, f.input)).toMatchObject({ state: "out_of_policy" });
-    expect(await f.service.routeRunnerResult(f, await second(f))).toMatchObject({ state: "out_of_policy" });
+    expect(await f.service.routeRunnerResult(f, f.input)).toEqual({ enabled: false });
+    expect(await f.service.routeRunnerResult(f, await second(f))).toEqual({ enabled: false });
     expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.companyId, f.companyId))).toHaveLength(1);
     expect(f.wake).not.toHaveBeenCalled();
   });
@@ -260,7 +313,8 @@ const support = await getRecoveryPostgresSupport();
     await db.update(issues).set({ parentId: root.id, visibility: "private", privacyRootIssueId: f.issueId }).where(eq(issues.id, f.issueId));
     const [policy] = await db.select().from(runnerRecoveryPolicies).where(eq(runnerRecoveryPolicies.companyId, f.companyId));
     await db.update(runnerRecoveryPolicies).set({ rootIssueId: root.id, payload: { ...policy.payload, scope: { issueTreeRootId: root.id, profiles: ["reviewed"] } } }).where(eq(runnerRecoveryPolicies.id, policy.id));
-    expect(await f.service.routeRunnerResult(f, f.input)).toMatchObject({ state: "deferred", reason: "no_policy" });
+    expect(await f.service.routeRunnerResult(f, f.input)).toEqual({ enabled: false });
+    expect((await db.select().from(runnerRecoveryResults).where(eq(runnerRecoveryResults.companyId, f.companyId)))).toEqual([]);
     expect(f.wake).not.toHaveBeenCalled();
   });
 

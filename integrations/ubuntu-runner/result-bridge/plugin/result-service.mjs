@@ -63,15 +63,12 @@ export class ResultService {
     if (existing && existing.body !== body) throw new Error('runner_result_document_conflict');
     if (!existing) await this.ctx.issues.documents.upsert({ companyId: result.companyId, issueId: issue.id,
       key, title: 'Runner result', format: 'markdown', body });
-    if (envelope && result.status !== 'passed' && typeof this.ctx.issues.routeRunnerResult === 'function') {
+    if (envelope && result.status === 'failed' && typeof this.ctx.issues.routeRunnerResult === 'function') {
       const recovery = await this.ctx.issues.routeRunnerResult(result.companyId, { envelope, jobId, receiptSha256: result.receiptSha256 });
       if (recovery.enabled) {
         // Preserve the existing native wait for a measured unchanged failure.
         // Closed tasks and a new responsible agent retain their current state.
-        if (recovery.state === 'no_new_evidence' && !['done', 'cancelled', 'blocked'].includes(issue.status) &&
-            issue.assigneeAgentId === result.agentId && result.status !== 'unknown') {
-          await this.ctx.issues.update(issue.id, { status: 'blocked' }, result.companyId);
-        }
+        if (recovery.state === 'no_new_evidence') await this.markWaiting(issue, result);
         return this.broker.call('acknowledge', { jobId, receiptSha256: result.receiptSha256,
           disposition: recovery.state === 'routed' ? 'native_continuation' : 'recorded_only' });
       }
@@ -83,7 +80,7 @@ export class ResultService {
       // A repeated failure is a visible native wait, not an in-progress task
       // silently awaiting a callback that we deliberately suppress. The common
       // SDK update service preserves execution/review/session ownership.
-      if (result.status !== 'unknown' && issue.status !== 'blocked') await this.ctx.issues.update(issue.id, { status: 'blocked' }, result.companyId);
+      await this.markWaiting(issue, result);
       return this.broker.call('acknowledge', { jobId, receiptSha256: result.receiptSha256, disposition: 'recorded_only' });
     }
     const wake = await this.ctx.issues.requestWakeup(issue.id, result.companyId, {
@@ -92,6 +89,15 @@ export class ResultService {
     });
     return this.broker.call('acknowledge', { jobId, receiptSha256: result.receiptSha256,
       disposition: 'native_continuation', runId: wake.runId });
+  }
+
+  async markWaiting(issue, result) {
+    if (result.status === 'unknown') return;
+    const current = await this.ctx.issues.get(issue.id, result.companyId);
+    if (!current || current.companyId !== result.companyId || current.projectId !== result.projectId ||
+        current.assigneeAgentId !== result.agentId || !['todo', 'in_progress'].includes(current.status) ||
+        current.executionState?.status === 'pending' || current.executionState?.reviewEscalated === true) return;
+    await this.ctx.issues.update(issue.id, { status: 'blocked' }, result.companyId);
   }
 
   async drain() {

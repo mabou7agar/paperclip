@@ -2,9 +2,11 @@ import pathlib
 import sys
 import tempfile
 import unittest
+import uuid
 from unittest.mock import Mock, patch
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / 'broker'))
 from contracts import Refusal, digest
+from admission import ReviewAdmissionService
 from job_service import JobService
 from repository import JobRepository
 from test_repository import request
@@ -83,6 +85,48 @@ class JobTests(unittest.TestCase):
         second = self.register({**value, 'packetSha256': 'e' * 64})
         self.service.execute(second)
         self.assertEqual(self.repo.get(second)['result']['result']['reusedFromJobId'], first)
+        self.remote.stage.assert_not_called()
+        self.remote.launch.assert_not_called()
+
+    def test_control_packet_pin_rejects_substitutions_before_registration(self):
+        value = {**self.request, 'kind': 'control_checks', 'scopeIssueId': None, 'scopeCommentId': None,
+                 'ackCommentId': None, 'recipe': 'checks-new.py'}
+        fields = {'attachmentId': str(uuid.uuid4()), 'packetSha256': 'b' * 64, 'recipe': 'other-new.py'}
+        self.profile.update(companyId=value['companyId'], projectId=value['projectId'],
+                            taskIds=[value['taskId']], agentId=value['agentId'],
+                            controlPacket={field: value[field] for field in fields})
+        self.service.admission = ReviewAdmissionService(self.native)
+        self.service.schedule = Mock()
+        for field, replacement in fields.items():
+            with self.subTest(field=field), self.assertRaisesRegex(Refusal, 'job_control_packet_mismatch'):
+                self.service.submit({**value, field: replacement})
+        self.assertEqual(self.repo.unfinished(), [])
+        self.service.schedule.assert_not_called()
+        accepted = self.service.submit(value)
+        self.assertEqual(accepted['state'], 'queued')
+        self.assertTrue(self.service.submit({**value, 'sourceRunId': str(uuid.uuid4())})['replayed'])
+        self.service.schedule.assert_called_once_with(accepted['jobId'])
+
+    def test_control_packet_pin_is_rechecked_before_execution(self):
+        value = {**self.request, 'kind': 'control_checks', 'scopeIssueId': None, 'scopeCommentId': None,
+                 'ackCommentId': None, 'recipe': 'checks-new.py'}
+        self.profile.update(companyId=value['companyId'], projectId=value['projectId'],
+                            taskIds=[value['taskId']], agentId=value['agentId'],
+                            controlPacket={'attachmentId': value['attachmentId'], 'packetSha256': 'b' * 64,
+                                           'recipe': value['recipe']})
+        self.service.admission = ReviewAdmissionService(self.native)
+        self.service.source_settled = JobService.source_settled.__get__(self.service)
+        queued = self.register(value)
+        staged = self.register({**value, 'packetSha256': 'c' * 64})
+        self.repo.claim(staged)
+        self.remote.inspect.return_value = {'phase': 'staged'}
+        self.service.execute(staged)
+        self.service.execute(queued)
+        for identity in [queued, staged]:
+            result = self.repo.get(identity)['result']['result']
+            self.assertEqual(result['code'], 'job_control_packet_mismatch')
+            self.assertFalse(result['executionStarted'])
+        self.service.load_packet.assert_not_called()
         self.remote.stage.assert_not_called()
         self.remote.launch.assert_not_called()
 
@@ -224,6 +268,20 @@ class JobTests(unittest.TestCase):
         self.remote.launch.assert_not_called()
         self.native.notify.assert_not_called()
 
+    def test_stale_reviewed_path_is_a_terminal_preexecution_failure(self):
+        self.profile['setupContainment'] = {'required': True}
+        self.remote.readiness.return_value = {'ready': False, 'code': 'reviewed_attempt_already_exists'}
+        identity = self.register()
+        with patch('supervision_policy.SetupOwnership.from_plan'):
+            self.service.execute(identity)
+            self.service.execute(identity)
+        saved = self.repo.get(identity)
+        self.assertEqual(saved['state'], 'terminal')
+        self.assertEqual(saved['result']['result']['code'], 'reviewed_attempt_already_exists')
+        self.assertFalse(saved['result']['result']['executionStarted'])
+        self.remote.readiness.assert_called_once()
+        self.remote.launch.assert_not_called()
+
     def test_invalid_setup_registration_waits_before_staging_or_attempt(self):
         self.profile['setupContainment'] = {'required': True}
         identity = self.register()
@@ -244,3 +302,22 @@ class JobTests(unittest.TestCase):
         self.service.finish(identity, self.request, {**first, 'cleanupComplete': True, 'auditComplete': True})
         self.assertEqual(original['fingerprint'], self.repo.get(identity)['result']['fingerprint'])
         self.assertFalse(self.repo.get(identity)['result']['newEvidence'])
+
+    def test_closed_case_evidence_is_novel_once_without_crediting_changed_categories(self):
+        original = {'status': 'failed', 'kind': 'reviewed_controller', 'steps': [], 'diagnostic': None}
+        first = self.register()
+        self.service.finish(first, self.request, original)
+        old_fingerprint = self.repo.get(first)['result']['fingerprint']
+        statuses = []
+        for index, classification in enumerate(({'stage': 'phase-assertions', 'category': 'OTHER'},
+                {'stage': 'phase-assertions', 'category': 'ASSERTION'}, {'extra': 'invalid'}), start=1):
+            request = {**self.request, 'packetSha256': str(index) * 64}
+            identity = self.register(request)
+            self.service.finish(identity, request, {**original, 'caseFailure': classification})
+            saved = self.repo.get(identity)['result']
+            statuses.append(saved['newEvidence'])
+            if index == 3:
+                self.assertNotIn('caseFailure', saved['result'])
+                self.assertEqual(saved['fingerprint'], old_fingerprint)
+        self.assertEqual(statuses, [True, False, False])
+        self.remote.launch.assert_not_called()

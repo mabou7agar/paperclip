@@ -29,7 +29,7 @@ sys.path.insert(0, str(_HERE))
 from contracts import UUID, canonical, closed_json, closed_diagnostic, digest, require, Refusal, SHA
 from packet import Packet
 from bounded_process import capture
-from evidence import inventory, descriptors, private_bytes, LIMIT
+from evidence import case_failure_summary, inventory, descriptors, private_bytes, LIMIT
 from control_runner import control_checks, reconcile_control
 
 STATE = pathlib.Path('/var/lib/paperclip-ubuntu-runner-results')
@@ -161,17 +161,31 @@ def inspect(identity):
     return {'phase': 'attempted'}
 
 
+def has_execution_record(root):
+    return any(os.path.lexists(root / name) for name in ('attempt.json', 'result.json'))
+
+
 def readiness(identity):
     root = root_for(identity);trusted_root(root)
     plan = read_json(root / 'plan.json', 2 * 1024 * 1024)
     if plan['request']['kind'] != 'reviewed_controller' or not plan['profile'].get('setupContainment'):
         return {'ready': True}
+    if has_execution_record(root):
+        return {'ready': True}
     try:
         from supervision_policy import SetupOwnership
         from ownership_ledger import measurement
         packet = Packet((root / 'packet.tar.gz').read_bytes(), plan['request']['packetSha256'], plan['profile'], privileged=True)
+        assert_fresh_reviewed_paths(plan, packet)
         measurement(SetupOwnership.from_plan(plan, packet), _HERE)
-    except (Refusal, FileNotFoundError, KeyError, ValueError, TypeError):
+    except Refusal as error:
+        if error.code == 'reviewed_attempt_already_exists' and has_execution_record(root):
+            # A concurrent launch may have created its own paths since this
+            # read started. Let the retained identity reach normal inspection.
+            return {'ready': True}
+        return {'ready': False, 'code': error.code if error.code == 'reviewed_attempt_already_exists'
+                else 'setup_readiness_not_accepted'}
+    except (FileNotFoundError, KeyError, ValueError, TypeError):
         return {'ready': False, 'code': 'setup_readiness_not_accepted'}
     return {'ready': True}
 
@@ -201,17 +215,26 @@ def launch(identity):
 
 
 
-def reviewed_controller(root, plan, packet):
-    trial = packet.trial
+def assert_fresh_reviewed_paths(plan, packet):
     owner = pathlib.Path(plan['profile']['authorityRoot'])
     trusted_root(owner)
     for name in ['ownerRoot', 'driverReceiptPath', 'runtimeReceiptRoot', 'externalAuthorityPath',
                  'preexecutionAdmissionPath', 'caseArchivePath']:
-        require(not pathlib.Path(trial[name]).exists(), 'reviewed_attempt_already_exists')
+        require(not os.path.lexists(packet.trial[name]), 'reviewed_attempt_already_exists')
+
+
+def reviewed_preflight(root, plan, packet):
+    assert_fresh_reviewed_paths(plan, packet)
     control = root / 'packet' / packet.directory / 'execute_qualification.py'
     preflight = capture([sys.executable, '-I', '-B', str(control), '--preflight-only'], timeout=40)
     require(preflight['exit'] == 0 and not preflight['timedOut'] and
             not preflight['stdout']['overflow'] and not preflight['stderr']['overflow'], 'reviewed_preflight_failed')
+    assert_fresh_reviewed_paths(plan, packet)
+
+
+def reviewed_controller(root, plan, packet):
+    trial = packet.trial
+    control = root / 'packet' / packet.directory / 'execute_qualification.py'
     # The independently verified native records are written once outside
     # Phase A. None is fabricated from a package's own asserted permission.
     effective_admission = dict(plan['admission']['admission'])
@@ -273,6 +296,15 @@ def controller_result(plan, packet, exit_code):
         # a passing test/feature verdict from an interrupted driver.
         outcome.update(status='failed', cleanupComplete=True, auditComplete=ownership.get('auditComplete') is True,
                        supervisorReceiptSha256=hashlib.sha256(ownership_path.read_bytes()).hexdigest())
+    if outcome['status'] == 'failed' and outcome.get('functionalCasesStarted') is True:
+        try:
+            effective = private_bytes(job_root / 'effective-admission.json', job_root, 128 * 1024)
+            summary = case_failure_summary(packet, driver, plan['jobId'], plan['request']['packetSha256'],
+                                           digest(closed_json(effective)))
+        except (Refusal, ValueError, OSError):
+            summary = None
+        if summary:
+            outcome['caseFailure'] = summary
     outcome['artifacts'] = descriptors(inventory(packet, driver))
     return outcome
 
@@ -295,14 +327,31 @@ def artifact(identity, sha):
 def run(identity):
     root = root_for(identity)
     trusted_root(root)
-    # This exclusive marker is the final defence against repeated systemd/SSH
-    # dispatch. Never remove it, even if the controller never produced a result.
-    try:
-        write_once(root / 'attempt.json', {'jobId': identity, 'startedAt': datetime.datetime.now(datetime.timezone.utc).isoformat()})
-    except FileExistsError:
-        return inspect(identity)
-    plan = read_json(root / 'plan.json', 2 * 1024 * 1024)
-    packet = Packet((root / 'packet.tar.gz').read_bytes(), plan['request']['packetSha256'], plan['profile'], privileged=plan['request']['kind'] == 'reviewed_controller')
+    attempt = root / 'attempt.json'
+    result = root / 'result.json'
+    with (root / 'launch.lock').open('a+b') as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if has_execution_record(root):
+            return inspect(identity)
+        plan = read_json(root / 'plan.json', 2 * 1024 * 1024)
+        kind = plan['request']['kind']
+        reviewed = kind == 'reviewed_controller'
+        try:
+            packet = Packet((root / 'packet.tar.gz').read_bytes(), plan['request']['packetSha256'],
+                            plan['profile'], privileged=reviewed)
+            if reviewed:
+                reviewed_preflight(root, plan, packet)
+        except Refusal as error:
+            outcome = {'status': 'failed', 'code': error.code, 'kind': kind, 'executionStarted': False,
+                       'cleanupComplete': True, 'auditComplete': False}
+            write_once(result, outcome)
+            return {'phase': 'terminal', 'result': outcome}
+        # The retained marker fences mutation and controller execution. Read-only
+        # readiness refusals settle durably before the attempt is consumed.
+        try:
+            write_once(attempt, {'jobId': identity, 'startedAt': datetime.datetime.now(datetime.timezone.utc).isoformat()})
+        except FileExistsError:
+            return inspect(identity)
     def cancelled(*_):
         raise InterruptedError('job_cancelled')
     previous = signal.signal(signal.SIGTERM, cancelled)

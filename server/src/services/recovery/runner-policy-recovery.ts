@@ -63,8 +63,24 @@ function publicDisposition(row: ResultRow) {
 /** The only writer to routing state; it has no reference to policy administration. */
 export function runnerPolicyRecovery(db: Db, deps: RunnerRecoveryDependencies) {
   async function routeRunnerResult(ctx: { companyId: string; pluginId: string }, input: { envelope: unknown; jobId: string; receiptSha256: string }, resume = false) {
-    // Off is observationally inert: no intent, recovery action, task mutation or wake.
-    if (!await runnerRecoveryEnabled(db, ctx.companyId)) return { enabled: false as const };
+    if (!await runnerRecoveryEnabled(db, ctx.companyId)) {
+      // A redelivery after disablement still belongs to its durable recovery
+      // receipt if an intent may already have reached native dispatch.
+      const retained = await db.select().from(runnerRecoveryResults).where(and(
+        eq(runnerRecoveryResults.companyId, ctx.companyId), eq(runnerRecoveryResults.pluginId, ctx.pluginId),
+        eq(runnerRecoveryResults.jobId, input.jobId), eq(runnerRecoveryResults.receiptSha256, input.receiptSha256),
+        inArray(runnerRecoveryResults.state, ["routing", "routed"]))).limit(2);
+      if (retained.length > 1 || (retained.length === 1
+        && runnerRecoveryHash(JSON.parse(retained[0].envelopeBytes)) !== runnerRecoveryHash(input.envelope))) {
+        throw new Error("runner_receipt_identity_conflict");
+      }
+      // A pre-existing intent saved by an older release may still need a
+      // protected settlement. Keep its callback pending until it settles.
+      if (retained[0]?.state === "routing") throw new Error("runner_recovery_disable_requires_settlement");
+      return retained.length
+        ? { enabled: true as const, ...publicDisposition(retained[0]) }
+        : { enabled: false as const };
+    }
     const envelopeBytes = JSON.stringify(input.envelope);
     if (Buffer.byteLength(envelopeBytes) > 192 * 1024) throw new Error("runner_envelope_invalid");
     let trust: RunnerTrust | null = null;
@@ -89,15 +105,43 @@ export function runnerPolicyRecovery(db: Db, deps: RunnerRecoveryDependencies) {
     if (trust && (admission.kind !== "admission" || latest.kind !== "result" || latest.sequence < value.sequence ||
       latest.sequence === value.sequence && runnerRecoveryHash(latest) !== runnerRecoveryHash(value))) throw new Error("runner_sequence_invalid");
     const row = await db.transaction(async tx => {
+      // The protected flag writer cannot disable routing during an intent
+      // reservation. Recheck after acquiring its shared transaction lock.
+      const [settings] = await tx.select().from(runnerRecoveryCompanySettings)
+        .where(eq(runnerRecoveryCompanySettings.companyId, ctx.companyId)).for("share");
       const [issue] = await tx.select().from(issues).where(and(eq(issues.id, value.issueId), eq(issues.companyId, ctx.companyId))).for("update");
       if (!issue || issue.projectId !== value.projectId) throw new Error("runner_issue_scope_invalid");
       const [existing] = await tx.select().from(runnerRecoveryResults).where(and(eq(runnerRecoveryResults.companyId, ctx.companyId),
         eq(runnerRecoveryResults.issueId, issue.id), eq(runnerRecoveryResults.jobId, value.jobId), eq(runnerRecoveryResults.receiptSha256, input.receiptSha256))).for("update");
       if (existing && runnerRecoveryHash(JSON.parse(existing.envelopeBytes)) !== runnerRecoveryHash(input.envelope)) throw new Error("runner_receipt_identity_conflict");
+      if (!settings?.runnerPolicyRecovery.enabled) {
+        if (existing?.state === "routing") throw new Error("runner_recovery_disable_requires_settlement");
+        return existing?.state === "routed" ? existing : null;
+      }
       if (existing && (existing.state === "deferred" && !resume || !["ingested", "deferred"].includes(existing.state))) return existing;
+      const policies = await tx.select().from(runnerRecoveryPolicies).where(and(eq(runnerRecoveryPolicies.companyId, ctx.companyId),
+        isNotNull(runnerRecoveryPolicies.activatedAt), isNull(runnerRecoveryPolicies.revokedAt))).orderBy(desc(runnerRecoveryPolicies.activatedAt)).for("update");
+      let matched: typeof runnerRecoveryPolicies.$inferSelect | undefined;
+      let excluded: typeof runnerRecoveryPolicies.$inferSelect | undefined;
+      for (const policy of policies) {
+        if (existing && existing.policyId !== policy.id) continue;
+        const parsed = runnerRecoveryPolicySchema.safeParse(policy.payload);
+        if (!parsed.success || (parsed.data.expiresAt && new Date(parsed.data.expiresAt) <= new Date())
+          || !await inSubtree(tx, ctx.companyId, issue.id, policy.rootIssueId)) continue;
+        if (parsed.data.scope.profiles.includes(data.profile)) {
+          matched = policy;
+          break;
+        }
+        excluded ??= policy;
+      }
+      // Keep the ordinary plugin delivery for unowned work. In particular,
+      // a future policy activation must not pick up an already handled failure.
+      if (!existing && !matched && !excluded) return null;
+      const owner = matched && { policyId: matched.id, policyKey: matched.policyKey, policyRevision: matched.revision };
       const [created] = existing ? [existing] : await tx.insert(runnerRecoveryResults).values({ companyId: ctx.companyId,
         pluginId: ctx.pluginId, issueId: issue.id, jobId: value.jobId, receiptSha256: input.receiptSha256,
-        resultFingerprint: data.fingerprint, sequence: value.sequence, envelopeBytes, envelopeSha256: createHash("sha256").update(envelopeBytes).digest("hex") }).returning();
+        resultFingerprint: data.fingerprint, sequence: value.sequence, envelopeBytes, envelopeSha256: createHash("sha256").update(envelopeBytes).digest("hex"),
+        ...owner }).returning();
       const finish = async (state: string, reason: string, fields: Partial<typeof runnerRecoveryResults.$inferInsert> = {}) => {
         const [result] = await tx.update(runnerRecoveryResults).set({ ...fields, state, reason,
           stateVersion: created.stateVersion + 1, resumeOn: state === "deferred" ? resumable : null, updatedAt: new Date() })
@@ -105,27 +149,14 @@ export function runnerPolicyRecovery(db: Db, deps: RunnerRecoveryDependencies) {
         if (!result) throw new Error("runner_result_state_conflict");
         return result;
       };
-      if (!trust) return finish("deferred", "verification_unavailable");
-      if (latest.sequence > value.sequence) return finish("superseded", "newer_sequence");
-      if (data.status !== "failed" || data.result.cleanupComplete !== true) return finish("not_terminal", "not_terminal");
-      if (data.newEvidence !== true) return finish("no_new_evidence", "no_new_evidence");
-      // Enabling the feature cannot spend a result already delivered by the legacy native path.
-      const priorDelivery = await tx.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
-        eq(agentWakeupRequests.companyId, ctx.companyId), eq(agentWakeupRequests.idempotencyKey, `runner-result:${value.jobId}:${input.receiptSha256}`),
-        sql`${agentWakeupRequests.status} <> 'skipped'`)).limit(1);
-      if (priorDelivery.length) return finish("replay_suppressed", "legacy_result_already_delivered");
-      const policies = await tx.select().from(runnerRecoveryPolicies).where(and(eq(runnerRecoveryPolicies.companyId, ctx.companyId),
-        isNotNull(runnerRecoveryPolicies.activatedAt), isNull(runnerRecoveryPolicies.revokedAt))).orderBy(desc(runnerRecoveryPolicies.activatedAt)).for("update");
-      let matched: typeof runnerRecoveryPolicies.$inferSelect | undefined;
-      let excluded: typeof runnerRecoveryPolicies.$inferSelect | undefined;
-      for (const policy of policies) {
-        const parsed = runnerRecoveryPolicySchema.safeParse(policy.payload);
-        if (parsed.success && (!parsed.data.expiresAt || new Date(parsed.data.expiresAt) > new Date()) &&
-          await inSubtree(tx, ctx.companyId, issue.id, policy.rootIssueId) && !parsed.data.scope.profiles.includes(data.profile)) excluded = policy;
-        if (parsed.success && (!parsed.data.expiresAt || new Date(parsed.data.expiresAt) > new Date()) &&
-          parsed.data.scope.profiles.includes(data.profile) && await inSubtree(tx, ctx.companyId, issue.id, policy.rootIssueId)) { matched = policy; break; }
+      // Only the originally matched policy can release a retained result.
+      if (existing && (!owner || existing.policyId !== owner.policyId || existing.policyRevision !== owner.policyRevision)) {
+        return finish("out_of_policy", "original_policy_unavailable");
       }
       if (!matched && excluded) {
+        if (!trust || latest.sequence > value.sequence || data.status !== "failed" || data.result.cleanupComplete !== true) {
+          return finish("out_of_policy", "out_of_policy");
+        }
         const noticeFingerprint = "runner-policy-scope:" + excluded.policyKey;
         const priorNotice = await tx.select({ id: issueRecoveryActions.id }).from(issueRecoveryActions).where(and(
           eq(issueRecoveryActions.companyId, ctx.companyId), eq(issueRecoveryActions.sourceIssueId, issue.id),
@@ -135,7 +166,16 @@ export function runnerPolicyRecovery(db: Db, deps: RunnerRecoveryDependencies) {
           nextAction: "Lead disposition required: signed runner result is outside the recorded recovery policy", evidence: { policyId: excluded.id, resultId: created.id } }).onConflictDoNothing();
         return finish("out_of_policy", "out_of_policy", { policyId: excluded.id, policyKey: excluded.policyKey, policyRevision: excluded.revision });
       }
-      if (!matched) return finish("deferred", "no_policy");
+      if (!trust) return finish("deferred", "verification_unavailable");
+      if (latest.sequence > value.sequence) return finish("superseded", "newer_sequence");
+      if (data.status !== "failed" || data.result.cleanupComplete !== true) return finish("not_terminal", "not_terminal");
+      if (data.newEvidence !== true) return finish("no_new_evidence", "no_new_evidence");
+      // Enabling the feature cannot spend a result already delivered by the legacy native path.
+      const priorDelivery = await tx.select({ id: agentWakeupRequests.id }).from(agentWakeupRequests).where(and(
+        eq(agentWakeupRequests.companyId, ctx.companyId), eq(agentWakeupRequests.idempotencyKey, `runner-result:${value.jobId}:${input.receiptSha256}`),
+        sql`${agentWakeupRequests.status} <> 'skipped'`)).limit(1);
+      if (priorDelivery.length) return finish("replay_suppressed", "legacy_result_already_delivered");
+      if (!matched) return finish("out_of_policy", "out_of_policy");
       const policy = runnerRecoveryPolicySchema.parse(matched.payload);
       const attribution = { policyId: matched.id, policyKey: matched.policyKey, policyRevision: matched.revision };
       const prior = await tx.select({ fingerprint: runnerRecoveryResults.resultFingerprint }).from(runnerRecoveryResults)
@@ -167,6 +207,7 @@ export function runnerPolicyRecovery(db: Db, deps: RunnerRecoveryDependencies) {
         wakeupRequestId: randomUUID(),
         wakeIdempotencyKey: `runner-recovery:${ctx.companyId}:${issue.id}:${value.jobId}:${input.receiptSha256}` });
     });
+    if (!row || row.state === "out_of_policy") return { enabled: false as const };
     if (row.state === "routing") {
       const wake = await deps.wake(row);
       await db.update(runnerRecoveryResults).set({ wakeupRequestId: wake.wakeupRequestId, updatedAt: new Date() })

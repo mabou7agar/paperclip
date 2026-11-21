@@ -28,6 +28,10 @@ class ReviewAdmissionService:
     def assert_profile(self, job, profile):
         require(job["companyId"] == profile["companyId"] and job["projectId"] == profile["projectId"] and
                 job["taskId"] in profile["taskIds"] and job["agentId"] == profile["agentId"], "job_profile_scope_mismatch")
+        pinned = profile.get("controlPacket")
+        if job["kind"] == "control_checks" and pinned is not None:
+            require(all(job[field] == value for field, value in pinned.items()), "job_control_packet_mismatch")
+
     def binding(self, job, profile):
         self.assert_profile(job, profile)
         issue = self.native.read("/api/issues/" + job["taskId"])
