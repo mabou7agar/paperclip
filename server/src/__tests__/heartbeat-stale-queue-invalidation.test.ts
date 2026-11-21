@@ -1237,7 +1237,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     }, 75_000,
   );
 
-  it.each(["succeeded", "failed"] as const)("automatically promotes one blocking disposition follow-up only after the deciding run succeeds (%s)", async settlement => {
+  it.each(["succeeded", "failed", "forwarded", "passive_note", "other_run", "failed_handoff", "unstarted_handoff", "old_comment", "deleted_comment", "plan_confirmation"] as const)("settles one blocking disposition continuation after the deciding run (%s)", async settlement => {
     const { companyId, agentId } = await seedCompanyAndAgent();
     const [worker] = await db.insert(agents).values({ companyId, name: "Worker", role: "engineer", status: "idle", adapterType: "codex_local" }).returning();
     const [parent] = await db.insert(issues).values({ companyId, title: "Parent", status: "blocked", assigneeAgentId: agentId }).returning();
@@ -1247,7 +1247,9 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, source.runId));
     const [card] = await db.insert(issueThreadInteractions).values({ companyId, issueId: parent.id, kind: "request_confirmation",
       createdByAgentId: worker.id, addresseeAgentId: agentId, sourceRunId: source.runId, effectiveResolverPolicy: "not_creator",
-      continuationPolicy: "wake_assignee", payload: { version: 1, prompt: "Decide and route the saved source" } }).returning();
+      continuationPolicy: "wake_assignee", payload: { version: 1, prompt: "Decide and route the saved source",
+        ...(settlement === "plan_confirmation" ? { target: { type: "issue_document", key: "plan", revisionId: randomUUID() } } : {}),
+      } }).returning();
     let release!: () => void;
     const held = new Promise<void>(resolve => { release = resolve; });
     let calls = 0;
@@ -1277,15 +1279,53 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       expect(saved).toMatchObject({ status: "deferred_issue_execution", runId: null });
       expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, request.idempotencyKey))).toHaveLength(1);
       expect(calls).toBe(1);
+      let handoff: { commentId: string; wakeId: string } | null = null;
+      if (settlement !== "succeeded" && settlement !== "failed") {
+        const [comment] = await db.insert(issueComments).values({
+          companyId, issueId: child.id, authorType: "agent", authorAgentId: agentId,
+          createdByRunId: settlement === "other_run" ? source.runId : decision!.id,
+          body: "Continue from the saved decision",
+          ...(settlement === "old_comment" ? { createdAt: new Date(0) } : {}),
+          ...(settlement === "deleted_comment" ? { deletedAt: new Date() } : {}),
+        }).returning();
+        const [wake] = await db.insert(agentWakeupRequests).values({
+          companyId, agentId: worker.id, reason: "issue_commented", source: "automation",
+          requestedByActorType: "agent", requestedByActorId: agentId,
+          status: settlement === "failed_handoff" ? "failed" :
+            settlement === "unstarted_handoff" ? "queued" : "completed",
+          payload: { issueId: child.id, commentId: comment.id, resumeIntent: settlement !== "passive_note",
+            _paperclipWakeContext: { source: "issue.comment" } },
+        }).returning();
+        const [workerRun] = await db.insert(heartbeatRuns).values({
+          companyId, agentId: worker.id, issueId: child.id, invocationSource: "automation",
+          status: settlement === "unstarted_handoff" ? "queued" : "succeeded",
+          startedAt: settlement === "unstarted_handoff" ? null : new Date(),
+          wakeupRequestId: wake.id,
+        }).returning();
+        await db.update(agentWakeupRequests).set({ runId: workerRun.id }).where(eq(agentWakeupRequests.id, wake.id));
+        if (settlement === "unstarted_handoff") {
+          // This is a competing delivery, not part of the parent run's work.
+          await db.update(agents).set({ status: "paused" }).where(eq(agents.id, worker.id));
+        }
+        handoff = { commentId: comment.id, wakeId: wake.id };
+      }
       release();
       await heartbeat.waitForRunExecutionDrain(decision!.id, { timeoutMs: 30_000 });
-      if (settlement === "failed") {
+      if (settlement === "failed" || settlement === "forwarded") {
         expect(await waitForCondition(async () => {
           const [receipt] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, saved!.id));
-          return receipt?.status === "skipped";
+          return receipt?.status === (settlement === "forwarded" ? "completed" : "skipped");
         }, 30_000)).toBe(true);
         const [receipt] = await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, saved!.id));
-        expect(await heartbeat.getRun(receipt!.runId!)).toMatchObject({ status: "cancelled", startedAt: null, errorCode: "issue_dependencies_blocked" });
+        const run = await heartbeat.getRun(receipt!.runId!);
+        expect(run).toMatchObject({ status: "cancelled", startedAt: null,
+          errorCode: settlement === "forwarded" ? "blocking_disposition_already_forwarded" : "issue_dependencies_blocked" });
+        if (settlement === "forwarded") {
+          expect(run?.resultJson).toMatchObject({ blockingDispositionHandoff: handoff });
+          await heartbeat.wakeup(agentId, request);
+          await heartbeat.resumeQueuedRuns();
+          expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.idempotencyKey, request.idempotencyKey))).toHaveLength(1);
+        }
         expect(calls).toBe(1);
         return;
       }

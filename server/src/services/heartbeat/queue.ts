@@ -2,7 +2,7 @@ import { claimRunnerPolicyRecovery } from "../recovery/runner-policy-claim.js";
 import { loadRunnerPolicyTrust } from "../recovery/runner-policy-trust.js";
 import { pendingAddressedInteractionReceiptSql } from "../../repositories/addressed-interactions.js";
 import { completionReceiptSourceReady, taskCompletionReceiptState, TASK_COMPLETION_RECEIPT_REASON } from "../task-completion-receipts.js";
-import { addressedInteractionWakeState, addressedInteractionWakeAlreadyConsumed, blockingDispositionContinuationAllowed } from "../addressed-interaction-wake.js";
+import { addressedInteractionWakeState, addressedInteractionWakeAlreadyConsumed, blockingDispositionContinuationAllowed, readSettledBlockingDispositionContinuation } from "../addressed-interaction-wake.js";
 import { assertPluginWakeupReceipt, isPluginWakeupReceiptCollision } from "../plugin-wakeup-receipts.js";
 import { monitoringService } from "../monitoring.js";
 import { verifyBlockerStallWake } from "../recovery/blocker-stall-wakeups.js";
@@ -1094,6 +1094,27 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
       );
       const readiness = dependencyReadiness.get(issueId);
       const unresolvedBlockerCount = readiness?.unresolvedBlockerCount ?? 0;
+      const disposition = unresolvedBlockerCount > 0
+        ? await readSettledBlockingDispositionContinuation(db, {
+          companyId: run.companyId, issueId, agentId: run.agentId, contextSnapshot: context,
+        })
+        : null;
+      if (disposition?.handoff) {
+        const now = new Date();
+        const reason = "The deciding run already delivered the handoff to the source task";
+        const cancelled = await setRunStatus(run.id, "cancelled", {
+          finishedAt: now, error: reason, errorCode: "blocking_disposition_already_forwarded",
+          resultJson: { ...parseObject(run.resultJson), blockingDispositionHandoff: disposition.handoff },
+        });
+        if (cancelled) {
+          // Keep the interaction idempotency fence. The handoff consumed this receipt.
+          await setWakeupStatus(run.wakeupRequestId, "completed", { finishedAt: now });
+          await releaseIssueExecutionAndPromote(cancelled, {
+            suppressImmediateRecovery: true, deferredPostCommitEffects,
+          });
+        }
+        return null;
+      }
       // The run's wake request records who asked for it.
       const blockerStallVerified = unresolvedBlockerCount > 0 && await verifyBlockerStallWake(db, {
         companyId: run.companyId, issueId, contextSnapshot: context,
@@ -1113,9 +1134,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           companyId: run.companyId, issueId, agentId: run.agentId, contextSnapshot: context,
           excludeTaskOwnerAndCreator: true,
           allowTaskOwnerFromBlockingSource: true,
-        }) !== "pending" && !await blockingDispositionContinuationAllowed(db, {
-          companyId: run.companyId, issueId, agentId: run.agentId, contextSnapshot: context, requireSettledDecision: true,
-        })
+        }) !== "pending" && !disposition
       ) {
         await cancelQueuedRunForBlockedDependencies(
           run,

@@ -2710,6 +2710,9 @@ function renderPaperclipWakePromptBody(
     lines.push(
       "- execution scope: respond or triage the human comment; do not treat blocker-dependent deliverable work as unblocked",
     );
+    if (normalized.reason === "interaction_pending" && normalized.interactionKind === "request_confirmation" && normalized.sourceRunId) {
+      lines.push(`- addressed confirmation: record the decision first. If it accepts a technical handoff and already authorizes a next action on the original blocker, deliver that action in this run with an ordinary comment on the source task and resume: true. Use the original source run (${normalized.sourceRunId}) to identify the task. Preserve every approval and dependency hold. If the handoff cannot be delivered, leave the existing continuation in place.`);
+    }
     if (normalized.interactionKind === "request_confirmation" &&
         (normalized.interactionStatus === "accepted" || normalized.interactionStatus === "rejected")) {
       lines.push("- resolved decision follow-up: consolidate the saved decision and route its required next step to the responsible task or worker; all existing approval, access and dependency holds remain; do not rerun completed work or start blocked implementation");

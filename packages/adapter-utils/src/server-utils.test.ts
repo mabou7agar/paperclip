@@ -2964,6 +2964,19 @@ describe("renderPaperclipWakePrompt", () => {
     expect(prompt).toContain("PAP-1723 Finish blocker (todo)");
   });
 
+  it("guides an addressed deciding run to deliver its authorized blocker handoff directly", () => {
+    const prompt = renderPaperclipWakePrompt({
+      reason: "interaction_pending", dependencyBlockedInteraction: true,
+      interactionKind: "request_confirmation", sourceRunId: "source-run",
+      issue: { id: "parent", title: "Decision requested", status: "blocked" },
+    });
+    expect(prompt).toContain("record the decision first");
+    expect(prompt).toContain("original blocker");
+    expect(prompt).toContain("original source run (source-run)");
+    expect(prompt).toContain("resume: true");
+    expect(prompt).toContain("leave the existing continuation in place");
+  });
+
   it("keeps a resolved blocked disposition limited to decision and handoff", () => {
     const prompt = renderPaperclipWakePrompt({ reason: "issue_commented", dependencyBlockedInteraction: true,
       interactionKind: "request_confirmation", interactionStatus: "accepted",
