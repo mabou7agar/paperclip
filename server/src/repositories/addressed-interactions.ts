@@ -1,5 +1,6 @@
-import { and, eq, isNull, ne, or, sql } from "drizzle-orm";
-import { agentWakeupRequests, heartbeatRuns, issues, issueThreadInteractions, type Db } from "@paperclipai/db";
+import { and, eq, gte, inArray, isNotNull, isNull, ne, or, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
+import { agentWakeupRequests, heartbeatRuns, issueComments, issues, issueThreadInteractions, type Db } from "@paperclipai/db";
 
 export function findAddressedInteraction(db: Db, input: {
   companyId: string; issueId: string; agentId: string; interactionId: string;
@@ -64,7 +65,8 @@ export async function hasConsumedAddressedInteractionWake(db: Db, input: {
     ne(agentWakeupRequests.status, "skipped"),
     or(and(eq(agentWakeupRequests.status, "deferred_issue_execution"), isNull(agentWakeupRequests.runId)),
       sql`${heartbeatRuns.startedAt} is not null`,
-      sql`${heartbeatRuns.status} in ('queued', 'scheduled_retry')`),
+      sql`${heartbeatRuns.status} in ('queued', 'scheduled_retry')`,
+      and(eq(agentWakeupRequests.status, "completed"), eq(heartbeatRuns.errorCode, "blocking_disposition_already_forwarded"))),
   )).limit(1);
   return Boolean(receipt);
 }
@@ -86,6 +88,58 @@ export async function hasAddressedOwnerDispositionRun(db: Db, input: {
     sql`${heartbeatRuns.contextSnapshot}->>'dependencyBlockedInteraction' = 'true'`,
   )).limit(1);
   return Boolean(run);
+}
+
+/** An explicit resume delivered to the original blocker by the deciding run. */
+export async function findDeliveredBlockingDispositionHandoff(db: Db, input: {
+  companyId: string;
+  sourceRunId: string;
+  decidingRunId: string;
+  decidingAgentId: string;
+  resolvedAt: Date;
+}) {
+  const deliveredRun = alias(heartbeatRuns, "delivered_blocking_disposition_run");
+  const [receipt] = await db.select({ commentId: issueComments.id, wakeId: agentWakeupRequests.id })
+    .from(heartbeatRuns)
+    .innerJoin(issues, and(
+      eq(issues.id, heartbeatRuns.issueId),
+      eq(issues.companyId, heartbeatRuns.companyId),
+      eq(issues.assigneeAgentId, heartbeatRuns.agentId),
+    ))
+    .innerJoin(issueComments, and(
+      eq(issueComments.issueId, issues.id),
+      eq(issueComments.companyId, issues.companyId),
+      eq(issueComments.authorType, "agent"),
+      eq(issueComments.authorAgentId, input.decidingAgentId),
+      eq(issueComments.createdByRunId, input.decidingRunId),
+      gte(issueComments.createdAt, input.resolvedAt),
+      isNull(issueComments.deletedAt),
+    ))
+    .innerJoin(agentWakeupRequests, and(
+      eq(agentWakeupRequests.companyId, issues.companyId),
+      eq(agentWakeupRequests.agentId, issues.assigneeAgentId),
+      eq(agentWakeupRequests.requestedByActorType, "agent"),
+      eq(agentWakeupRequests.requestedByActorId, input.decidingAgentId),
+      eq(agentWakeupRequests.reason, "issue_commented"),
+      sql`${agentWakeupRequests.payload}->>'commentId' = ${issueComments.id}::text`,
+      sql`${agentWakeupRequests.payload}->>'issueId' = ${issues.id}::text`,
+      sql`${agentWakeupRequests.payload}->'resumeIntent' = 'true'::jsonb`,
+      sql`${agentWakeupRequests.payload}#>>'{_paperclipWakeContext,source}' = 'issue.comment'`,
+      gte(agentWakeupRequests.requestedAt, input.resolvedAt),
+      inArray(agentWakeupRequests.status, ["claimed", "coalesced", "completed"]),
+    ))
+    .innerJoin(deliveredRun, and(
+      eq(deliveredRun.id, agentWakeupRequests.runId),
+      eq(deliveredRun.companyId, issues.companyId),
+      eq(deliveredRun.agentId, issues.assigneeAgentId),
+      eq(deliveredRun.issueId, issues.id),
+      inArray(deliveredRun.status, ["running", "succeeded"]),
+      isNotNull(deliveredRun.startedAt),
+      gte(deliveredRun.startedAt, issueComments.createdAt),
+    ))
+    .where(and(eq(heartbeatRuns.id, input.sourceRunId), eq(heartbeatRuns.companyId, input.companyId)))
+    .limit(1);
+  return receipt ?? null;
 }
 
 export const pendingAddressedInteractionReceiptSql = sql<boolean>`exists (

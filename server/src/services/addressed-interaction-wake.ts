@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { Db } from "@paperclipai/db";
-import { findAddressedInteraction, hasConsumedAddressedInteractionWake, hasAddressedOwnerDispositionRun } from "../repositories/addressed-interactions.js";
+import { requestConfirmationPayloadSchema } from "@paperclipai/shared";
+import { findAddressedInteraction, findDeliveredBlockingDispositionHandoff, hasConsumedAddressedInteractionWake, hasAddressedOwnerDispositionRun } from "../repositories/addressed-interactions.js";
 import { issueThreadInteractionAttentionAgentAllowed } from "./issue-thread-interaction-resolution.js";
 
 export function isAddressedInteractionWakeContext(context: Record<string, unknown>): boolean {
@@ -71,6 +72,26 @@ async function readBlockingDispositionContinuation(db: Db, input: AddressedWakeI
 
 export async function blockingDispositionContinuationAllowed(db: Db, input: AddressedWakeInput): Promise<boolean> {
   return Boolean(await readBlockingDispositionContinuation(db, input));
+}
+
+/** Check after settlement so an in-flight decision cannot consume its fallback. */
+export async function readSettledBlockingDispositionContinuation(db: Db, input: AddressedWakeInput) {
+  const decision = await readBlockingDispositionContinuation(db, { ...input, requireSettledDecision: true });
+  if (!decision) return null;
+  const confirmation = requestConfirmationPayloadSchema.safeParse(decision.payload);
+  const target = confirmation.data?.target;
+  const mayHaveForwarded = decision.status === "accepted" && confirmation.success && !confirmation.data.qualityReview &&
+    (!target || (target.type === "issue_document" && target.key !== "plan"));
+  const handoff = mayHaveForwarded && decision.sourceRunId && decision.resolvedByRunId && decision.resolvedAt
+    ? await findDeliveredBlockingDispositionHandoff(db, {
+      companyId: input.companyId,
+      sourceRunId: decision.sourceRunId,
+      decidingRunId: decision.resolvedByRunId,
+      decidingAgentId: input.agentId,
+      resolvedAt: decision.resolvedAt,
+    })
+    : null;
+  return { handoff };
 }
 
 export async function addressedInteractionWakeAlreadyConsumed(db: Db, input: AddressedWakeInput): Promise<boolean> {
