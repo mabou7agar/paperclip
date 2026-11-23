@@ -71,6 +71,7 @@ import { getHiddenSettings } from "../services/settings-visibility.js";
 import type { StorageService } from "../storage/types.js";
 import { assertBoard, assertCompanyAccess, assertInstanceAdmin, getActorInfo, hasCompanyAccess } from "./authz.js";
 import { COMPANY_IMPORT_ROUTE_PATH } from "./company-import-paths.js";
+import { assertReviewEscalationAgent } from "../services/review-escalation-agent.js";
 
 // A company import can arrive one of two ways on the import + preview routes:
 //   • application/json — the original inline body `{ source, target, ... }`,
@@ -1281,6 +1282,12 @@ export function companyRoutes(db: Db, storage?: StorageService, options?: Compan
               : DEFAULT_FEEDBACK_DATA_SHARING_TERMS_VERSION,
         };
       }
+    }
+
+    // A newly named default review escalation agent must be a usable agent of this company.
+    if (typeof body.defaultReviewEscalationAgentId === "string" &&
+        body.defaultReviewEscalationAgentId !== (existingCompany.defaultReviewEscalationAgentId ?? null)) {
+      await assertReviewEscalationAgent(db, companyId, { reviewEscalationAgentId: body.defaultReviewEscalationAgentId });
     }
 
     const transitionsToArchived =

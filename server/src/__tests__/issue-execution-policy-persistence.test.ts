@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
 import { agents, companies, companyMemberships, createDb, issues } from "@paperclipai/db";
-import { assertReviewEscalationAgent, isReviewEscalationAgentAvailable } from "../services/review-escalation-agent.js";
+import { assertReviewEscalationAgent, isReviewEscalationAgentAvailable, resolveReviewEscalationAgentId } from "../services/review-escalation-agent.js";
 import { buildExecutionPolicy } from "../../../ui/src/lib/issue-execution-policy.ts";
 import { applyIssueExecutionPolicyTransition, normalizeIssueExecutionPolicy } from "../services/issue-execution-policy.js";
 import { issueService } from "../services/issues.js";
@@ -80,6 +80,62 @@ const support = await getEmbeddedPostgresTestSupport();
     // An agent paused after the policy was saved stops being available.
     await db.update(agents).set({ status: "paused" }).where(eq(agents.id, activeId));
     expect(await isReviewEscalationAgentAvailable(db, companyId, named(activeId))).toBe(false);
+  });
+
+  it("resolves the escalation agent from the task, then the company default, and only when it can run", async () => {
+    const companyId = randomUUID(), plainCompanyId = randomUUID();
+    const [defaultAgentId, taskAgentId] = [randomUUID(), randomUUID()];
+    await db.insert(companies).values([
+      { id: companyId, name: "Default fixture", issuePrefix: `D${companyId.slice(0, 6)}` },
+      { id: plainCompanyId, name: "No default", issuePrefix: `N${plainCompanyId.slice(0, 6)}` },
+    ]);
+    await db.insert(agents).values([defaultAgentId, taskAgentId].map((id, index) => ({
+      id, companyId, name: index === 0 ? "CTO" : "Tech Lead", role: "cto", status: "idle", adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    })));
+    const stages = [{ type: "review", participants: [{ type: "user", userId: "board-reviewer" }] }];
+    const unset = normalizeIssueExecutionPolicy({ stages })!;
+    const override = normalizeIssueExecutionPolicy({ stages, reviewEscalationAgentId: taskAgentId })!;
+    const optedOut = normalizeIssueExecutionPolicy({ stages, reviewEscalationAgentId: null })!;
+    expect("reviewEscalationAgentId" in unset).toBe(false);
+    expect(optedOut.reviewEscalationAgentId).toBeNull();
+
+    // A company that has not set a default behaves as before: no agent, straight to the human.
+    expect(await resolveReviewEscalationAgentId(db, companyId, unset)).toBeNull();
+    expect(await resolveReviewEscalationAgentId(db, plainCompanyId, unset)).toBeNull();
+
+    await db.update(companies).set({ defaultReviewEscalationAgentId: defaultAgentId }).where(eq(companies.id, companyId));
+    // The default applies to a task that names none; another company is untouched.
+    expect(await resolveReviewEscalationAgentId(db, companyId, unset)).toBe(defaultAgentId);
+    expect(await resolveReviewEscalationAgentId(db, plainCompanyId, unset)).toBeNull();
+    // The task's own agent wins; an explicit null opts the task out.
+    expect(await resolveReviewEscalationAgentId(db, companyId, override)).toBe(taskAgentId);
+    expect(await resolveReviewEscalationAgentId(db, companyId, optedOut)).toBeNull();
+    // Progress-guarded reviews keep their owner-only escalation.
+    expect(await resolveReviewEscalationAgentId(db, companyId, { ...unset, reviewGuard: { mode: "progress", maxStalledRounds: 2 } as never })).toBeNull();
+    expect(await resolveReviewEscalationAgentId(db, companyId, null)).toBeNull();
+
+    // An unavailable default falls back to the human; so does an unavailable task agent, without borrowing the default.
+    await db.update(agents).set({ status: "paused" }).where(eq(agents.id, defaultAgentId));
+    expect(await resolveReviewEscalationAgentId(db, companyId, unset)).toBeNull();
+    await db.update(agents).set({ status: "idle" }).where(eq(agents.id, defaultAgentId));
+    await db.update(agents).set({ status: "terminated" }).where(eq(agents.id, taskAgentId));
+    expect(await resolveReviewEscalationAgentId(db, companyId, override)).toBeNull();
+
+    // End to end through the transition: the resolved default receives the capped review.
+    const reviewerId = randomUUID(), executorId = randomUUID();
+    const policy = normalizeIssueExecutionPolicy({ stages: [{ type: "review", participants: [{ type: "agent", agentId: reviewerId }] }] })!;
+    const capped = {
+      status: "in_review", assigneeAgentId: reviewerId, assigneeUserId: null, responsibleUserId: "board-owner", executionPolicy: policy,
+      executionState: { status: "pending", currentStageId: policy.stages[0].id, currentStageIndex: 0, currentStageType: "review",
+        currentParticipant: { type: "agent", agentId: reviewerId }, returnAssignee: { type: "agent", agentId: executorId },
+        completedStageIds: [], lastDecisionId: null, lastDecisionOutcome: null, changesRequestedCount: 2 },
+    };
+    const decide = async (company: string) => applyIssueExecutionPolicyTransition({
+      issue: capped as never, policy, reviewEscalationAgentId: await resolveReviewEscalationAgentId(db, company, policy),
+      requestedStatus: "in_progress", requestedAssigneePatch: {}, actor: { agentId: reviewerId }, commentBody: "Round three",
+    });
+    expect((await decide(companyId)).patch).toMatchObject({ status: "in_review", assigneeAgentId: defaultAgentId, assigneeUserId: null });
+    expect((await decide(plainCompanyId)).patch).toMatchObject({ status: "in_review", assigneeAgentId: null, assigneeUserId: "board-owner" });
   });
 
   it("persists progress history and rejects stale concurrent review snapshots under the real row lock", async () => {

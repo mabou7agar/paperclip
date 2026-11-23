@@ -26,6 +26,12 @@ export interface Company {
   budgetMonthlyCents: number;
   spentMonthlyCents: number;
   defaultResponsibleUserId: string | null;
+  /**
+   * Agent that receives a capped review before the responsible human, for
+   * tasks whose execution policy names no escalation agent. Null or absent:
+   * capped reviews go to the human.
+   */
+  defaultReviewEscalationAgentId?: string | null;
   requireBoardApprovalForNewAgents: boolean;
   interactionResolverGovernance: InteractionResolverGovernance;
   feedbackDataSharingEnabled: boolean;

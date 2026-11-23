@@ -92,6 +92,57 @@ async function createApp(actor: Record<string, unknown>) {
   return app;
 }
 
+const mockAssertReviewEscalationAgent = vi.hoisted(() => vi.fn(async () => undefined));
+vi.mock("../services/review-escalation-agent.js", () => ({ assertReviewEscalationAgent: mockAssertReviewEscalationAgent }));
+
+describe("PATCH /api/companies/:companyId default review escalation agent", () => {
+  const agentId = "77777777-7777-4777-8777-777777777777";
+  const board = { type: "board", userId: "user-1", source: "local_implicit", companyIds: ["company-1"], isInstanceAdmin: false };
+
+  beforeEach(() => {
+    vi.resetModules();
+    vi.doUnmock("../routes/companies.js");
+    vi.doUnmock("../routes/authz.js");
+    vi.doUnmock("../middleware/index.js");
+    vi.clearAllMocks();
+    mockAssertReviewEscalationAgent.mockResolvedValue(undefined);
+    mockCompanyService.getById.mockResolvedValue({ ...createCompany(), defaultReviewEscalationAgentId: null });
+    mockCompanyService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({ ...createCompany(), ...patch }));
+  });
+
+  it("saves a usable agent of the company as the default", async () => {
+    const res = await request(await createApp(board)).patch("/api/companies/company-1").send({ defaultReviewEscalationAgentId: agentId });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockAssertReviewEscalationAgent).toHaveBeenCalledWith(expect.anything(), "company-1", { reviewEscalationAgentId: agentId });
+    expect(mockCompanyService.update.mock.calls[0]?.slice(0, 2)).toEqual(["company-1", expect.objectContaining({ defaultReviewEscalationAgentId: agentId })]);
+  });
+
+  it("refuses an agent that is not usable in the company", async () => {
+    const { unprocessable } = await import("../errors.js");
+    mockAssertReviewEscalationAgent.mockRejectedValue(unprocessable("Review escalation agent must be an agent of the task's company",
+      { code: "review_escalation_agent_not_found" }));
+    const res = await request(await createApp(board)).patch("/api/companies/company-1").send({ defaultReviewEscalationAgentId: agentId });
+    expect(res.status, JSON.stringify(res.body)).toBe(422);
+    expect(mockCompanyService.update).not.toHaveBeenCalled();
+  });
+
+  it("clears the default without a lookup", async () => {
+    mockCompanyService.getById.mockResolvedValue({ ...createCompany(), defaultReviewEscalationAgentId: agentId });
+    const res = await request(await createApp(board)).patch("/api/companies/company-1").send({ defaultReviewEscalationAgentId: null });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(mockAssertReviewEscalationAgent).not.toHaveBeenCalled();
+    expect(mockCompanyService.update.mock.calls[0]?.slice(0, 2)).toEqual(["company-1", expect.objectContaining({ defaultReviewEscalationAgentId: null })]);
+  });
+
+  it("does not let an agent set it", async () => {
+    mockAgentService.getById.mockResolvedValue({ id: "agent-1", companyId: "company-1", role: "ceo" });
+    const res = await request(await createApp({ type: "agent", agentId: "agent-1", companyId: "company-1", source: "agent_key", runId: "run-1" }))
+      .patch("/api/companies/company-1").send({ defaultReviewEscalationAgentId: agentId });
+    expect(res.status).toBeGreaterThanOrEqual(400);
+    expect(mockCompanyService.update).not.toHaveBeenCalled();
+  });
+});
+
 describe("PATCH /api/companies/:companyId/branding", () => {
   beforeEach(() => {
     vi.resetModules();

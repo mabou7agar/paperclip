@@ -44,6 +44,7 @@ import { runningProcesses } from "../adapters/index.ts";
 import { createPostgresRunDispatchAdapter } from "../modules/run-dispatch/adapters/postgres.js";
 import { taskInterruptionPresentation } from "../services/task-interruption-presentation.js";
 import { listBlockerParkedWakeups } from "../services/blocker-parked-wakeups.js";
+import { issueService } from "../services/issues.js";
 import { isFamilyTaskAssignee } from "../services/unblock-owner-wake.js";
 
 const mockAdapterExecute = vi.hoisted(() =>
@@ -1168,6 +1169,17 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     expect(run?.errorCode ?? null).toBeNull();
     expect(run?.status).toBe("succeeded");
     expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+
+    // The owner's run acted on a request. It did not take the task: no checkout, no
+    // execution lock, and the assignee and status are as the engineer left them.
+    const after = await db.select({ status: issues.status, assigneeAgentId: issues.assigneeAgentId, checkoutRunId: issues.checkoutRunId,
+      executionRunId: issues.executionRunId }).from(issues).where(eq(issues.id, engineerTaskId)).then((rows) => rows[0]);
+    expect(after).toEqual({ status: "blocked", assigneeAgentId: engineerId, checkoutRunId: null, executionRunId: null });
+    const context = (await db.select({ contextSnapshot: heartbeatRuns.contextSnapshot }).from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, wake!.id)).then((rows) => rows[0]))?.contextSnapshot as Record<string, unknown>;
+    expect(Object.entries(context).filter(([key, value]) => /checkout/i.test(key) && value === true)).toEqual([]);
+    // Nor can it check the task out for itself afterwards.
+    await expect(issueService(db).checkout(engineerTaskId, qaId, ["blocked", "todo", "in_progress"], wake!.id)).rejects.toMatchObject({ status: 409 });
   });
 
   it("does not wake a waiter held by the agent that parked the blocker, or one that is finished", async () => {

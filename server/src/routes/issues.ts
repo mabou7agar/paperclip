@@ -323,7 +323,7 @@ import {
 } from "../services/issue-dependency-wakeups.js";
 import { listBlockerParkedWakeups } from "../services/blocker-parked-wakeups.js";
 import { isFamilyTaskAssignee } from "../services/unblock-owner-wake.js";
-import { assertReviewEscalationAgent, isReviewEscalationAgentAvailable } from "../services/review-escalation-agent.js";
+import { assertReviewEscalationAgent, resolveReviewEscalationAgentId } from "../services/review-escalation-agent.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import {
   executionWorkspaceService as executionWorkspaceServiceDirect,
@@ -10650,6 +10650,10 @@ export function issueRoutes(
               issue: lockedIssue,
               policy: executionPolicy,
               previousPolicy: executionPolicy,
+              reviewEscalationAgentId: lockedIssue.status === "in_review" && executionPolicy?.stages.length
+                ? await resolveReviewEscalationAgentId(db, lockedIssue.companyId, executionPolicy)
+                  .catch((err) => { logger.warn({ err, issueId: lockedIssue.id }, "failed to resolve the review escalation agent"); return null; })
+                : null,
               requestedStatus: sourceIssueStatus,
               requestedAssigneePatch: {},
               actor: {
@@ -14945,10 +14949,12 @@ export function issueRoutes(
         commentBody,
         reviewRequest: reviewRequest === undefined ? undefined : reviewRequest,
         reviewAssessment,
-        // Checked now, not only when saved: a paused or removed agent must not hold a capped review.
-        reviewEscalationAgentAvailable: nextExecutionPolicy?.reviewEscalationAgentId
-          ? await isReviewEscalationAgentAvailable(db, existing.companyId, nextExecutionPolicy)
-          : false,
+        // Resolved now, not only when saved: a paused or removed agent must not receive a capped review.
+        reviewEscalationAgentId: existing.status === "in_review" && nextExecutionPolicy?.stages.length
+          ? await resolveReviewEscalationAgentId(db, existing.companyId, nextExecutionPolicy)
+            // A failed lookup must not block the reviewer's decision; the human receives it.
+            .catch((err) => { logger.warn({ err, issueId: existing.id }, "failed to resolve the review escalation agent"); return null; })
+          : null,
         monitorExplicitlyUpdated:
           req.body.executionPolicy !== undefined && monitorChanged,
       });

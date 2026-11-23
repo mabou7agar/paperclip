@@ -199,10 +199,10 @@ async function createApp(actor?: TestActor) {
   return app;
 }
 
-const mockIsReviewEscalationAgentAvailable = vi.hoisted(() => vi.fn(async () => false));
+const mockResolveReviewEscalationAgentId = vi.hoisted(() => vi.fn(async (): Promise<string | null> => null));
 const mockAssertReviewEscalationAgent = vi.hoisted(() => vi.fn(async () => undefined));
 vi.mock("../services/review-escalation-agent.js", () => ({
-  isReviewEscalationAgentAvailable: mockIsReviewEscalationAgentAvailable,
+  resolveReviewEscalationAgentId: mockResolveReviewEscalationAgentId,
   assertReviewEscalationAgent: mockAssertReviewEscalationAgent,
 }));
 
@@ -458,10 +458,10 @@ describe("issue execution policy routes", () => {
     const reviewer = { type: "agent" as const, agentId: reviewerId, companyId: "company-1", runId: "55555555-5555-4555-8555-555555555555" };
 
     it.each([
-      { name: "hands a capped review to the escalation agent when it can run", available: true, expected: { assigneeAgentId: escalationAgentId, assigneeUserId: null } },
-      { name: "hands a capped review to the human when the escalation agent is missing or paused", available: false, expected: { assigneeAgentId: null, assigneeUserId: "local-board" } },
+      { name: "hands a capped review to the resolved escalation agent", available: true, expected: { assigneeAgentId: escalationAgentId, assigneeUserId: null } },
+      { name: "hands a capped review to the human when no escalation agent resolves", available: false, expected: { assigneeAgentId: null, assigneeUserId: "local-board" } },
     ])("$name", async ({ available, expected }) => {
-      mockIsReviewEscalationAgentAvailable.mockResolvedValue(available);
+      mockResolveReviewEscalationAgentId.mockResolvedValue(available ? escalationAgentId : null);
       mockIssueService.getById.mockResolvedValue(cappedReview);
       mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({ ...cappedReview, ...patch, updatedAt: new Date() }));
 
@@ -471,7 +471,7 @@ describe("issue execution policy routes", () => {
       // This harness does not mock what records a review decision after the
       // update, so the response is not asserted. The saved update is.
       void res;
-      expect(mockIsReviewEscalationAgentAvailable).toHaveBeenCalledWith(expect.anything(), "company-1",
+      expect(mockResolveReviewEscalationAgentId).toHaveBeenCalledWith(expect.anything(), "company-1",
         expect.objectContaining({ reviewEscalationAgentId: escalationAgentId }));
       expect(mockIssueService.update.mock.calls[0]?.[1]).toMatchObject({ status: "in_review", ...expected });
     });

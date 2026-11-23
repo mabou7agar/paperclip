@@ -56,11 +56,12 @@ type TransitionInput = {
   reviewRequest?: IssueExecutionState["reviewRequest"] | null;
   monitorExplicitlyUpdated?: boolean;
   /**
-   * Whether the policy's `reviewEscalationAgentId` names an agent of this
-   * company that can run now. Callers that do not check leave it unset, and
-   * a capped review then goes to the human as it does without the setting.
+   * The agent that receives a capped review before the human, already
+   * resolved by the caller (`resolveReviewEscalationAgentId`): the task's
+   * own setting or the company default, and only when that agent can run
+   * now. Null or unset: a capped review goes to the human.
    */
-  reviewEscalationAgentAvailable?: boolean;
+  reviewEscalationAgentId?: string | null;
   reviewAssessment?: IssueReviewAssessment;
 };
 
@@ -420,7 +421,8 @@ export function normalizeIssueExecutionPolicy(input: unknown): IssueExecutionPol
     ...(authorizationPolicy ? { authorizationPolicy } : {}),
     ...(parsed.data.reviewGuard ? { reviewGuard: parsed.data.reviewGuard } : {}),
     ...(parsed.data.maxReviewRounds != null ? { maxReviewRounds: parsed.data.maxReviewRounds } : {}),
-    ...(parsed.data.reviewEscalationAgentId ? { reviewEscalationAgentId: parsed.data.reviewEscalationAgentId } : {}),
+    // An explicit null is kept: it means "no agent for this task", even when the company has a default.
+    ...(parsed.data.reviewEscalationAgentId !== undefined ? { reviewEscalationAgentId: parsed.data.reviewEscalationAgentId } : {}),
   };
 }
 
@@ -493,8 +495,8 @@ function reviewEscalationUserId(issue: IssueLike): string | null {
  * The optional agent that receives a capped review before the human does.
  * Progress-guarded policies keep their owner-only escalation.
  */
-function reviewEscalationAgent(policy: IssueExecutionPolicy | null): IssueExecutionStagePrincipal | null {
-  const agentId = policy?.reviewGuard ? null : policy?.reviewEscalationAgentId?.trim();
+function reviewEscalationAgent(policy: IssueExecutionPolicy | null, resolvedAgentId: string | null | undefined): IssueExecutionStagePrincipal | null {
+  const agentId = policy?.reviewGuard ? null : resolvedAgentId?.trim();
   return agentId ? { type: "agent", agentId, userId: null } : null;
 }
 
@@ -789,8 +791,11 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
     // own decisions fall through to the participant decision branch below.
     const escalationAgentHold =
       currentParticipant.type === "agent" &&
+      // Read from the saved state, not the current setting: an agent that
+      // was handed the review keeps it if the setting changes or it is paused.
       existingState?.reviewEscalationAgentUsed === true &&
-      principalsEqual(currentParticipant, reviewEscalationAgent(input.policy));
+      !input.policy.reviewGuard &&
+      !stageHasParticipant(activeStage, currentParticipant);
     const escalatedHold =
       (currentParticipant.type === "user" || escalationAgentHold) &&
       !stageHasParticipant(activeStage, currentParticipant) &&
@@ -956,7 +961,7 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
         // The caller confirms the named agent exists and can run; unconfirmed
         // or unavailable falls through to the human. An agent that already
         // reviews this stage is not an independent escalation target.
-        const escalationAgent = input.reviewEscalationAgentAvailable === true ? reviewEscalationAgent(input.policy) : null;
+        const escalationAgent = reviewEscalationAgent(input.policy, input.reviewEscalationAgentId);
         if (!actorIsHuman && limitReached && !escalationAgentDecided && escalationAgent &&
             !existingState.reviewEscalationAgentUsed &&
             !stageHasParticipant(activeStage, escalationAgent) &&

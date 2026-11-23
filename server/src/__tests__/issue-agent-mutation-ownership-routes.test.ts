@@ -1786,6 +1786,25 @@ describe("agent issue mutation checkout ownership", () => {
     },
   );
 
+  // The agent a blocked task names as its unblock owner is woken on that task. The
+  // wake lets its run start; it does not let it decide the task's status.
+  it.each([
+    ["mark it done", "done"],
+    ["start it", "in_progress"],
+    ["reopen it", "todo"],
+  ])("does not let the named unblock owner %s", async (_label, status) => {
+    mockIssueService.getById.mockResolvedValue(makeIssue({
+      status: "blocked", assigneeAgentId: ownerAgentId,
+      unblockDescriptor: { owner: { agentId: peerAgentId }, action: "Publish the review disposition" },
+    }));
+
+    const res = await request(await createApp(peerActor())).patch(`/api/issues/${issueId}`).send({ status });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(403);
+    expect(res.body.error).toBe("Agent cannot request follow-up for another agent's issue");
+    expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
   it("allows same-company agent mutations on unassigned in-progress issues", async () => {
     mockIssueService.getById.mockResolvedValue(makeIssue({ assigneeAgentId: null }));
     mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({

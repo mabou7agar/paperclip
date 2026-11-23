@@ -1,5 +1,5 @@
 import { and, eq } from "drizzle-orm";
-import { agents, type Db } from "@paperclipai/db";
+import { agents, companies, type Db } from "@paperclipai/db";
 import type { IssueExecutionPolicy } from "@paperclipai/shared";
 import { unprocessable } from "../errors.js";
 
@@ -22,6 +22,28 @@ async function readEscalationAgentStatus(db: Db, companyId: string, policy: Pick
 export async function isReviewEscalationAgentAvailable(db: Db, companyId: string,
   policy: Pick<IssueExecutionPolicy, "reviewEscalationAgentId"> | null | undefined): Promise<boolean> {
   return (await readEscalationAgentStatus(db, companyId, policy))?.invokable === true;
+}
+
+/**
+ * The agent that receives a capped review on this task before the human, or
+ * null when the review goes straight to the human. Every caller that can
+ * record a reviewer's decision resolves it here:
+ * - the task's `reviewEscalationAgentId` when it names an agent;
+ * - no agent when the task sets it to null explicitly;
+ * - otherwise the company's `defaultReviewEscalationAgentId`;
+ * and only when that agent exists in the company and can run now.
+ */
+export async function resolveReviewEscalationAgentId(db: Db, companyId: string,
+  policy: Pick<IssueExecutionPolicy, "reviewEscalationAgentId" | "reviewGuard"> | null | undefined): Promise<string | null> {
+  if (!policy || policy.reviewGuard) return null;
+  let agentId = policy.reviewEscalationAgentId;
+  if (agentId === undefined) {
+    const [company] = await db.select({ agentId: companies.defaultReviewEscalationAgentId }).from(companies)
+      .where(eq(companies.id, companyId)).limit(1);
+    agentId = company?.agentId ?? null;
+  }
+  if (!agentId) return null;
+  return await isReviewEscalationAgentAvailable(db, companyId, { reviewEscalationAgentId: agentId }) ? agentId : null;
 }
 
 /** Refuse saving a policy whose review escalation agent is not a usable agent of this company. */

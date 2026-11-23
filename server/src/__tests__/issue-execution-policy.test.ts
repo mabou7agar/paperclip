@@ -2452,7 +2452,7 @@ describe("review round circuit breaker", () => {
       const result = applyIssueExecutionPolicyTransition({
         issue: pending({}, { changesRequestedCount: 2 }),
         policy: escalationPolicy,
-        reviewEscalationAgentAvailable: true,
+        reviewEscalationAgentId: ctoAgentId,
         requestedStatus: "in_progress",
         requestedAssigneePatch: {},
         actor: { agentId: qaAgentId },
@@ -2525,7 +2525,7 @@ describe("review round circuit breaker", () => {
     it("gives the reviewer fresh rounds after the escalation agent rules, then goes to the human at the next cap", () => {
       const step = (issue: Record<string, unknown>, actorAgentId: string, requestedStatus: string, commentBody: string) => {
         const result = applyIssueExecutionPolicyTransition({
-          issue: issue as never, policy: escalationPolicy, reviewEscalationAgentAvailable: true,
+          issue: issue as never, policy: escalationPolicy, reviewEscalationAgentId: ctoAgentId,
           requestedStatus, requestedAssigneePatch: {}, actor: { agentId: actorAgentId }, commentBody,
         });
         return { result, issue: { ...issue, ...result.patch } };
@@ -2558,13 +2558,13 @@ describe("review round circuit breaker", () => {
     });
 
     it.each([
-      { name: "is reported unavailable (missing, paused or terminated)", available: false },
-      { name: "was not checked by the caller", available: undefined },
-    ])("falls back to the human when the escalation agent $name", ({ available }) => {
+      { name: "is resolved to none (missing, paused, terminated, or disabled for the task)", resolved: null },
+      { name: "was not resolved by the caller", resolved: undefined },
+    ])("falls back to the human when the escalation agent $name", ({ resolved }) => {
       const result = applyIssueExecutionPolicyTransition({
         issue: pending({}, { changesRequestedCount: 2 }),
         policy: escalationPolicy,
-        reviewEscalationAgentAvailable: available,
+        reviewEscalationAgentId: resolved,
         requestedStatus: "in_progress",
         requestedAssigneePatch: {},
         actor: { agentId: qaAgentId },
@@ -2584,7 +2584,7 @@ describe("review round circuit breaker", () => {
       const result = applyIssueExecutionPolicyTransition({
         issue: { ...reviewPendingIssue({}, { currentStageId: sharedPolicy.stages[0].id, changesRequestedCount: 2 }), executionPolicy: sharedPolicy },
         policy: sharedPolicy,
-        reviewEscalationAgentAvailable: true,
+        reviewEscalationAgentId: ctoAgentId,
         requestedStatus: "in_progress",
         requestedAssigneePatch: {},
         actor: { agentId: qaAgentId },

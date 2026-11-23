@@ -142,7 +142,24 @@ Agent reviewers get a bounded number of consecutive changes-requested rounds: `m
 }
 ```
 
-The setting is per task, like the rest of the policy. There is no company-wide default and no settings screen for it.
+**Company default.** A company can name a default escalation agent in `defaultReviewEscalationAgentId`. It is unset by default, and a company that has not set it behaves as before.
+
+| Task policy `reviewEscalationAgentId` | Who receives a capped review first |
+|---|---|
+| an agent id | that agent |
+| not set | the company default, if the company has one |
+| `null` | nobody: straight to the human, whatever the company default |
+
+The same checks apply to the default as to a task's own agent: it must be a usable agent of the company when saved, and at escalation time an agent that cannot run, or is excluded by the rules above, is skipped in favour of the human. A task's unavailable agent does not fall back to the company default.
+
+Set it with the board API; there is no settings screen:
+
+```
+PATCH /api/companies/{companyId}
+{ "defaultReviewEscalationAgentId": "cto-agent-id" }
+```
+
+Only board users can set it. Send `null` to clear it. It is not part of company export or import.
 
 ### Waking agents that wait on a blocked task
 
