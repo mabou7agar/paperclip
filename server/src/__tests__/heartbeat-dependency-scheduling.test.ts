@@ -44,6 +44,7 @@ import { runningProcesses } from "../adapters/index.ts";
 import { createPostgresRunDispatchAdapter } from "../modules/run-dispatch/adapters/postgres.js";
 import { taskInterruptionPresentation } from "../services/task-interruption-presentation.js";
 import { listBlockerParkedWakeups } from "../services/blocker-parked-wakeups.js";
+import { isFamilyTaskAssignee } from "../services/unblock-owner-wake.js";
 
 const mockAdapterExecute = vi.hoisted(() =>
   vi.fn(async () => ({
@@ -902,7 +903,7 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     expect(noActiveRuns).toBe(true);
   });
 
-  async function seedAnsweredQuestionOnBlockedTask(options: { withSourceComment: boolean; interactionStatus?: string }) {
+  async function seedAnsweredQuestionOnBlockedTask(options: { withSourceComment: boolean; interactionStatus?: string; issueStatus?: string }) {
     const companyId = randomUUID(), askerId = randomUUID(), answererId = randomUUID();
     const blockerId = randomUUID(), issueId = randomUUID(), interactionId = randomUUID();
     await db.insert(companies).values({
@@ -917,7 +918,9 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     })));
     await db.insert(issues).values([
       { id: blockerId, companyId, title: "Child waiting for the answer", status: "blocked", priority: "high", responsibleUserId: "responsible-user" },
-      { id: issueId, companyId, title: "Parent that asked", status: "blocked", priority: "high", assigneeAgentId: askerId, responsibleUserId: "responsible-user" },
+      { id: issueId, companyId, title: "Parent that asked", status: options.issueStatus ?? "blocked", priority: "high", assigneeAgentId: askerId, responsibleUserId: "responsible-user",
+        // Already worked on once, so the never-started exception for todo tasks does not apply.
+        startedAt: new Date("2026-11-20T09:00:00.000Z") },
     ]);
     await db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: issueId, type: "blocks" });
     const sourceCommentId = options.withSourceComment ? randomUUID() : null;
@@ -937,7 +940,7 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       result: interactionStatus === "answered" ? { version: 1, answers: [{ questionId: "option", optionIds: ["first"] }] } : null,
     });
     // The same wake the question-response delivery sends to the task assignee.
-    const wake = () => heartbeat.wakeup(askerId, {
+    const wake = (overrides: { idempotencyKey?: string | null } = {}) => heartbeat.wakeup(askerId, {
       source: "automation", triggerDetail: "system", reason: "issue_commented",
       payload: {
         issueId, interactionId, interactionKind: "ask_user_questions", interactionStatus: "answered",
@@ -945,7 +948,7 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
         ...(sourceCommentId ? { wakeCommentId: sourceCommentId, wakeCommentIds: [sourceCommentId] } : {}),
         mutation: "interaction",
       },
-      idempotencyKey: `question-response:${interactionId}`,
+      idempotencyKey: overrides.idempotencyKey === undefined ? `question-response:${interactionId}` : overrides.idempotencyKey,
       requestedByActorType: "agent", requestedByActorId: answererId,
       contextSnapshot: {
         issueId, taskId: issueId, interactionId, interactionKind: "ask_user_questions", interactionStatus: "answered",
@@ -975,6 +978,46 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       dependencyBlockedInteraction: true,
       unresolvedBlockerIssueIds: [seeded.blockerId],
     });
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+  });
+
+  it("runs the assignee of a todo task that waits on blockers when its question is answered", async () => {
+    // The gate at enqueue and claim does not look at the status, so the later checks must agree with it.
+    const seeded = await seedAnsweredQuestionOnBlockedTask({ withSourceComment: false, issueStatus: "todo" });
+    const answeredWake = await seeded.wake();
+    expect(answeredWake).not.toBeNull();
+    await heartbeat.drainActiveRunExecutions();
+    const run = await db.select({ status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode, contextSnapshot: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns).where(eq(heartbeatRuns.id, answeredWake!.id)).then((rows) => rows[0] ?? null);
+    expect(run?.errorCode ?? null).toBeNull();
+    expect(run?.status).toBe("succeeded");
+    expect(run?.contextSnapshot).toMatchObject({ dependencyBlockedInteraction: true });
+    // The task was not started: it still waits on its blocker.
+    const task = await db.select({ status: issues.status, checkoutRunId: issues.checkoutRunId }).from(issues).where(eq(issues.id, seeded.issueId)).then((rows) => rows[0]);
+    expect(task).toMatchObject({ status: "todo", checkoutRunId: null });
+  });
+
+  it("keeps a task the board parked in the backlog idle when its question is answered", async () => {
+    const seeded = await seedAnsweredQuestionOnBlockedTask({ withSourceComment: false, issueStatus: "backlog" });
+    const wake = await seeded.wake();
+    await heartbeat.drainActiveRunExecutions();
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+    if (wake) {
+      const run = await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns).where(eq(heartbeatRuns.id, wake.id)).then((rows) => rows[0]);
+      expect(run?.status).toBe("cancelled");
+    }
+  });
+
+  it("lets an answer pass the blocker gate only under the delivery's own wake key", async () => {
+    const seeded = await seedAnsweredQuestionOnBlockedTask({ withSourceComment: false });
+    // The same context without the key, or under another key, is an ordinary wake on a blocked task.
+    expect(await seeded.wake({ idempotencyKey: null })).toBeNull();
+    expect(await seeded.wake({ idempotencyKey: `question-response:${randomUUID()}` })).toBeNull();
+    await heartbeat.drainActiveRunExecutions();
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+    // The delivery's wake runs, once.
+    expect(await seeded.wake()).not.toBeNull();
+    await heartbeat.drainActiveRunExecutions();
     expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
   });
 
@@ -1069,6 +1112,62 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     expect(second.wakeups).toHaveLength(1);
     expect(second.runs[0]).not.toBeNull();
     expect(mockAdapterExecute).toHaveBeenCalledTimes(2);
+  });
+
+  it("runs the agent a blocked sibling task names as the one who must unblock it", async () => {
+    // Live shape: engineer and QA tasks are siblings under one parent, with no blocks relation.
+    const companyId = randomUUID(), engineerId = randomUUID(), qaId = randomUUID();
+    const parentId = randomUUID(), engineerTaskId = randomUUID(), qaTaskId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId, name: "Sibling hand-off", issuePrefix: `S${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false, defaultResponsibleUserId: "responsible-user",
+    });
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "responsible-user", status: "active", membershipRole: "member" });
+    await db.insert(agents).values([engineerId, qaId].map((id, index) => ({
+      id, companyId, name: index === 0 ? "Backend Engineer" : "QA Engineer", role: index === 0 ? "engineer" : "qa", status: "active",
+      adapterType: "codex_local", adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } }, permissions: {},
+    })));
+    const parkedAt = new Date("2026-11-22T19:31:28.000Z");
+    await db.insert(issues).values([
+      { id: parentId, companyId, title: "Delivery", status: "blocked", priority: "high", responsibleUserId: "responsible-user" },
+      { id: engineerTaskId, companyId, parentId, title: "Correct the package", status: "blocked", blockedTransitionAt: parkedAt, priority: "high",
+        assigneeAgentId: engineerId, responsibleUserId: "responsible-user",
+        unblockDescriptor: { owner: { agentId: qaId }, action: "Publish the review disposition on the QA task." } },
+      { id: qaTaskId, companyId, parentId, title: "Qualify the package", status: "in_review", priority: "high", assigneeAgentId: qaId, responsibleUserId: "responsible-user" },
+    ]);
+    // The engineer may name QA because QA holds a sibling task; an agent outside the family may not be named.
+    const engineerTask = { id: engineerTaskId, parentId };
+    expect(await isFamilyTaskAssignee(db, { companyId, issue: engineerTask, agentId: qaId })).toBe(true);
+    expect(await isFamilyTaskAssignee(db, { companyId, issue: engineerTask, agentId: randomUUID() })).toBe(false);
+    expect(await isFamilyTaskAssignee(db, { companyId, issue: { id: parentId, parentId: null }, agentId: qaId })).toBe(false);
+
+    // A wake that only claims the reason, without the transition's key, is still refused.
+    const forged = await heartbeat.wakeup(qaId, {
+      source: "automation", triggerDetail: "system", reason: "issue_unblock_requested",
+      payload: { issueId: engineerTaskId, action: "x" },
+      contextSnapshot: { wakeReason: "issue_unblock_requested", issueId: engineerTaskId, taskId: engineerTaskId },
+    });
+    await heartbeat.drainActiveRunExecutions();
+    if (forged) {
+      const forgedRun = await db.select({ errorCode: heartbeatRuns.errorCode }).from(heartbeatRuns).where(eq(heartbeatRuns.id, forged.id)).then((rows) => rows[0]);
+      expect(forgedRun?.errorCode).toBe("issue_assignee_changed");
+    }
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+
+    const wake = await heartbeat.wakeup(qaId, {
+      source: "automation", triggerDetail: "system", reason: "issue_unblock_requested",
+      idempotencyKey: `issue-unblock:${engineerTaskId}:${parkedAt.toISOString()}`,
+      payload: { issueId: engineerTaskId, action: "Publish the review disposition on the QA task." },
+      contextSnapshot: { wakeReason: "issue_unblock_requested", issueId: engineerTaskId, taskId: engineerTaskId },
+    });
+    expect(wake).not.toBeNull();
+    await heartbeat.drainActiveRunExecutions();
+    const run = await db.select({ status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode })
+      .from(heartbeatRuns).where(eq(heartbeatRuns.id, wake!.id)).then((rows) => rows[0] ?? null);
+    expect(run?.errorCode ?? null).toBeNull();
+    expect(run?.status).toBe("succeeded");
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
   });
 
   it("does not wake a waiter held by the agent that parked the blocker, or one that is finished", async () => {

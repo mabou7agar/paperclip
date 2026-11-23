@@ -1144,6 +1144,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         // An answer to the assignee's own question still reaches it, once; its scheduled retries do not.
         !(!run.scheduledRetryReason && await isAnsweredQuestionForBlockedTask(db, {
           companyId: run.companyId, issueId, agentId: run.agentId, contextSnapshot: context,
+          idempotencyKey: wakeRequest?.idempotencyKey,
         }))
       ) {
         await cancelQueuedRunForBlockedDependencies(
@@ -4172,6 +4173,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
             }) || await isAnsweredQuestionForBlockedTask(tx as unknown as Db, {
               // An answer to the assignee's own question is the input it waits for.
               companyId: issue.companyId, issueId: issue.id, agentId, contextSnapshot: enrichedContextSnapshot,
+              idempotencyKey: opts.idempotencyKey,
             }));
 
           if (blockedInteractionWake) {

@@ -1,6 +1,6 @@
 /**
- * Wake the assignees waiting on a task whose own worker parked it as `blocked`
- * (`issue_blocker_parked`).
+ * Wake the assignees waiting on a task that was just parked as `blocked`
+ * (`issue_blocker_parked`), whoever parked it.
  *
  * A dependent hears about a blocker when every blocker is done
  * (`issue_blockers_resolved`) or when one stalls on a recovery action that
@@ -64,8 +64,8 @@ async function readParkedBlocker(db: Db, input: { companyId: string; blockerIssu
 /**
  * The wakes owed for the current blocked transition of `blockerIssueId`: one
  * per waiting task that has not been told about this transition yet. A waiter
- * held by the parked task's own assignee is skipped, since that agent made the
- * transition.
+ * held by the parked task's own assignee is skipped: that agent already knows
+ * the task's state.
  */
 export async function listBlockerParkedWakeups(db: Db, input: { companyId: string; blockerIssueId: string }): Promise<BlockerParkedWakeup[]> {
   const blocker = await readParkedBlocker(db, input);

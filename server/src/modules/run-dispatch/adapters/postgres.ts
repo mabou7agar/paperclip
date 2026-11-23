@@ -44,7 +44,8 @@ import { budgetService, budgetServiceInTransaction, recheckAdmittedRunBudgetRead
 import { lockRunBudgetRecoveryOwnerInTransaction, recheckRunBudgetReservationInTransaction } from "../../../services/budget-reservations.js";
 import { isCompletedOnboardingHandoffWake } from "../../../services/chat-completion-delivery.js";
 import { isUnstartedTaskQuestionAnswer } from "../../../services/unstarted-task-question-answer.js";
-import { isAnsweredQuestionForBlockedTask } from "../../../services/blocked-task-question-answer.js";
+import { ANSWERABLE_WAITING_TASK_STATUSES, isAnsweredQuestionForBlockedTask } from "../../../services/blocked-task-question-answer.js";
+import { readRunWakeIdempotencyKey, verifyUnblockOwnerWake } from "../../../services/unblock-owner-wake.js";
 import { isHeartbeatWakeOnDemandEnabled } from "../../../services/heartbeat-policy.js";
 import { notifyChatRunMilestones } from "../../../services/chat-run-milestone-notifications.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "../../../services/delivery-work-notifications.js";
@@ -696,15 +697,21 @@ export function createPostgresRunDispatchAdapter(
       isResolvedInteractionContinuation,
       isUnstartedTaskQuestionAnswer: Boolean(isResolvedInteractionContinuation && issue?.status === "todo" &&
         await isUnstartedTaskQuestionAnswer(dbOrTx, { companyId: input.companyId, issueId, interactionId: context.interactionId })),
-      // Only a task waiting on unresolved blockers: a task parked as blocked for any other reason stays parked.
-      isBlockedTaskQuestionAnswer: Boolean(isResolvedInteractionContinuation && issue?.status === "blocked" &&
+      // Only a task waiting on unresolved blockers: a task parked for any other reason stays parked.
+      // The statuses match the enqueue and claim gates, which admit the same wake.
+      isBlockedTaskQuestionAnswer: Boolean(isResolvedInteractionContinuation && issue &&
+        ANSWERABLE_WAITING_TASK_STATUSES.includes(issue.status) &&
         !input.scheduledRetryReason &&
-        await isAnsweredQuestionForBlockedTask(dbOrTx as Db, { companyId: input.companyId, issueId, agentId: input.agentId, contextSnapshot: context }) &&
+        await isAnsweredQuestionForBlockedTask(dbOrTx as Db, { companyId: input.companyId, issueId, agentId: input.agentId, contextSnapshot: context,
+          idempotencyKey: await readRunWakeIdempotencyKey(dbOrTx as Db, { companyId: input.companyId, runId: input.runId }) }) &&
         (await issueService(dbOrTx).listDependencyReadiness(input.companyId, [issueId])).get(issueId)?.isDependencyReady === false),
       isConnectionContinuation: (isResolvedInteractionContinuation && context.interactionKind === "connection_intent")
         || context.source === "connection_tools.refreshed",
       isInteractionWake,
       isAuthorizedSourceScopedRecovery,
+      isUnblockOwnerWake: Boolean(issue && issue.assigneeAgentId !== input.agentId && wakeReason === "issue_unblock_requested" &&
+        await verifyUnblockOwnerWake(dbOrTx as Db, { companyId: input.companyId, issueId, agentId: input.agentId, contextSnapshot: context,
+          idempotencyKey: await readRunWakeIdempotencyKey(dbOrTx as Db, { companyId: input.companyId, runId: input.runId }) })),
       isNonAssigneeWorkspaceBusyRetry: isNonAssigneeWorkspaceBusyRetry(retryReason, context),
       resumeIntent,
       wakeCommentIdPresent: Boolean(wakeCommentId),

@@ -460,12 +460,18 @@ describe("decideQueuedRunStaleness", () => {
       isResolvedInteractionContinuation: true,
       issueStatus: "blocked",
     }, NOW)).toMatchObject({ stale: true, errorCode: "issue_not_in_progress" });
-    // The verified answer excuses only the blocked status it was verified for.
+    // A todo task waiting on blockers is covered too; one the board parked in the backlog is not.
     expect(decideQueuedRunStaleness({
       ...baseStalenessFacts(),
       isResolvedInteractionContinuation: true,
       isBlockedTaskQuestionAnswer: true,
       issueStatus: "todo",
+    }, NOW)).toEqual({ stale: false });
+    expect(decideQueuedRunStaleness({
+      ...baseStalenessFacts(),
+      isResolvedInteractionContinuation: true,
+      isBlockedTaskQuestionAnswer: true,
+      issueStatus: "backlog",
     }, NOW)).toMatchObject({ stale: true, errorCode: "issue_not_in_progress" });
   });
 

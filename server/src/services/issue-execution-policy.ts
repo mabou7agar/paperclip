@@ -55,6 +55,12 @@ type TransitionInput = {
   commentBody?: string | null;
   reviewRequest?: IssueExecutionState["reviewRequest"] | null;
   monitorExplicitlyUpdated?: boolean;
+  /**
+   * Whether the policy's `reviewEscalationAgentId` names an agent of this
+   * company that can run now. Callers that do not check leave it unset, and
+   * a capped review then goes to the human as it does without the setting.
+   */
+  reviewEscalationAgentAvailable?: boolean;
   reviewAssessment?: IssueReviewAssessment;
 };
 
@@ -634,12 +640,16 @@ function buildChangesRequestedState(
   previous: IssueExecutionState,
   currentStage: IssueExecutionStage,
   changesRequestedCount: number,
-  /** Set when the deciding reviewer was an escalation target, so the next round returns to a configured reviewer. */
-  nextParticipant?: IssueExecutionStagePrincipal | null,
+  /**
+   * Set when the deciding reviewer was an escalation target, so the next round
+   * returns to a configured reviewer. Null when none is eligible: the next
+   * submission then selects a reviewer the way a first submission does.
+   */
+  replaceParticipant?: { participant: IssueExecutionStagePrincipal | null },
 ): IssueExecutionState {
   return {
     ...previous,
-    ...(nextParticipant ? { currentParticipant: nextParticipant } : {}),
+    ...(replaceParticipant ? { currentParticipant: replaceParticipant.participant } : {}),
     status: CHANGES_REQUESTED_STATUS,
     currentStageId: currentStage.id,
     currentStageType: currentStage.type,
@@ -926,7 +936,11 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
         // Human decisions reset the round counter: the cap exists to stop
         // unattended agent↔agent ping-pong, not to limit human review.
         const actorIsHuman = actor?.type === "user";
-        const nextRounds = actorIsHuman ? 0 : (existingState.changesRequestedCount ?? 0) + 1;
+        // The escalation agent's ruling does the same, once: it was asked to
+        // settle the review, so the reviewer starts a fresh set of rounds. The
+        // agent stays marked as used, so the next cap goes to the human.
+        const escalationAgentDecided = escalationAgentHold;
+        const nextRounds = actorIsHuman || escalationAgentDecided ? 0 : (existingState.changesRequestedCount ?? 0) + 1;
         const progress = input.policy.reviewGuard ? assessReviewProgress({
           state: existingState, stageId: activeStage.id, assessment: input.reviewAssessment, humanDecision: actorIsHuman,
         }) : null;
@@ -939,12 +953,13 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
           ? progress.stalledRounds >= input.policy.reviewGuard!.maxStalledRounds ||
             (input.policy.maxReviewRounds != null && nextRounds >= resolveMaxReviewRounds(input.policy))
           : nextRounds >= resolveMaxReviewRounds(input.policy);
-        // The escalation agent's own decision goes back to the executor: it was
-        // asked to settle the review, and escalating its answer would skip the work.
-        const escalationAgentDecided = escalatedHold && escalationAgentHold;
-        const escalationAgent = reviewEscalationAgent(input.policy);
+        // The caller confirms the named agent exists and can run; unconfirmed
+        // or unavailable falls through to the human. An agent that already
+        // reviews this stage is not an independent escalation target.
+        const escalationAgent = input.reviewEscalationAgentAvailable === true ? reviewEscalationAgent(input.policy) : null;
         if (!actorIsHuman && limitReached && !escalationAgentDecided && escalationAgent &&
             !existingState.reviewEscalationAgentUsed &&
+            !stageHasParticipant(activeStage, escalationAgent) &&
             !principalsEqual(escalationAgent, actor) &&
             !principalsEqual(escalationAgent, existingState.returnAssignee)) {
           // Rounds exhausted: the named agent gets one decision before the human.
@@ -992,8 +1007,8 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
         Object.assign(patch, patchForPrincipal(existingState.returnAssignee));
         // An escalation target is not the stage's reviewer. Once it has decided,
         // the next round belongs to a configured reviewer again.
-        const nextReviewer = stageHasParticipant(activeStage, currentParticipant) ? null
-          : selectStageParticipant(activeStage, { exclude: existingState.returnAssignee });
+        const nextReviewer = stageHasParticipant(activeStage, currentParticipant) ? undefined
+          : { participant: selectStageParticipant(activeStage, { exclude: existingState.returnAssignee }) };
         patch.executionState = buildChangesRequestedState(
           actorIsHuman && reviewState.reviewEscalationAgentUsed ? { ...reviewState, reviewEscalationAgentUsed: false } : reviewState,
           activeStage, nextRounds, nextReviewer);

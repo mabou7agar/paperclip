@@ -2369,6 +2369,38 @@ describe("review round circuit breaker", () => {
       });
     });
 
+    it("does not park the next submission on the human when the stage's only reviewer is the executor", () => {
+      // No other reviewer is eligible, so the human stays recorded; the submission must still not return to them.
+      const soloPolicy = normalizeIssueExecutionPolicy({
+        stages: [{ type: "review", participants: [{ type: "agent", agentId: coderAgentId }] }],
+      })!;
+      const hold = {
+        ...reviewPendingIssue(
+          { assigneeAgentId: null, assigneeUserId: boardUserId },
+          { currentStageId: soloPolicy.stages[0].id, currentParticipant: { type: "user", userId: boardUserId }, changesRequestedCount: 3 },
+        ),
+        executionPolicy: soloPolicy,
+      };
+      const decided = applyIssueExecutionPolicyTransition({
+        issue: hold, policy: soloPolicy, requestedStatus: "in_progress", requestedAssigneePatch: {},
+        actor: { userId: boardUserId }, commentBody: "Human direction",
+      });
+      expect(decided.patch.executionState).toMatchObject({ status: "changes_requested", currentParticipant: null });
+      // It is handled like a first submission to a stage with no eligible reviewer, for either requested status.
+      const submit = (executionState: Record<string, unknown> | null, requestedStatus: string) => () => applyIssueExecutionPolicyTransition({
+        issue: { status: "in_progress", assigneeAgentId: coderAgentId, assigneeUserId: null, responsibleUserId: boardUserId,
+          executionPolicy: soloPolicy, executionState },
+        policy: soloPolicy, requestedStatus, requestedAssigneePatch: {},
+        actor: { agentId: coderAgentId }, commentBody: "Did X",
+      });
+      const afterHuman = decided.patch.executionState as Record<string, unknown>;
+      expect(submit(afterHuman, "in_review")).toThrow("No eligible review participant is configured for this issue");
+      expect(submit(null, "in_review")).toThrow("No eligible review participant is configured for this issue");
+      const closed = submit(afterHuman, "done")();
+      expect(closed.patch.assigneeUserId ?? null).toBeNull();
+      expect(closed.patch.status).not.toBe("in_review");
+    });
+
     it("does not park the next unrelated update on the human again", () => {
       const decided = applyIssueExecutionPolicyTransition({
         issue: humanHold(),
@@ -2420,6 +2452,7 @@ describe("review round circuit breaker", () => {
       const result = applyIssueExecutionPolicyTransition({
         issue: pending({}, { changesRequestedCount: 2 }),
         policy: escalationPolicy,
+        reviewEscalationAgentAvailable: true,
         requestedStatus: "in_progress",
         requestedAssigneePatch: {},
         actor: { agentId: qaAgentId },
@@ -2484,7 +2517,80 @@ describe("review round circuit breaker", () => {
         status: "changes_requested",
         currentParticipant: { type: "agent", agentId: qaAgentId },
         reviewEscalationAgentUsed: true,
+        // The reviewer gets a fresh set of rounds after the escalation agent's ruling.
+        changesRequestedCount: 0,
       });
+    });
+
+    it("gives the reviewer fresh rounds after the escalation agent rules, then goes to the human at the next cap", () => {
+      const step = (issue: Record<string, unknown>, actorAgentId: string, requestedStatus: string, commentBody: string) => {
+        const result = applyIssueExecutionPolicyTransition({
+          issue: issue as never, policy: escalationPolicy, reviewEscalationAgentAvailable: true,
+          requestedStatus, requestedAssigneePatch: {}, actor: { agentId: actorAgentId }, commentBody,
+        });
+        return { result, issue: { ...issue, ...result.patch } };
+      };
+      // Reviewer rejects three times; the third reaches the cap and goes to the escalation agent.
+      let current: Record<string, unknown> = pending();
+      for (const round of [1, 2]) {
+        current = step(current, qaAgentId, "in_progress", `Round ${round}`).issue;
+        current = step(current, coderAgentId, "in_review", `Fix ${round}`).issue;
+      }
+      current = step(current, qaAgentId, "in_progress", "Round 3").issue;
+      expect(current.assigneeAgentId).toBe(ctoAgentId);
+      // The escalation agent requests changes; the executor resubmits to the configured reviewer.
+      current = step(current, ctoAgentId, "in_progress", "Do it this way").issue;
+      expect(current.assigneeAgentId).toBe(coderAgentId);
+      current = step(current, coderAgentId, "in_review", "Did it that way").issue;
+      expect(current.assigneeAgentId).toBe(qaAgentId);
+      // One more rejection returns to the executor, not the human.
+      current = step(current, qaAgentId, "in_progress", "One more thing").issue;
+      expect(current.status).toBe("in_progress");
+      expect(current.assigneeAgentId).toBe(coderAgentId);
+      expect(current.assigneeUserId ?? null).toBeNull();
+      // Two more rejections reach the cap again; the agent was used, so the human gets it.
+      for (const round of [2, 3]) {
+        current = step(current, coderAgentId, "in_review", `Fix again ${round}`).issue;
+        current = step(current, qaAgentId, "in_progress", `Again ${round}`).issue;
+      }
+      expect(current.status).toBe("in_review");
+      expect(current.assigneeUserId).toBe(boardUserId);
+    });
+
+    it.each([
+      { name: "is reported unavailable (missing, paused or terminated)", available: false },
+      { name: "was not checked by the caller", available: undefined },
+    ])("falls back to the human when the escalation agent $name", ({ available }) => {
+      const result = applyIssueExecutionPolicyTransition({
+        issue: pending({}, { changesRequestedCount: 2 }),
+        policy: escalationPolicy,
+        reviewEscalationAgentAvailable: available,
+        requestedStatus: "in_progress",
+        requestedAssigneePatch: {},
+        actor: { agentId: qaAgentId },
+        commentBody: "Round three feedback",
+      });
+      expect(result.patch.assigneeAgentId).toBeNull();
+      expect(result.patch.assigneeUserId).toBe(boardUserId);
+      expect(result.patch.executionState).toMatchObject({ currentParticipant: { type: "user", userId: boardUserId } });
+      expect((result.patch.executionState as { reviewEscalationAgentUsed?: boolean }).reviewEscalationAgentUsed ?? false).toBe(false);
+    });
+
+    it("goes straight to the human when the escalation agent is already a configured reviewer of the stage", () => {
+      const sharedPolicy = normalizeIssueExecutionPolicy({
+        stages: [{ type: "review", participants: [{ type: "agent", agentId: qaAgentId }, { type: "agent", agentId: ctoAgentId }] }],
+        reviewEscalationAgentId: ctoAgentId,
+      })!;
+      const result = applyIssueExecutionPolicyTransition({
+        issue: { ...reviewPendingIssue({}, { currentStageId: sharedPolicy.stages[0].id, changesRequestedCount: 2 }), executionPolicy: sharedPolicy },
+        policy: sharedPolicy,
+        reviewEscalationAgentAvailable: true,
+        requestedStatus: "in_progress",
+        requestedAssigneePatch: {},
+        actor: { agentId: qaAgentId },
+        commentBody: "Round three feedback",
+      });
+      expect(result.patch.assigneeUserId).toBe(boardUserId);
     });
 
     it("falls back to the human when the round cap is hit again after the agent was used", () => {

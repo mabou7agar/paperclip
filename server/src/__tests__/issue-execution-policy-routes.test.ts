@@ -199,6 +199,13 @@ async function createApp(actor?: TestActor) {
   return app;
 }
 
+const mockIsReviewEscalationAgentAvailable = vi.hoisted(() => vi.fn(async () => false));
+const mockAssertReviewEscalationAgent = vi.hoisted(() => vi.fn(async () => undefined));
+vi.mock("../services/review-escalation-agent.js", () => ({
+  isReviewEscalationAgentAvailable: mockIsReviewEscalationAgentAvailable,
+  assertReviewEscalationAgent: mockAssertReviewEscalationAgent,
+}));
+
 describe("issue execution policy routes", () => {
   beforeAll(async () => {
     vi.resetModules();
@@ -425,6 +432,64 @@ describe("issue execution policy routes", () => {
     expect(mockDb.transaction).toHaveBeenCalled();
     expect(mockIssueService.getByIdForUpdate).toHaveBeenCalled();
     expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  describe("review escalation agent", () => {
+    const reviewerId = "33333333-3333-4333-8333-333333333333";
+    const executorId = "44444444-4444-4444-8444-444444444444";
+    const escalationAgentId = "77777777-7777-4777-8777-777777777777";
+    const stageId = "99999999-9999-4999-8999-999999999999";
+    const policy = {
+      mode: "normal", commentRequired: true, reviewEscalationAgentId: escalationAgentId,
+      stages: [{ id: stageId, type: "review", approvalsNeeded: 1,
+        participants: [{ id: "88888888-8888-4888-8888-888888888888", type: "agent", agentId: reviewerId, userId: null }] }],
+    };
+    const cappedReview = {
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", companyId: "company-1", status: "in_review",
+      assigneeAgentId: reviewerId, assigneeUserId: null, createdByUserId: "local-board", responsibleUserId: "local-board",
+      identifier: "PAP-1010", title: "Capped review", executionPolicy: policy,
+      executionState: {
+        status: "pending", currentStageId: stageId, currentStageIndex: 0, currentStageType: "review",
+        currentParticipant: { type: "agent", agentId: reviewerId, userId: null },
+        returnAssignee: { type: "agent", agentId: executorId, userId: null },
+        reviewRequest: null, completedStageIds: [], lastDecisionId: null, lastDecisionOutcome: null, changesRequestedCount: 2,
+      },
+    };
+    const reviewer = { type: "agent" as const, agentId: reviewerId, companyId: "company-1", runId: "55555555-5555-4555-8555-555555555555" };
+
+    it.each([
+      { name: "hands a capped review to the escalation agent when it can run", available: true, expected: { assigneeAgentId: escalationAgentId, assigneeUserId: null } },
+      { name: "hands a capped review to the human when the escalation agent is missing or paused", available: false, expected: { assigneeAgentId: null, assigneeUserId: "local-board" } },
+    ])("$name", async ({ available, expected }) => {
+      mockIsReviewEscalationAgentAvailable.mockResolvedValue(available);
+      mockIssueService.getById.mockResolvedValue(cappedReview);
+      mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({ ...cappedReview, ...patch, updatedAt: new Date() }));
+
+      const res = await request(await createApp(reviewer)).patch(`/api/issues/${cappedReview.id}`)
+        .send({ status: "in_progress", comment: "Round three: still not converging" });
+
+      // This harness does not mock what records a review decision after the
+      // update, so the response is not asserted. The saved update is.
+      void res;
+      expect(mockIsReviewEscalationAgentAvailable).toHaveBeenCalledWith(expect.anything(), "company-1",
+        expect.objectContaining({ reviewEscalationAgentId: escalationAgentId }));
+      expect(mockIssueService.update.mock.calls[0]?.[1]).toMatchObject({ status: "in_review", ...expected });
+    });
+
+    it("refuses to save a policy naming an agent that is not usable in this company", async () => {
+      const { unprocessable } = await import("../errors.js");
+      mockAssertReviewEscalationAgent.mockRejectedValue(unprocessable("Review escalation agent must be an agent of the task's company",
+        { code: "review_escalation_agent_not_found" }));
+      const plain = { ...cappedReview, status: "todo", executionPolicy: null, executionState: null };
+      mockIssueService.getById.mockResolvedValue(plain);
+
+      const res = await request(await createApp({ type: "board", userId: "local-board", companyIds: ["company-1"], source: "local_implicit", isInstanceAdmin: false }))
+        .patch(`/api/issues/${plain.id}`).send({ executionPolicy: policy });
+
+      expect(res.status, JSON.stringify(res.body)).toBe(422);
+      expect(mockAssertReviewEscalationAgent).toHaveBeenCalledWith(expect.anything(), "company-1", { reviewEscalationAgentId: escalationAgentId });
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+    });
   });
 
   it("rejects an agent-authored in_review transition without a review path", async () => {

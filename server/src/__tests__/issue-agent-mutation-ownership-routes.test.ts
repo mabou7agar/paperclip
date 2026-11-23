@@ -316,6 +316,12 @@ function registerRouteMocks() {
   }));
 }
 
+const mockIsFamilyTaskAssignee = vi.hoisted(() => vi.fn(async () => false));
+vi.mock("../services/unblock-owner-wake.js", async () => ({
+  ...await vi.importActual<typeof import("../services/unblock-owner-wake.js")>("../services/unblock-owner-wake.js"),
+  isFamilyTaskAssignee: mockIsFamilyTaskAssignee,
+}));
+
 function makeIssue(overrides: Record<string, unknown> = {}) {
   return {
     id: issueId,
@@ -1810,7 +1816,7 @@ describe("agent issue mutation checkout ownership", () => {
     });
 
     expect(res.status, JSON.stringify(res.body)).toBe(403);
-    expect(res.body.error).toBe("Agents may only name themselves as an unblock owner");
+    expect(res.body.error).toBe("Agents may only name themselves, or the assignee of the parent or a sibling task, as an unblock owner");
     expect(mockIssueService.update).not.toHaveBeenCalled();
   });
 
@@ -1825,8 +1831,36 @@ describe("agent issue mutation checkout ownership", () => {
     });
 
     expect(res.status, JSON.stringify(res.body)).toBe(403);
-    expect(res.body.error).toBe("Agents may only name themselves as an unblock owner");
+    expect(res.body.error).toBe("Agents may only name themselves, or the assignee of the parent or a sibling task, as an unblock owner");
     expect(mockIssueService.update).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: "allows an agent to name the assignee of a sibling or parent task", family: true, status: 200 },
+    { name: "rejects an agent naming an agent outside the task's family", family: false, status: 403 },
+  ])("$name as unblock owner", async ({ family, status }) => {
+    mockIsFamilyTaskAssignee.mockResolvedValue(family);
+    mockIssueService.getById.mockResolvedValue(makeIssue({ status: "in_progress" }));
+    mockIssueService.update.mockImplementation(async (_id: string, patch: Record<string, unknown>) => ({
+      ...makeIssue({ status: "in_progress" }),
+      ...patch,
+    }));
+
+    const res = await request(await createApp(ownerActor())).patch(`/api/issues/${issueId}`).send({
+      status: "blocked",
+      unblockDescriptor: { owner: { agentId: peerAgentId }, action: "Publish the review disposition" },
+    });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(status);
+    expect(mockIsFamilyTaskAssignee).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ agentId: peerAgentId }));
+    if (family) {
+      expect(mockIssueService.update).toHaveBeenCalledWith(issueId, expect.objectContaining({
+        unblockDescriptor: { owner: { agentId: peerAgentId }, action: "Publish the review disposition" },
+      }));
+    } else {
+      expect(res.body.error).toBe("Agents may only name themselves, or the assignee of the parent or a sibling task, as an unblock owner");
+      expect(mockIssueService.update).not.toHaveBeenCalled();
+    }
   });
 
   it("allows a board actor to name the board as unblock owner", async () => {

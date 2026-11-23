@@ -3153,7 +3153,7 @@ function renderPaperclipWakePromptBody(
       "",
       "## Blocker handed back",
       "",
-      `Your blocker ${label} was just set to blocked by its own assignee. It may be waiting for you.`,
+      `Your blocker ${label} was just set to blocked. Whoever set it may be waiting for you.`,
       `Read ${label}'s latest comments first. Then choose one, and stop:`,
       `- Act on the hand-off: do what it asks of you, or answer it with a comment on ${label}.`,
       `- Re-plan: if this task no longer needs ${label}, remove the dependency and continue.`,

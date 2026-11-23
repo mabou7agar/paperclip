@@ -153,12 +153,14 @@ export type QueuedRunFacts = {
   isResolvedInteractionContinuation: boolean;
   /** Verified under the issue lock: an answer to a question no run asked, on a todo task that has never started. */
   isUnstartedTaskQuestionAnswer?: boolean;
-  /** Verified under the issue lock: an answer to the assignee's own question, on a blocked task that still has unresolved blockers. */
+  /** Verified under the issue lock: an answer to the assignee's own question, on a blocked or todo task that still has unresolved blockers. */
   isBlockedTaskQuestionAnswer?: boolean;
   /** A connection resolution or tool refresh can resume an agent waiting in review. */
   isConnectionContinuation?: boolean;
   isInteractionWake: boolean;
   isAuthorizedSourceScopedRecovery: boolean;
+  /** Verified under the issue lock: the blocked task names this agent as its unblock owner for the current blocked transition. */
+  isUnblockOwnerWake?: boolean;
   isNonAssigneeWorkspaceBusyRetry: boolean;
 
   resumeIntent: boolean;
@@ -186,6 +188,7 @@ type OwnershipFacts = {
   completionReceiptWake?: "pending" | "stale" | null;
   isCurrentReviewParticipant?: boolean;
   isAuthorizedSourceScopedRecovery?: boolean;
+  isUnblockOwnerWake?: boolean;
 };
 
 type OwnershipOutcome = "current_owner" | "reassigned";
@@ -201,6 +204,7 @@ function decideIssueOwnership(facts: OwnershipFacts): OwnershipOutcome {
   if (facts.isInteractionWake || facts.addressedInteractionWake === "pending" || facts.completionReceiptWake === "pending") return "current_owner";
   if (facts.isCurrentReviewParticipant) return "current_owner";
   if (facts.isAuthorizedSourceScopedRecovery) return "current_owner";
+  if (facts.isUnblockOwnerWake) return "current_owner";
   return "reassigned";
 }
 
@@ -534,7 +538,7 @@ export function decideQueuedRunStaleness(
     // A todo task that has never started has no parked execution to protect.
     const startsUnstartedTask = facts.issueStatus === "todo" && facts.isUnstartedTaskQuestionAnswer === true;
     // A task waiting on blockers parked itself; the answer it asked for runs one restricted turn.
-    const answersBlockedTask = facts.issueStatus === "blocked" && facts.isBlockedTaskQuestionAnswer === true;
+    const answersBlockedTask = (facts.issueStatus === "blocked" || facts.issueStatus === "todo") && facts.isBlockedTaskQuestionAnswer === true;
     const earlyStatus = decideIssueStatus({
       status: facts.issueStatus,
       requiresInProgress: facts.issueStatus !== "in_review" && !startsUnstartedTask && !answersBlockedTask,
@@ -614,6 +618,7 @@ export function decideQueuedRunStaleness(
       facts.reviewParticipant.participantIsAgent &&
       facts.reviewParticipant.participantAgentId === facts.runAgentId,
     isAuthorizedSourceScopedRecovery: facts.isAuthorizedSourceScopedRecovery,
+    isUnblockOwnerWake: facts.isUnblockOwnerWake,
   });
   if (ownership === "reassigned") {
     return {

@@ -9,6 +9,7 @@ import type { StopInvocationOptions } from "./heartbeat/run-control.js";
 import { isContextCompactionRun } from "./context-compaction.js";
 import { isUnstartedTaskQuestionAnswer } from "./unstarted-task-question-answer.js";
 import { isAnsweredQuestionForBlockedTask } from "./blocked-task-question-answer.js";
+import { readRunWakeIdempotencyKey } from "./unblock-owner-wake.js";
 import { registerDeferredReceiptWork } from "./heartbeat/deferred-receipt-work.js";
 import { reconcileTaskChatRetryReceipts } from "./task-retry.js";
 import { registerIssueRecoveryWork } from "./recovery/work.js";
@@ -2301,7 +2302,8 @@ export function heartbeatService(
       // It never checks the task out: the dependency is not satisfied.
       const answersBlockedTask = Boolean(issueId && issueContext &&
         issueDependencyReadiness?.isDependencyReady === false &&
-        await isAnsweredQuestionForBlockedTask(db, { companyId: agent.companyId, issueId, agentId: agent.id, contextSnapshot: context }));
+        await isAnsweredQuestionForBlockedTask(db, { companyId: agent.companyId, issueId, agentId: agent.id, contextSnapshot: context,
+          idempotencyKey: await readRunWakeIdempotencyKey(db, { companyId: agent.companyId, runId: run.id }) }));
       if (
         issueId &&
         issueContext &&

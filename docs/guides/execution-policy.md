@@ -129,7 +129,8 @@ interface IssueExecutionDecision {
 Agent reviewers get a bounded number of consecutive changes-requested rounds: `maxReviewRounds`, default 3. When an agent reviewer hits the cap, the stage stays `pending` and is handed to an escalation target instead of going back to the executor.
 
 - **Default:** the target is the task's responsible human, or its human creator. Only that person can advance the stage while it is held.
-- **Optional first target:** set `executionPolicy.reviewEscalationAgentId` to an agent (for example the CTO). That agent receives the capped review first and gets one decision per cycle. If it approves, the stage completes. If it requests changes, the work returns to the executor; if agent reviewers then hit the cap again, the review goes to the human. The setting is unset by default, ignored when `reviewGuard` is set, and skipped when the named agent is the reviewer who hit the cap or the executor whose work is under review.
+- **Optional first target:** set `executionPolicy.reviewEscalationAgentId` to an agent (for example the CTO). That agent receives the capped review first and gets one decision per cycle. If it approves, the stage completes. If it requests changes, the work returns to the executor and the reviewer gets a fresh set of rounds; if the reviewer hits the cap again, the review goes to the human. The setting is unset by default and ignored when `reviewGuard` is set.
+- **When the named agent cannot take it:** the review goes to the human, exactly as without the setting. That covers an agent that is missing, paused, terminated or awaiting approval at that moment, one that is the reviewer who hit the cap, the executor under review, or already a configured reviewer of the stage. Saving a policy that names an agent outside the company, or one that is paused or terminated, is refused with `422`.
 - **After the escalation target decides:** a human decision resets the round counter. Whoever decided, the next submission goes back to the stage's configured reviewer, not to the escalation target.
 
 ```json
@@ -149,7 +150,18 @@ A task with unresolved blockers stays idle for automatic wakes and scheduled ret
 
 - a comment on the task;
 - an answer to a question the assignee asked on the task (the answer wakes the assignee once per question);
-- a blocker that its own assignee sets to `blocked` (`issue_blocker_parked`, once per blocked transition). This covers a worker that finishes its part, leaves a hand-off comment and waits. Only tasks linked with a `blocks` relation are woken; a parent without that relation is not.
+- a blocker that is set to `blocked` (`issue_blocker_parked`, once per blocked transition). Only tasks linked with a `blocks` relation are woken.
+
+The answer rule applies to a `blocked` or `todo` task (and to one already `in_progress` or `in_review`), never to one the board parked in `backlog`.
+
+### Handing work to a sibling's or the parent's assignee
+
+The platform cannot tell who a hand-off is for from a comment. A worker that blocks its task has two ways to say it:
+
+- `blockedByIssueIds`: the task it waits on. Its assignee is woken when that task is done.
+- `unblockDescriptor.owner`: the agent who must act next. That agent is woken on the blocked task with the descriptor's `action`. An agent may name itself, or the agent assigned the parent or a sibling task.
+
+A descriptor that names the worker itself, with the other task mentioned only in prose, wakes nobody else.
 
 ### Policy Variants
 
