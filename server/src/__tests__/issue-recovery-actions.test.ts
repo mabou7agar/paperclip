@@ -13,6 +13,7 @@ import {
   agents,
   agentRuntimeState,
   authUsers,
+  companyMemberships,
   agentWakeupRequests,
   activityLog,
   caseHandoffs,
@@ -3026,6 +3027,80 @@ describeEmbeddedPostgres("issue recovery actions", () => {
       resolutionNote: "Try the source issue again.",
     });
     expect(await recoveryActionSvc.getActiveForIssue(companyId, sourceIssueId)).toBeNull();
+  });
+
+  it.each([
+    { name: "to the company's default escalation agent when one is set", withDefault: true },
+    { name: "to the responsible human when the company has no default", withDefault: false },
+  ])("hands a review capped through recovery resolution $name", async ({ withDefault }) => {
+    // A reviewer who resolves a recovery action with a non-done status records
+    // changes requested. At the round cap that decision must escalate the same
+    // way it does through the ordinary task update.
+    const { companyId, managerId, coderId, sourceIssueId } = await seedCompany();
+    const reviewerId = randomUUID();
+    const stageId = randomUUID();
+    const ownerUserId = randomUUID();
+    await db.insert(authUsers).values({
+      id: ownerUserId, name: "Task owner", email: `${ownerUserId}@example.test`, emailVerified: true,
+      createdAt: new Date(), updatedAt: new Date(),
+    });
+    // The human fallback must be someone the task can be assigned to: an active member.
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: ownerUserId, status: "active", membershipRole: "member" });
+    await db.insert(agents).values({
+      id: reviewerId, companyId, name: "QA Engineer", role: "qa", status: "idle",
+      adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    });
+    if (withDefault) {
+      await db.update(companies).set({ defaultReviewEscalationAgentId: managerId }).where(eq(companies.id, companyId));
+    }
+    await db.update(issues).set({
+      status: "in_review",
+      assigneeAgentId: reviewerId,
+      responsibleUserId: ownerUserId,
+      executionPolicy: {
+        mode: "normal", commentRequired: true,
+        stages: [{ id: stageId, type: "review", approvalsNeeded: 1,
+          participants: [{ id: randomUUID(), type: "agent", agentId: reviewerId, userId: null }] }],
+      },
+      executionState: {
+        status: "pending", currentStageId: stageId, currentStageIndex: 0, currentStageType: "review",
+        currentParticipant: { type: "agent", agentId: reviewerId, userId: null },
+        returnAssignee: { type: "agent", agentId: coderId, userId: null },
+        reviewRequest: null, completedStageIds: [], lastDecisionId: null, lastDecisionOutcome: null,
+        // Two agent rounds already spent; the default cap is three.
+        changesRequestedCount: 2,
+      },
+    }).where(eq(issues.id, sourceIssueId));
+    const action = await issueRecoveryActionService(db).upsertSourceScoped({
+      companyId, sourceIssueId, kind: "issue_graph_liveness", ownerType: "agent", ownerAgentId: reviewerId,
+      cause: "issue_graph_liveness", fingerprint: `graph-liveness:capped-review:${withDefault}`,
+      evidence: { latestIssueStatus: "in_review" }, nextAction: "Decide the review.", wakePolicy: { type: "manual" },
+    });
+    const runId = randomUUID();
+    await seedHeartbeatRun({ companyId, agentId: reviewerId, runId, issueId: sourceIssueId, status: "running" });
+
+    const resolved = await request(createApp({ type: "agent", agentId: reviewerId, companyId, source: "agent_key", runId }))
+      .post(`/api/issues/${sourceIssueId}/recovery-actions/resolve`)
+      .send({ actionId: action.id, outcome: "restored", sourceIssueStatus: "todo", resolutionNote: "Round three: still not converging." });
+
+    expect(resolved.status, JSON.stringify(resolved.body)).toBe(200);
+    const [after] = await db.select().from(issues).where(eq(issues.id, sourceIssueId));
+    // The shared cleanup removes companies; memberships must go first, even if an assertion below fails.
+    await db.delete(companyMemberships).where(eq(companyMemberships.companyId, companyId));
+    // The stage stays pending with the escalation target instead of returning to the executor.
+    expect(after).toMatchObject({
+      status: "in_review",
+      assigneeAgentId: withDefault ? managerId : null,
+      assigneeUserId: withDefault ? null : ownerUserId,
+      executionState: {
+        status: "pending",
+        currentStageId: stageId,
+        currentParticipant: withDefault ? { type: "agent", agentId: managerId } : { type: "user", userId: ownerUserId },
+        returnAssignee: { type: "agent", agentId: coderId },
+        changesRequestedCount: 3,
+      },
+    });
+    expect((after!.executionState as { reviewEscalationAgentUsed?: boolean }).reviewEscalationAgentUsed ?? false).toBe(withDefault);
   });
 
   it("marks a recovery action stale when a blocked source issue is manually moved to todo", async () => {
