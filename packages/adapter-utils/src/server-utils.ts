@@ -835,6 +835,7 @@ type PaperclipWakePayload = {
   childIssueSummaries: PaperclipWakeChildIssueSummary[];
   childIssueSummaryTruncated: boolean;
   blockerStall: PaperclipWakeBlockerStall | null;
+  blockerParked: PaperclipWakeBlockerParked | null;
   commentIds: string[];
   latestCommentId: string | null;
   comments: PaperclipWakeComment[];
@@ -1338,6 +1339,15 @@ function normalizePaperclipWakeChildIssueSummary(
   const summary = asString(child.summary, "").trim() || null;
   if (!id && !identifier && !title && !status && !summary) return null;
   return { id, identifier, title, status, priority, summary };
+}
+
+type PaperclipWakeBlockerParked = { blockerIssueId: string | null; blockerIssueIdentifier: string | null };
+
+function normalizePaperclipWakeBlockerParked(value: unknown): PaperclipWakeBlockerParked | null {
+  const parked = parseObject(value);
+  const blockerIssueId = asString(parked.blockerIssueId, "").trim() || null;
+  const blockerIssueIdentifier = asString(parked.blockerIssueIdentifier, "").trim() || null;
+  return blockerIssueId || blockerIssueIdentifier ? { blockerIssueId, blockerIssueIdentifier } : null;
 }
 
 function normalizePaperclipWakeBlockerStall(value: unknown): PaperclipWakeBlockerStall | null {
@@ -1937,6 +1947,7 @@ export function normalizePaperclipWakePayload(
       false,
     ),
     blockerStall: normalizePaperclipWakeBlockerStall(payload.blockerStall),
+    blockerParked: normalizePaperclipWakeBlockerParked(payload.blockerParked),
     commentIds,
     latestCommentId: asString(payload.latestCommentId, "").trim() || null,
     comments,
@@ -3133,6 +3144,21 @@ function renderPaperclipWakePromptBody(
       `- Escalate: comment on this issue with what is stuck and what the board must do on ${label} (its Retry or reassignment), so the board sees it here.`,
       `- Block this issue with a reason that names ${label} and its recovery action, if nothing else can move until the board acts.`,
       `Do not redo ${label}'s work yourself while it is assigned, and do not wait silently.`,
+    );
+  }
+
+  if (normalized.blockerParked) {
+    const label = normalized.blockerParked.blockerIssueIdentifier ?? normalized.blockerParked.blockerIssueId ?? "unknown";
+    lines.push(
+      "",
+      "## Blocker handed back",
+      "",
+      `Your blocker ${label} was just set to blocked by its own assignee. It may be waiting for you.`,
+      `Read ${label}'s latest comments first. Then choose one, and stop:`,
+      `- Act on the hand-off: do what it asks of you, or answer it with a comment on ${label}.`,
+      `- Re-plan: if this task no longer needs ${label}, remove the dependency and continue.`,
+      "- Escalate: comment on this issue with what is stuck and who must decide.",
+      `This task still depends on ${label}: do not mark it done and do not redo ${label}'s work.`,
     );
   }
 

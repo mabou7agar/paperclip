@@ -321,6 +321,7 @@ import {
   findExistingIssueBlockersResolvedWakeForReadyState,
   shouldWakeOnRestoredBlockedDependency,
 } from "../services/issue-dependency-wakeups.js";
+import { listBlockerParkedWakeups } from "../services/blocker-parked-wakeups.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import {
   executionWorkspaceService as executionWorkspaceServiceDirect,
@@ -1449,6 +1450,7 @@ const ISSUE_WAKE_DIAGNOSTIC_KNOWN_REASONS = new Set([
   "issue_assigned",
   "issue_blockers_resolved",
   "issue_blocker_stalled",
+  "issue_blocker_parked",
   "issue_commented",
   "issue_comment_mentioned",
   "issue_dependencies_blocked",
@@ -16576,6 +16578,16 @@ export function issueRoutes(
           }
         }
 
+        // A worker that parks its own task tells the assignees waiting on it, once per transition.
+        if (existing.status !== "blocked" && issue.status === "blocked") {
+          // The status change already committed; a failed lookup must not fail it.
+          const parkedWakeups = await listBlockerParkedWakeups(db, { companyId: issue.companyId, blockerIssueId: issue.id })
+            .catch((err) => { logger.warn({ err, issueId: issue.id }, "failed to list waiters of a parked blocker"); return []; });
+          for (const parked of parkedWakeups) {
+            addWakeup(parked.agentId, { ...parked.wakeup, requestedByActorType: actor.actorType, requestedByActorId: actor.actorId });
+          }
+        }
+
         const becameDone =
           existing.status !== "done" && issue.status === "done";
         if (becameDone) {
@@ -20224,6 +20236,14 @@ export function issueRoutes(
                   : {}),
               },
             });
+          }
+        }
+
+        if (issueBeforeCommentDecision.status !== "blocked" && currentIssue.status === "blocked") {
+          const parkedWakeups = await listBlockerParkedWakeups(db, { companyId: currentIssue.companyId, blockerIssueId: currentIssue.id })
+            .catch((err) => { logger.warn({ err, issueId: currentIssue.id }, "failed to list waiters of a parked blocker"); return []; });
+          for (const parked of parkedWakeups) {
+            addWakeup(parked.agentId, { ...parked.wakeup, requestedByActorType: actor.actorType, requestedByActorId: actor.actorId });
           }
         }
 

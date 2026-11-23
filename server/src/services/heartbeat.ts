@@ -8,6 +8,7 @@ import { isProcessRunAdmissionClosed } from "./heartbeat/run-admission.js";
 import type { StopInvocationOptions } from "./heartbeat/run-control.js";
 import { isContextCompactionRun } from "./context-compaction.js";
 import { isUnstartedTaskQuestionAnswer } from "./unstarted-task-question-answer.js";
+import { isAnsweredQuestionForBlockedTask } from "./blocked-task-question-answer.js";
 import { registerDeferredReceiptWork } from "./heartbeat/deferred-receipt-work.js";
 import { reconcileTaskChatRetryReceipts } from "./task-retry.js";
 import { registerIssueRecoveryWork } from "./recovery/work.js";
@@ -2295,9 +2296,16 @@ export function heartbeatService(
             .listDependencyReadiness(agent.companyId, [issueId])
             .then((rows) => rows.get(issueId) ?? null)
         : null;
+      // An answer to the assignee's own question on a task still waiting on
+      // blockers runs one restricted turn, like a comment on a blocked task.
+      // It never checks the task out: the dependency is not satisfied.
+      const answersBlockedTask = Boolean(issueId && issueContext &&
+        issueDependencyReadiness?.isDependencyReady === false &&
+        await isAnsweredQuestionForBlockedTask(db, { companyId: agent.companyId, issueId, agentId: agent.id, contextSnapshot: context }));
       if (
         issueId &&
         issueContext &&
+        !answersBlockedTask &&
         isResolvedInteractionContinuationWakeContext(context)
       ) {
         try {

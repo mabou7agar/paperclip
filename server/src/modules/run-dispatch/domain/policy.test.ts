@@ -445,6 +445,30 @@ describe("decideQueuedRunStaleness", () => {
     }, NOW)).toEqual({ stale: false });
   });
 
+  it("allows a verified answer to the assignee's own question to run on a task blocked by dependencies", () => {
+    expect(decideQueuedRunStaleness({
+      ...baseStalenessFacts(),
+      isResolvedInteractionContinuation: true,
+      isBlockedTaskQuestionAnswer: true,
+      issueStatus: "blocked",
+    }, NOW)).toEqual({ stale: false });
+  });
+
+  it("keeps a resolved interaction on a blocked task parked without that verified answer", () => {
+    expect(decideQueuedRunStaleness({
+      ...baseStalenessFacts(),
+      isResolvedInteractionContinuation: true,
+      issueStatus: "blocked",
+    }, NOW)).toMatchObject({ stale: true, errorCode: "issue_not_in_progress" });
+    // The verified answer excuses only the blocked status it was verified for.
+    expect(decideQueuedRunStaleness({
+      ...baseStalenessFacts(),
+      isResolvedInteractionContinuation: true,
+      isBlockedTaskQuestionAnswer: true,
+      issueStatus: "todo",
+    }, NOW)).toMatchObject({ stale: true, errorCode: "issue_not_in_progress" });
+  });
+
   it("does not cancel a parked continuation summary when the classifier says it does not park the executor", () => {
     const facts: QueuedRunFacts = {
       ...baseStalenessFacts(),

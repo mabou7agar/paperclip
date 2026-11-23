@@ -44,6 +44,7 @@ import { budgetService, budgetServiceInTransaction, recheckAdmittedRunBudgetRead
 import { lockRunBudgetRecoveryOwnerInTransaction, recheckRunBudgetReservationInTransaction } from "../../../services/budget-reservations.js";
 import { isCompletedOnboardingHandoffWake } from "../../../services/chat-completion-delivery.js";
 import { isUnstartedTaskQuestionAnswer } from "../../../services/unstarted-task-question-answer.js";
+import { isAnsweredQuestionForBlockedTask } from "../../../services/blocked-task-question-answer.js";
 import { isHeartbeatWakeOnDemandEnabled } from "../../../services/heartbeat-policy.js";
 import { notifyChatRunMilestones } from "../../../services/chat-run-milestone-notifications.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "../../../services/delivery-work-notifications.js";
@@ -695,6 +696,11 @@ export function createPostgresRunDispatchAdapter(
       isResolvedInteractionContinuation,
       isUnstartedTaskQuestionAnswer: Boolean(isResolvedInteractionContinuation && issue?.status === "todo" &&
         await isUnstartedTaskQuestionAnswer(dbOrTx, { companyId: input.companyId, issueId, interactionId: context.interactionId })),
+      // Only a task waiting on unresolved blockers: a task parked as blocked for any other reason stays parked.
+      isBlockedTaskQuestionAnswer: Boolean(isResolvedInteractionContinuation && issue?.status === "blocked" &&
+        !input.scheduledRetryReason &&
+        await isAnsweredQuestionForBlockedTask(dbOrTx as Db, { companyId: input.companyId, issueId, agentId: input.agentId, contextSnapshot: context }) &&
+        (await issueService(dbOrTx).listDependencyReadiness(input.companyId, [issueId])).get(issueId)?.isDependencyReady === false),
       isConnectionContinuation: (isResolvedInteractionContinuation && context.interactionKind === "connection_intent")
         || context.source === "connection_tools.refreshed",
       isInteractionWake,

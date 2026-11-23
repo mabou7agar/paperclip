@@ -124,6 +124,33 @@ interface IssueExecutionDecision {
 4. Runtime routes back to the **same review stage** (not the beginning), with the same reviewer.
 5. This loop continues until the reviewer approves.
 
+### Review round cap and escalation
+
+Agent reviewers get a bounded number of consecutive changes-requested rounds: `maxReviewRounds`, default 3. When an agent reviewer hits the cap, the stage stays `pending` and is handed to an escalation target instead of going back to the executor.
+
+- **Default:** the target is the task's responsible human, or its human creator. Only that person can advance the stage while it is held.
+- **Optional first target:** set `executionPolicy.reviewEscalationAgentId` to an agent (for example the CTO). That agent receives the capped review first and gets one decision per cycle. If it approves, the stage completes. If it requests changes, the work returns to the executor; if agent reviewers then hit the cap again, the review goes to the human. The setting is unset by default, ignored when `reviewGuard` is set, and skipped when the named agent is the reviewer who hit the cap or the executor whose work is under review.
+- **After the escalation target decides:** a human decision resets the round counter. Whoever decided, the next submission goes back to the stage's configured reviewer, not to the escalation target.
+
+```json
+{
+  "executionPolicy": {
+    "stages": [{ "type": "review", "participants": [{ "type": "agent", "agentId": "qa-agent-id" }] }],
+    "reviewEscalationAgentId": "cto-agent-id"
+  }
+}
+```
+
+The setting is per task, like the rest of the policy. There is no company-wide default and no settings screen for it.
+
+### Waking agents that wait on a blocked task
+
+A task with unresolved blockers stays idle for automatic wakes and scheduled retries. Three inputs still reach its assignee, each as one restricted turn that does not check the task out:
+
+- a comment on the task;
+- an answer to a question the assignee asked on the task (the answer wakes the assignee once per question);
+- a blocker that its own assignee sets to `blocked` (`issue_blocker_parked`, once per blocked transition). This covers a worker that finishes its part, leaves a hand-off comment and waits. Only tasks linked with a `blocks` relation are woken; a parent without that relation is not.
+
 ### Policy Variants
 
 **Review only** (no approval stage):

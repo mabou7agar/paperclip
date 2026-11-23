@@ -414,6 +414,7 @@ export function normalizeIssueExecutionPolicy(input: unknown): IssueExecutionPol
     ...(authorizationPolicy ? { authorizationPolicy } : {}),
     ...(parsed.data.reviewGuard ? { reviewGuard: parsed.data.reviewGuard } : {}),
     ...(parsed.data.maxReviewRounds != null ? { maxReviewRounds: parsed.data.maxReviewRounds } : {}),
+    ...(parsed.data.reviewEscalationAgentId ? { reviewEscalationAgentId: parsed.data.reviewEscalationAgentId } : {}),
   };
 }
 
@@ -480,6 +481,15 @@ function reviewEscalationUserId(issue: IssueLike): string | null {
   const creator = issue.createdByUserId?.trim();
   if (creator) return creator;
   return null;
+}
+
+/**
+ * The optional agent that receives a capped review before the human does.
+ * Progress-guarded policies keep their owner-only escalation.
+ */
+function reviewEscalationAgent(policy: IssueExecutionPolicy | null): IssueExecutionStagePrincipal | null {
+  const agentId = policy?.reviewGuard ? null : policy?.reviewEscalationAgentId?.trim();
+  return agentId ? { type: "agent", agentId, userId: null } : null;
 }
 
 function findStageById(policy: IssueExecutionPolicy, stageId: string | null | undefined) {
@@ -616,6 +626,7 @@ function buildPendingState(input: {
     changesRequestedCount: input.changesRequestedCount ?? input.previous?.changesRequestedCount ?? 0,
     ...(input.previous?.reviewProgress?.stageId === input.stage.id ? { reviewProgress: input.previous.reviewProgress } : {}),
     ...(input.previous?.reviewEscalated && input.previous.currentStageId === input.stage.id ? { reviewEscalated: true } : {}),
+    ...(input.previous?.reviewEscalationAgentUsed && input.previous.currentStageId === input.stage.id ? { reviewEscalationAgentUsed: true } : {}),
   };
 }
 
@@ -623,9 +634,12 @@ function buildChangesRequestedState(
   previous: IssueExecutionState,
   currentStage: IssueExecutionStage,
   changesRequestedCount: number,
+  /** Set when the deciding reviewer was an escalation target, so the next round returns to a configured reviewer. */
+  nextParticipant?: IssueExecutionStagePrincipal | null,
 ): IssueExecutionState {
   return {
     ...previous,
+    ...(nextParticipant ? { currentParticipant: nextParticipant } : {}),
     status: CHANGES_REQUESTED_STATUS,
     currentStageId: currentStage.id,
     currentStageType: currentStage.type,
@@ -763,8 +777,12 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
     // participant would silently undo the escalation on the next unrelated
     // PATCH, so the hold is sticky until the escalated human decides — their
     // own decisions fall through to the participant decision branch below.
+    const escalationAgentHold =
+      currentParticipant.type === "agent" &&
+      existingState?.reviewEscalationAgentUsed === true &&
+      principalsEqual(currentParticipant, reviewEscalationAgent(input.policy));
     const escalatedHold =
-      currentParticipant.type === "user" &&
+      (currentParticipant.type === "user" || escalationAgentHold) &&
       !stageHasParticipant(activeStage, currentParticipant) &&
       reviewLimitReached(input.policy.reviewGuard || input.previousPolicy?.reviewGuard
         ? input.previousPolicy ?? input.policy : input.policy, existingState);
@@ -783,11 +801,11 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
       const holdDrifted =
         input.issue.status !== "in_review" ||
         !principalsEqual(currentAssignee, currentParticipant);
-      if (holdDrifted || ((input.policy.reviewGuard || input.previousPolicy?.reviewGuard) && !existingState?.reviewEscalated)) {
+      if (holdDrifted || (!escalationAgentHold && (input.policy.reviewGuard || input.previousPolicy?.reviewGuard) && !existingState?.reviewEscalated)) {
         patch.status = "in_review";
         Object.assign(patch, patchForPrincipal(currentParticipant));
         patch.executionState = buildPendingState({
-          previous: { ...existingState!, reviewEscalated: true },
+          previous: escalationAgentHold ? existingState! : { ...existingState!, reviewEscalated: true },
           stage: activeStage,
           stageIndex: input.policy.stages.findIndex((candidate) => candidate.id === activeStage.id),
           participant: currentParticipant,
@@ -921,7 +939,28 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
           ? progress.stalledRounds >= input.policy.reviewGuard!.maxStalledRounds ||
             (input.policy.maxReviewRounds != null && nextRounds >= resolveMaxReviewRounds(input.policy))
           : nextRounds >= resolveMaxReviewRounds(input.policy);
-        if (!actorIsHuman && limitReached) {
+        // The escalation agent's own decision goes back to the executor: it was
+        // asked to settle the review, and escalating its answer would skip the work.
+        const escalationAgentDecided = escalatedHold && escalationAgentHold;
+        const escalationAgent = reviewEscalationAgent(input.policy);
+        if (!actorIsHuman && limitReached && !escalationAgentDecided && escalationAgent &&
+            !existingState.reviewEscalationAgentUsed &&
+            !principalsEqual(escalationAgent, actor) &&
+            !principalsEqual(escalationAgent, existingState.returnAssignee)) {
+          // Rounds exhausted: the named agent gets one decision before the human.
+          buildPendingStagePatch({
+            patch,
+            previous: { ...reviewState, reviewEscalationAgentUsed: true },
+            policy: input.policy,
+            stage: activeStage,
+            participant: escalationAgent,
+            returnAssignee: existingState.returnAssignee,
+            reviewRequest: effectiveReviewRequest,
+            changesRequestedCount: nextRounds,
+          });
+          return { patch, decision, workflowControlledAssignment: true };
+        }
+        if (!actorIsHuman && limitReached && !escalationAgentDecided) {
           const escalationUserId = reviewEscalationUserId(input.issue);
           if (!escalationUserId && progress) {
             throw unprocessable("Review progress limit reached without an escalation owner", { code: "review_progress_owner_required" });
@@ -951,7 +990,13 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
         }
         patch.status = "in_progress";
         Object.assign(patch, patchForPrincipal(existingState.returnAssignee));
-        patch.executionState = buildChangesRequestedState(reviewState, activeStage, nextRounds);
+        // An escalation target is not the stage's reviewer. Once it has decided,
+        // the next round belongs to a configured reviewer again.
+        const nextReviewer = stageHasParticipant(activeStage, currentParticipant) ? null
+          : selectStageParticipant(activeStage, { exclude: existingState.returnAssignee });
+        patch.executionState = buildChangesRequestedState(
+          actorIsHuman && reviewState.reviewEscalationAgentUsed ? { ...reviewState, reviewEscalationAgentUsed: false } : reviewState,
+          activeStage, nextRounds, nextReviewer);
         return {
           patch,
           decision,
