@@ -184,6 +184,8 @@ import {
 } from "../execution-workspace-policy.js";
 import { readContinuationAttempt } from "../recovery/index.js";
 import { allowsDependencyBlockedWake, wakeChatConversationsConflict } from "../../modules/run-dispatch/index.js";
+import { isAnsweredQuestionForBlockedTask } from "../blocked-task-question-answer.js";
+import { verifyBlockerParkedWake } from "../blocker-parked-wakeups.js";
 import { withAgentStartLock } from "../agent-start-lock.js";
 import {
   evaluateAgentInvokability,
@@ -1115,14 +1117,18 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
         }
         return null;
       }
-      // The run's wake request records who asked for it.
-      const blockerStallVerified = unresolvedBlockerCount > 0 && await verifyBlockerStallWake(db, {
+      // The run's wake request records who asked for it, and under which key.
+      const wakeRequest = unresolvedBlockerCount > 0 && run.wakeupRequestId
+        ? await db.select({ actor: agentWakeupRequests.requestedByActorType, idempotencyKey: agentWakeupRequests.idempotencyKey })
+          .from(agentWakeupRequests).where(eq(agentWakeupRequests.id, run.wakeupRequestId)).then(rows => rows[0] ?? null)
+        : null;
+      const blockerStallVerified = unresolvedBlockerCount > 0 && (await verifyBlockerStallWake(db, {
         companyId: run.companyId, issueId, contextSnapshot: context,
-        requestedByActorType: run.wakeupRequestId
-          ? (await db.select({ actor: agentWakeupRequests.requestedByActorType }).from(agentWakeupRequests)
-            .where(eq(agentWakeupRequests.id, run.wakeupRequestId)).then(rows => rows[0]?.actor ?? null))
-          : null,
-      });
+        requestedByActorType: wakeRequest?.actor ?? null,
+      }) || await verifyBlockerParkedWake(db, {
+        // A blocker its own worker parked wakes each waiter once per transition.
+        companyId: run.companyId, issueId, contextSnapshot: context, idempotencyKey: wakeRequest?.idempotencyKey,
+      }));
       if (
         unresolvedBlockerCount > 0 &&
         !allowsDependencyBlockedWake(
@@ -1134,7 +1140,12 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
           companyId: run.companyId, issueId, agentId: run.agentId, contextSnapshot: context,
           excludeTaskOwnerAndCreator: true,
           allowTaskOwnerFromBlockingSource: true,
-        }) !== "pending" && !disposition
+        }) !== "pending" && !disposition &&
+        // An answer to the assignee's own question still reaches it, once; its scheduled retries do not.
+        !(!run.scheduledRetryReason && await isAnsweredQuestionForBlockedTask(db, {
+          companyId: run.companyId, issueId, agentId: run.agentId, contextSnapshot: context,
+          idempotencyKey: wakeRequest?.idempotencyKey,
+        }))
       ) {
         await cancelQueuedRunForBlockedDependencies(
           run,
@@ -4149,7 +4160,9 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               enrichedContextSnapshot,
               ISSUE_TREE_CONTROL_INTERACTION_WAKE_REASONS,
               await verifyBlockerStallWake(tx as unknown as Db, { companyId: issue.companyId, issueId: issue.id,
-                contextSnapshot: enrichedContextSnapshot, requestedByActorType: opts.requestedByActorType }),
+                contextSnapshot: enrichedContextSnapshot, requestedByActorType: opts.requestedByActorType })
+              || await verifyBlockerParkedWake(tx as unknown as Db, { companyId: issue.companyId, issueId: issue.id,
+                contextSnapshot: enrichedContextSnapshot, idempotencyKey: opts.idempotencyKey }),
             ) || await addressedInteractionWakeState(tx as unknown as Db, {
               companyId: issue.companyId, issueId: issue.id, agentId,
               contextSnapshot: enrichedContextSnapshot,
@@ -4157,6 +4170,10 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
               allowTaskOwnerFromBlockingSource: true,
             }) === "pending" || await blockingDispositionContinuationAllowed(tx as unknown as Db, {
               companyId: issue.companyId, issueId: issue.id, agentId, contextSnapshot: enrichedContextSnapshot,
+            }) || await isAnsweredQuestionForBlockedTask(tx as unknown as Db, {
+              // An answer to the assignee's own question is the input it waits for.
+              companyId: issue.companyId, issueId: issue.id, agentId, contextSnapshot: enrichedContextSnapshot,
+              idempotencyKey: opts.idempotencyKey,
             }));
 
           if (blockedInteractionWake) {

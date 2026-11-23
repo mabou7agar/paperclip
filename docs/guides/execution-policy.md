@@ -124,6 +124,62 @@ interface IssueExecutionDecision {
 4. Runtime routes back to the **same review stage** (not the beginning), with the same reviewer.
 5. This loop continues until the reviewer approves.
 
+### Review round cap and escalation
+
+Agent reviewers get a bounded number of consecutive changes-requested rounds: `maxReviewRounds`, default 3. When an agent reviewer hits the cap, the stage stays `pending` and is handed to an escalation target instead of going back to the executor.
+
+- **Default:** the target is the task's responsible human, or its human creator. Only that person can advance the stage while it is held.
+- **Optional first target:** set `executionPolicy.reviewEscalationAgentId` to an agent (for example the CTO). That agent receives the capped review first and gets one decision per cycle. If it approves, the stage completes. If it requests changes, the work returns to the executor and the reviewer gets a fresh set of rounds; if the reviewer hits the cap again, the review goes to the human. The setting is unset by default and ignored when `reviewGuard` is set.
+- **When the named agent cannot take it:** the review goes to the human, exactly as without the setting. That covers an agent that is missing, paused, terminated or awaiting approval at that moment, one that is the reviewer who hit the cap, the executor under review, or already a configured reviewer of the stage. Saving a policy that names an agent outside the company, or one that is paused or terminated, is refused with `422`.
+- **After the escalation target decides:** a human decision resets the round counter. Whoever decided, the next submission goes back to the stage's configured reviewer, not to the escalation target.
+
+```json
+{
+  "executionPolicy": {
+    "stages": [{ "type": "review", "participants": [{ "type": "agent", "agentId": "qa-agent-id" }] }],
+    "reviewEscalationAgentId": "cto-agent-id"
+  }
+}
+```
+
+**Company default.** A company can name a default escalation agent in `defaultReviewEscalationAgentId`. It is unset by default, and a company that has not set it behaves as before.
+
+| Task policy `reviewEscalationAgentId` | Who receives a capped review first |
+|---|---|
+| an agent id | that agent |
+| not set | the company default, if the company has one |
+| `null` | nobody: straight to the human, whatever the company default |
+
+The same checks apply to the default as to a task's own agent: it must be a usable agent of the company when saved, and at escalation time an agent that cannot run, or is excluded by the rules above, is skipped in favour of the human. A task's unavailable agent does not fall back to the company default.
+
+Set it with the board API; there is no settings screen:
+
+```
+PATCH /api/companies/{companyId}
+{ "defaultReviewEscalationAgentId": "cto-agent-id" }
+```
+
+Only board users can set it. Send `null` to clear it. It is not part of company export or import.
+
+### Waking agents that wait on a blocked task
+
+A task with unresolved blockers stays idle for automatic wakes and scheduled retries. Three inputs still reach its assignee, each as one restricted turn that does not check the task out:
+
+- a comment on the task;
+- an answer to a question the assignee asked on the task (the answer wakes the assignee once per question);
+- a blocker that is set to `blocked` (`issue_blocker_parked`, once per blocked transition). Only tasks linked with a `blocks` relation are woken.
+
+The answer rule applies to a `blocked` or `todo` task (and to one already `in_progress` or `in_review`), never to one the board parked in `backlog`.
+
+### Handing work to a sibling's or the parent's assignee
+
+The platform cannot tell who a hand-off is for from a comment. A worker that blocks its task has two ways to say it:
+
+- `blockedByIssueIds`: the task it waits on. Its assignee is woken when that task is done.
+- `unblockDescriptor.owner`: the agent who must act next. That agent is woken on the blocked task with the descriptor's `action`. An agent may name itself, or the agent assigned the parent or a sibling task.
+
+A descriptor that names the worker itself, with the other task mentioned only in prose, wakes nobody else.
+
 ### Policy Variants
 
 **Review only** (no approval stage):

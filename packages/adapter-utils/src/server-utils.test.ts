@@ -3030,6 +3030,23 @@ describe("renderPaperclipWakePrompt", () => {
     expect(JSON.parse(stringifyPaperclipWakePayload(payload)!)).toMatchObject({ dispositionRepair: payload.dispositionRepair });
   });
 
+  it("tells the agent to read the hand-off when its blocker was parked by its own assignee", () => {
+    const payload = {
+      reason: "issue_blocker_parked",
+      issue: { id: "waiter-1", identifier: "CHA-9", title: "Verify the package", status: "blocked", priority: "medium" },
+      blockerParked: { blockerIssueId: "blocker-1", blockerIssueIdentifier: "CHA-8", blockerIssueStatus: "blocked",
+        blockedTransitionAt: "2026-11-22T10:00:00.000Z" },
+    };
+    expect(JSON.parse(stringifyPaperclipWakePayload(payload) ?? "{}")).toMatchObject({
+      blockerParked: { blockerIssueId: "blocker-1", blockerIssueIdentifier: "CHA-8" },
+    });
+    const prompt = renderPaperclipWakePrompt(payload);
+    expect(prompt).toContain("## Blocker handed back");
+    expect(prompt).toContain("Read CHA-8's latest comments first.");
+    expect(prompt).toContain("do not mark it done");
+    expect(renderPaperclipWakePrompt({ ...payload, blockerParked: null })).not.toContain("## Blocker handed back");
+  });
+
   it("tells the agent what it can do when a child or blocker stalls on the board", () => {
     const payload = {
       reason: "issue_blocker_stalled",

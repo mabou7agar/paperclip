@@ -321,6 +321,9 @@ import {
   findExistingIssueBlockersResolvedWakeForReadyState,
   shouldWakeOnRestoredBlockedDependency,
 } from "../services/issue-dependency-wakeups.js";
+import { listBlockerParkedWakeups } from "../services/blocker-parked-wakeups.js";
+import { isFamilyTaskAssignee } from "../services/unblock-owner-wake.js";
+import { assertReviewEscalationAgent, resolveReviewEscalationAgentId } from "../services/review-escalation-agent.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import {
   executionWorkspaceService as executionWorkspaceServiceDirect,
@@ -1449,6 +1452,7 @@ const ISSUE_WAKE_DIAGNOSTIC_KNOWN_REASONS = new Set([
   "issue_assigned",
   "issue_blockers_resolved",
   "issue_blocker_stalled",
+  "issue_blocker_parked",
   "issue_commented",
   "issue_comment_mentioned",
   "issue_dependencies_blocked",
@@ -4136,6 +4140,7 @@ export function issueRoutes(
     requestedPolicy: unknown,
   ) {
     const policy = normalizeIssueExecutionPolicy(requestedPolicy);
+    if (policy?.reviewEscalationAgentId) await assertReviewEscalationAgent(db, companyId, policy);
     if (req.actor.type !== "agent") return policy;
     const trust = await resolveAgentTrustForIssue(
       { agentId: req.actor.agentId, runId: req.actor.runId },
@@ -10645,6 +10650,10 @@ export function issueRoutes(
               issue: lockedIssue,
               policy: executionPolicy,
               previousPolicy: executionPolicy,
+              reviewEscalationAgentId: lockedIssue.status === "in_review" && executionPolicy?.stages.length
+                ? await resolveReviewEscalationAgentId(db, lockedIssue.companyId, executionPolicy)
+                  .catch((err) => { logger.warn({ err, issueId: lockedIssue.id }, "failed to resolve the review escalation agent"); return null; })
+                : null,
               requestedStatus: sourceIssueStatus,
               requestedAssigneePatch: {},
               actor: {
@@ -14892,6 +14901,11 @@ export function issueRoutes(
       const previousExecutionPolicy = normalizeIssueExecutionPolicy(
         existing.executionPolicy ?? null,
       );
+      // A newly named review escalation agent must be a usable agent of this company.
+      const requestedEscalationAgentId = (updateFields.executionPolicy as NormalizedExecutionPolicy | null | undefined)?.reviewEscalationAgentId ?? null;
+      if (requestedEscalationAgentId && requestedEscalationAgentId !== (previousExecutionPolicy?.reviewEscalationAgentId ?? null)) {
+        await assertReviewEscalationAgent(db, existing.companyId, { reviewEscalationAgentId: requestedEscalationAgentId });
+      }
       const nextExecutionPolicy =
         updateFields.executionPolicy !== undefined
           ? (updateFields.executionPolicy as NormalizedExecutionPolicy | null)
@@ -14935,6 +14949,12 @@ export function issueRoutes(
         commentBody,
         reviewRequest: reviewRequest === undefined ? undefined : reviewRequest,
         reviewAssessment,
+        // Resolved now, not only when saved: a paused or removed agent must not receive a capped review.
+        reviewEscalationAgentId: existing.status === "in_review" && nextExecutionPolicy?.stages.length
+          ? await resolveReviewEscalationAgentId(db, existing.companyId, nextExecutionPolicy)
+            // A failed lookup must not block the reviewer's decision; the human receives it.
+            .catch((err) => { logger.warn({ err, issueId: existing.id }, "failed to resolve the review escalation agent"); return null; })
+          : null,
         monitorExplicitlyUpdated:
           req.body.executionPolicy !== undefined && monitorChanged,
       });
@@ -14972,7 +14992,7 @@ export function issueRoutes(
           (owner === "board" || "userId" in owner)
         ) {
           throw forbidden(
-            "Agents may only name themselves as an unblock owner",
+            "Agents may only name themselves, or the assignee of the parent or a sibling task, as an unblock owner",
           );
         }
         if (owner !== "board" && "agentId" in owner) {
@@ -14991,12 +15011,17 @@ export function issueRoutes(
             throw unprocessable(
               "Unblock owner agent must belong to the issue company",
             );
+          // An agent may name itself, or the agent assigned the parent or a
+          // sibling task: a hand-off inside one piece of work must be able to
+          // reach the agent it is for.
           if (
             req.actor.type === "agent" &&
-            req.actor.agentId !== owner.agentId
+            req.actor.agentId !== owner.agentId &&
+            !(await isFamilyTaskAssignee(db, { companyId: existing.companyId,
+              issue: { id: existing.id, parentId: existing.parentId ?? null }, agentId: owner.agentId }))
           ) {
             throw forbidden(
-              "Agents may only name themselves as an unblock owner",
+              "Agents may only name themselves, or the assignee of the parent or a sibling task, as an unblock owner",
             );
           }
         } else if (owner !== "board" && "userId" in owner) {
@@ -16573,6 +16598,16 @@ export function issueRoutes(
                   : {}),
               },
             });
+          }
+        }
+
+        // A task parked as blocked, by anyone, tells the assignees waiting on it, once per transition.
+        if (existing.status !== "blocked" && issue.status === "blocked") {
+          // The status change already committed; a failed lookup must not fail it.
+          const parkedWakeups = await listBlockerParkedWakeups(db, { companyId: issue.companyId, blockerIssueId: issue.id })
+            .catch((err) => { logger.warn({ err, issueId: issue.id }, "failed to list waiters of a parked blocker"); return []; });
+          for (const parked of parkedWakeups) {
+            addWakeup(parked.agentId, { ...parked.wakeup, requestedByActorType: actor.actorType, requestedByActorId: actor.actorId });
           }
         }
 
@@ -20224,6 +20259,14 @@ export function issueRoutes(
                   : {}),
               },
             });
+          }
+        }
+
+        if (issueBeforeCommentDecision.status !== "blocked" && currentIssue.status === "blocked") {
+          const parkedWakeups = await listBlockerParkedWakeups(db, { companyId: currentIssue.companyId, blockerIssueId: currentIssue.id })
+            .catch((err) => { logger.warn({ err, issueId: currentIssue.id }, "failed to list waiters of a parked blocker"); return []; });
+          for (const parked of parkedWakeups) {
+            addWakeup(parked.agentId, { ...parked.wakeup, requestedByActorType: actor.actorType, requestedByActorId: actor.actorId });
           }
         }
 

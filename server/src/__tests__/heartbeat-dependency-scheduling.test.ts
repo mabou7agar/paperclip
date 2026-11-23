@@ -28,6 +28,7 @@ import {
   issueComments,
   issueDocuments,
   issueRelations,
+  issueThreadInteractions,
   issueRecoveryActions,
   issueTreeHolds,
   issues,
@@ -42,6 +43,9 @@ import { heartbeatService } from "../services/heartbeat.ts";
 import { runningProcesses } from "../adapters/index.ts";
 import { createPostgresRunDispatchAdapter } from "../modules/run-dispatch/adapters/postgres.js";
 import { taskInterruptionPresentation } from "../services/task-interruption-presentation.js";
+import { listBlockerParkedWakeups } from "../services/blocker-parked-wakeups.js";
+import { issueService } from "../services/issues.js";
+import { isFamilyTaskAssignee } from "../services/unblock-owner-wake.js";
 
 const mockAdapterExecute = vi.hoisted(() =>
   vi.fn(async () => ({
@@ -898,6 +902,307 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
       return rows.every((run) => run.status !== "queued" && run.status !== "running");
     }, 10_000);
     expect(noActiveRuns).toBe(true);
+  });
+
+  async function seedAnsweredQuestionOnBlockedTask(options: { withSourceComment: boolean; interactionStatus?: string; issueStatus?: string }) {
+    const companyId = randomUUID(), askerId = randomUUID(), answererId = randomUUID();
+    const blockerId = randomUUID(), issueId = randomUUID(), interactionId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId, name: "Answered question", issuePrefix: `A${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false, defaultResponsibleUserId: "responsible-user",
+    });
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "responsible-user", status: "active", membershipRole: "member" });
+    await db.insert(agents).values([askerId, answererId].map((id, index) => ({
+      id, companyId, name: index === 0 ? "Delivery Lead" : "CTO", role: index === 0 ? "pm" : "cto", status: "active",
+      adapterType: "codex_local", adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } }, permissions: {},
+    })));
+    await db.insert(issues).values([
+      { id: blockerId, companyId, title: "Child waiting for the answer", status: "blocked", priority: "high", responsibleUserId: "responsible-user" },
+      { id: issueId, companyId, title: "Parent that asked", status: options.issueStatus ?? "blocked", priority: "high", assigneeAgentId: askerId, responsibleUserId: "responsible-user",
+        // Already worked on once, so the never-started exception for todo tasks does not apply.
+        startedAt: new Date("2026-11-20T09:00:00.000Z") },
+    ]);
+    await db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: issueId, type: "blocks" });
+    const sourceCommentId = options.withSourceComment ? randomUUID() : null;
+    if (sourceCommentId) {
+      await db.insert(issueComments).values({
+        id: sourceCommentId, companyId, issueId, authorType: "agent", authorAgentId: askerId, body: "Which option should the child task take?",
+      });
+    }
+    const interactionStatus = options.interactionStatus ?? "answered";
+    await db.insert(issueThreadInteractions).values({
+      id: interactionId, companyId, issueId, kind: "ask_user_questions", status: interactionStatus,
+      createdByAgentId: askerId, addresseeAgentId: answererId, sourceCommentId,
+      resolvedByAgentId: interactionStatus === "answered" ? answererId : null,
+      resolvedAt: interactionStatus === "answered" ? new Date() : null,
+      payload: { version: 1, questions: [{ id: "option", prompt: "Which option should the child task take?", selectionMode: "single", required: true,
+        options: [{ id: "first", label: "First" }] }] },
+      result: interactionStatus === "answered" ? { version: 1, answers: [{ questionId: "option", optionIds: ["first"] }] } : null,
+    });
+    // The same wake the question-response delivery sends to the task assignee.
+    const wake = (overrides: { idempotencyKey?: string | null } = {}) => heartbeat.wakeup(askerId, {
+      source: "automation", triggerDetail: "system", reason: "issue_commented",
+      payload: {
+        issueId, interactionId, interactionKind: "ask_user_questions", interactionStatus: "answered",
+        sourceCommentId, sourceRunId: null, externalChatContinuation: false,
+        ...(sourceCommentId ? { wakeCommentId: sourceCommentId, wakeCommentIds: [sourceCommentId] } : {}),
+        mutation: "interaction",
+      },
+      idempotencyKey: overrides.idempotencyKey === undefined ? `question-response:${interactionId}` : overrides.idempotencyKey,
+      requestedByActorType: "agent", requestedByActorId: answererId,
+      contextSnapshot: {
+        issueId, taskId: issueId, interactionId, interactionKind: "ask_user_questions", interactionStatus: "answered",
+        mutation: "interaction", sourceCommentId, sourceRunId: null, externalChatContinuation: false,
+        ...(sourceCommentId ? { wakeCommentId: sourceCommentId, wakeCommentIds: [sourceCommentId] } : {}),
+        wakeReason: "issue_commented", source: "issue.interaction.respond",
+      },
+    });
+    return { companyId, askerId, answererId, blockerId, issueId, interactionId, wake };
+  }
+
+  it.each([
+    { name: "with the question's source comment", withSourceComment: true },
+    { name: "without a source comment", withSourceComment: false },
+  ])("runs the assignee of a blocked task when its question is answered ($name)", async ({ withSourceComment }) => {
+    const seeded = await seedAnsweredQuestionOnBlockedTask({ withSourceComment });
+    const answeredWake = await seeded.wake();
+    expect(answeredWake).not.toBeNull();
+    await heartbeat.drainActiveRunExecutions();
+
+    const run = await db.select({ status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode, contextSnapshot: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns).where(eq(heartbeatRuns.id, answeredWake!.id)).then((rows) => rows[0] ?? null);
+    expect(run?.errorCode ?? null).toBeNull();
+    expect(run?.status).toBe("succeeded");
+    // The blocker is still unresolved, so the turn stays in the restricted answer-and-triage mode.
+    expect(run?.contextSnapshot).toMatchObject({
+      dependencyBlockedInteraction: true,
+      unresolvedBlockerIssueIds: [seeded.blockerId],
+    });
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+  });
+
+  it("runs the assignee of a todo task that waits on blockers when its question is answered", async () => {
+    // The gate at enqueue and claim does not look at the status, so the later checks must agree with it.
+    const seeded = await seedAnsweredQuestionOnBlockedTask({ withSourceComment: false, issueStatus: "todo" });
+    const answeredWake = await seeded.wake();
+    expect(answeredWake).not.toBeNull();
+    await heartbeat.drainActiveRunExecutions();
+    const run = await db.select({ status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode, contextSnapshot: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns).where(eq(heartbeatRuns.id, answeredWake!.id)).then((rows) => rows[0] ?? null);
+    expect(run?.errorCode ?? null).toBeNull();
+    expect(run?.status).toBe("succeeded");
+    expect(run?.contextSnapshot).toMatchObject({ dependencyBlockedInteraction: true });
+    // The task was not started: it still waits on its blocker.
+    const task = await db.select({ status: issues.status, checkoutRunId: issues.checkoutRunId }).from(issues).where(eq(issues.id, seeded.issueId)).then((rows) => rows[0]);
+    expect(task).toMatchObject({ status: "todo", checkoutRunId: null });
+  });
+
+  it("keeps a task the board parked in the backlog idle when its question is answered", async () => {
+    const seeded = await seedAnsweredQuestionOnBlockedTask({ withSourceComment: false, issueStatus: "backlog" });
+    const wake = await seeded.wake();
+    await heartbeat.drainActiveRunExecutions();
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+    if (wake) {
+      const run = await db.select({ status: heartbeatRuns.status }).from(heartbeatRuns).where(eq(heartbeatRuns.id, wake.id)).then((rows) => rows[0]);
+      expect(run?.status).toBe("cancelled");
+    }
+  });
+
+  it("lets an answer pass the blocker gate only under the delivery's own wake key", async () => {
+    const seeded = await seedAnsweredQuestionOnBlockedTask({ withSourceComment: false });
+    // The same context without the key, or under another key, is an ordinary wake on a blocked task.
+    expect(await seeded.wake({ idempotencyKey: null })).toBeNull();
+    expect(await seeded.wake({ idempotencyKey: `question-response:${randomUUID()}` })).toBeNull();
+    await heartbeat.drainActiveRunExecutions();
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+    // The delivery's wake runs, once.
+    expect(await seeded.wake()).not.toBeNull();
+    await heartbeat.drainActiveRunExecutions();
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a blocked task idle when the wake claims an answer the question does not have", async () => {
+    // The card is still pending: a wake context saying "answered" is not proof.
+    const seeded = await seedAnsweredQuestionOnBlockedTask({ withSourceComment: false, interactionStatus: "pending" });
+    expect(await seeded.wake()).toBeNull();
+    await heartbeat.drainActiveRunExecutions();
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+    const wakeup = await db.select({ status: agentWakeupRequests.status, reason: agentWakeupRequests.reason })
+      .from(agentWakeupRequests).where(eq(agentWakeupRequests.agentId, seeded.askerId)).then((rows) => rows[0] ?? null);
+    expect(wakeup).toMatchObject({ status: "skipped", reason: "issue_dependencies_blocked" });
+  });
+
+  it("keeps automatic wakes on a blocked task suppressed after its question was answered", async () => {
+    const seeded = await seedAnsweredQuestionOnBlockedTask({ withSourceComment: false });
+    const automatic = await heartbeat.wakeup(seeded.askerId, {
+      source: "assignment", triggerDetail: "system", reason: "issue_assigned",
+      payload: { issueId: seeded.issueId },
+      contextSnapshot: { issueId: seeded.issueId, wakeReason: "issue_assigned" },
+    });
+    expect(automatic).toBeNull();
+    await heartbeat.drainActiveRunExecutions();
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+  });
+
+  it("wakes the assignee waiting on a task its own worker parks as blocked, once per transition", async () => {
+    const companyId = randomUUID(), engineerId = randomUUID(), qaId = randomUUID();
+    const blockerId = randomUUID(), waiterId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId, name: "Parked blocker", issuePrefix: `P${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false, defaultResponsibleUserId: "responsible-user",
+    });
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "responsible-user", status: "active", membershipRole: "member" });
+    await db.insert(agents).values([engineerId, qaId].map((id, index) => ({
+      id, companyId, name: index === 0 ? "Backend Engineer" : "QA Engineer", role: index === 0 ? "engineer" : "qa", status: "active",
+      adapterType: "codex_local", adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } }, permissions: {},
+    })));
+    await db.insert(issues).values([
+      { id: blockerId, companyId, title: "Build the package", status: "in_progress", priority: "high", assigneeAgentId: engineerId, responsibleUserId: "responsible-user" },
+      { id: waiterId, companyId, title: "Verify the package", status: "blocked", priority: "high", assigneeAgentId: qaId, responsibleUserId: "responsible-user" },
+    ]);
+    await db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: waiterId, type: "blocks" });
+    const deliver = async () => {
+      const wakeups = await listBlockerParkedWakeups(db, { companyId, blockerIssueId: blockerId });
+      const runs = [];
+      for (const parked of wakeups) {
+        runs.push(await heartbeat.wakeup(parked.agentId, { ...parked.wakeup, requestedByActorType: "agent", requestedByActorId: engineerId }));
+      }
+      await heartbeat.drainActiveRunExecutions();
+      return { wakeups, runs };
+    };
+
+    // Nothing is owed while the blocker is still being worked on.
+    expect((await deliver()).wakeups).toEqual([]);
+
+    const firstParkedAt = new Date("2026-11-22T10:00:00.000Z");
+    await db.update(issues).set({ status: "blocked", blockedTransitionAt: firstParkedAt }).where(eq(issues.id, blockerId));
+    const first = await deliver();
+    expect(first.wakeups.map((parked) => parked.agentId)).toEqual([qaId]);
+    expect(first.runs[0]).not.toBeNull();
+    const run = await db.select({ status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode, contextSnapshot: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns).where(eq(heartbeatRuns.id, first.runs[0]!.id)).then((rows) => rows[0] ?? null);
+    expect(run?.errorCode ?? null).toBeNull();
+    expect(run?.status).toBe("succeeded");
+    // The dependency is still unresolved, so the waiter gets the restricted turn, not its normal work.
+    expect(run?.contextSnapshot).toMatchObject({
+      wakeReason: "issue_blocker_parked",
+      dependencyBlockedInteraction: true,
+      unresolvedBlockerIssueIds: [blockerId],
+      blockerParked: { blockerIssueId: blockerId, blockedTransitionAt: firstParkedAt.toISOString() },
+    });
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+
+    // The same transition never wakes twice.
+    expect((await deliver()).wakeups).toEqual([]);
+
+    // The wake context alone is not enough: without the transition's key it stays behind the dependency gate.
+    const forged = await heartbeat.wakeup(qaId, {
+      source: "automation", triggerDetail: "system", reason: "issue_blocker_parked",
+      payload: { issueId: waiterId }, requestedByActorType: "agent", requestedByActorId: qaId,
+      contextSnapshot: { ...first.wakeups[0]!.wakeup.contextSnapshot },
+    });
+    expect(forged).toBeNull();
+
+    // Resumed and parked again: a new transition wakes the waiter again.
+    await db.update(issues).set({ status: "in_progress", blockedTransitionAt: null }).where(eq(issues.id, blockerId));
+    expect((await deliver()).wakeups).toEqual([]);
+    await db.update(issues).set({ status: "blocked", blockedTransitionAt: new Date("2026-11-22T12:30:00.000Z") }).where(eq(issues.id, blockerId));
+    const second = await deliver();
+    expect(second.wakeups).toHaveLength(1);
+    expect(second.runs[0]).not.toBeNull();
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(2);
+  });
+
+  it("runs the agent a blocked sibling task names as the one who must unblock it", async () => {
+    // Live shape: engineer and QA tasks are siblings under one parent, with no blocks relation.
+    const companyId = randomUUID(), engineerId = randomUUID(), qaId = randomUUID();
+    const parentId = randomUUID(), engineerTaskId = randomUUID(), qaTaskId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId, name: "Sibling hand-off", issuePrefix: `S${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false, defaultResponsibleUserId: "responsible-user",
+    });
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "responsible-user", status: "active", membershipRole: "member" });
+    await db.insert(agents).values([engineerId, qaId].map((id, index) => ({
+      id, companyId, name: index === 0 ? "Backend Engineer" : "QA Engineer", role: index === 0 ? "engineer" : "qa", status: "active",
+      adapterType: "codex_local", adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } }, permissions: {},
+    })));
+    const parkedAt = new Date("2026-11-22T19:31:28.000Z");
+    await db.insert(issues).values([
+      { id: parentId, companyId, title: "Delivery", status: "blocked", priority: "high", responsibleUserId: "responsible-user" },
+      { id: engineerTaskId, companyId, parentId, title: "Correct the package", status: "blocked", blockedTransitionAt: parkedAt, priority: "high",
+        assigneeAgentId: engineerId, responsibleUserId: "responsible-user",
+        unblockDescriptor: { owner: { agentId: qaId }, action: "Publish the review disposition on the QA task." } },
+      { id: qaTaskId, companyId, parentId, title: "Qualify the package", status: "in_review", priority: "high", assigneeAgentId: qaId, responsibleUserId: "responsible-user" },
+    ]);
+    // The engineer may name QA because QA holds a sibling task; an agent outside the family may not be named.
+    const engineerTask = { id: engineerTaskId, parentId };
+    expect(await isFamilyTaskAssignee(db, { companyId, issue: engineerTask, agentId: qaId })).toBe(true);
+    expect(await isFamilyTaskAssignee(db, { companyId, issue: engineerTask, agentId: randomUUID() })).toBe(false);
+    expect(await isFamilyTaskAssignee(db, { companyId, issue: { id: parentId, parentId: null }, agentId: qaId })).toBe(false);
+
+    // A wake that only claims the reason, without the transition's key, is still refused.
+    const forged = await heartbeat.wakeup(qaId, {
+      source: "automation", triggerDetail: "system", reason: "issue_unblock_requested",
+      payload: { issueId: engineerTaskId, action: "x" },
+      contextSnapshot: { wakeReason: "issue_unblock_requested", issueId: engineerTaskId, taskId: engineerTaskId },
+    });
+    await heartbeat.drainActiveRunExecutions();
+    if (forged) {
+      const forgedRun = await db.select({ errorCode: heartbeatRuns.errorCode }).from(heartbeatRuns).where(eq(heartbeatRuns.id, forged.id)).then((rows) => rows[0]);
+      expect(forgedRun?.errorCode).toBe("issue_assignee_changed");
+    }
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+
+    const wake = await heartbeat.wakeup(qaId, {
+      source: "automation", triggerDetail: "system", reason: "issue_unblock_requested",
+      idempotencyKey: `issue-unblock:${engineerTaskId}:${parkedAt.toISOString()}`,
+      payload: { issueId: engineerTaskId, action: "Publish the review disposition on the QA task." },
+      contextSnapshot: { wakeReason: "issue_unblock_requested", issueId: engineerTaskId, taskId: engineerTaskId },
+    });
+    expect(wake).not.toBeNull();
+    await heartbeat.drainActiveRunExecutions();
+    const run = await db.select({ status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode })
+      .from(heartbeatRuns).where(eq(heartbeatRuns.id, wake!.id)).then((rows) => rows[0] ?? null);
+    expect(run?.errorCode ?? null).toBeNull();
+    expect(run?.status).toBe("succeeded");
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+
+    // The owner's run acted on a request. It did not take the task: no checkout, no
+    // execution lock, and the assignee and status are as the engineer left them.
+    const after = await db.select({ status: issues.status, assigneeAgentId: issues.assigneeAgentId, checkoutRunId: issues.checkoutRunId,
+      executionRunId: issues.executionRunId }).from(issues).where(eq(issues.id, engineerTaskId)).then((rows) => rows[0]);
+    expect(after).toEqual({ status: "blocked", assigneeAgentId: engineerId, checkoutRunId: null, executionRunId: null });
+    const context = (await db.select({ contextSnapshot: heartbeatRuns.contextSnapshot }).from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, wake!.id)).then((rows) => rows[0]))?.contextSnapshot as Record<string, unknown>;
+    expect(Object.entries(context).filter(([key, value]) => /checkout/i.test(key) && value === true)).toEqual([]);
+    // Nor can it check the task out for itself afterwards.
+    await expect(issueService(db).checkout(engineerTaskId, qaId, ["blocked", "todo", "in_progress"], wake!.id)).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("does not wake a waiter held by the agent that parked the blocker, or one that is finished", async () => {
+    const companyId = randomUUID(), engineerId = randomUUID(), qaId = randomUUID();
+    const blockerId = randomUUID(), ownWaiterId = randomUUID(), doneWaiterId = randomUUID(), backlogWaiterId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId, name: "Parked blocker scope", issuePrefix: `Q${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false, defaultResponsibleUserId: "responsible-user",
+    });
+    await db.insert(agents).values([engineerId, qaId].map((id, index) => ({
+      id, companyId, name: index === 0 ? "Backend Engineer" : "QA Engineer", role: index === 0 ? "engineer" : "qa", status: "active",
+      adapterType: "codex_local", adapterConfig: {}, runtimeConfig: {}, permissions: {},
+    })));
+    await db.insert(issues).values([
+      { id: blockerId, companyId, title: "Build the package", status: "blocked", blockedTransitionAt: new Date(), priority: "high", assigneeAgentId: engineerId },
+      { id: ownWaiterId, companyId, title: "Engineer's own follow-up", status: "blocked", priority: "high", assigneeAgentId: engineerId },
+      { id: doneWaiterId, companyId, title: "Finished check", status: "done", priority: "high", assigneeAgentId: qaId },
+      { id: backlogWaiterId, companyId, title: "Parked by the board", status: "backlog", priority: "high", assigneeAgentId: qaId },
+    ]);
+    await db.insert(issueRelations).values([ownWaiterId, doneWaiterId, backlogWaiterId].map((relatedIssueId) => ({
+      companyId, issueId: blockerId, relatedIssueId, type: "blocks" as const,
+    })));
+    expect(await listBlockerParkedWakeups(db, { companyId, blockerIssueId: blockerId })).toEqual([]);
   });
 
   it("resumes normal work once after a child completes during the parent's restricted triage turn", async () => {

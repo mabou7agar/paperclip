@@ -802,6 +802,15 @@ export interface IssueExecutionPolicy {
    * default. Human decisions reset the round counter.
    */
   maxReviewRounds?: number | null;
+  /**
+   * Optional agent (for example the CTO) who receives a review that reached
+   * the round cap before the responsible human does. It gets one decision per
+   * cycle; if the cap is reached again the review goes to the human. Unset
+   * uses the company's `defaultReviewEscalationAgentId`, if any. An explicit
+   * null means no agent for this task, whatever the company default. Ignored
+   * when `reviewGuard` is set.
+   */
+  reviewEscalationAgentId?: string | null;
   /** Opt-in verified-progress guard. Omission preserves legacy review behavior. */
   reviewGuard?: ReviewProgressGuard;
 }
@@ -854,6 +863,8 @@ export interface IssueExecutionState {
   reviewProgress?: IssueReviewProgressState | null;
   /** Sticky owner hold; only an explicit owner decision releases it. */
   reviewEscalated?: boolean;
+  /** The policy's escalation agent already took its turn in this cycle; the next cap goes to the human. */
+  reviewEscalationAgentUsed?: boolean;
 }
 
 export interface IssueExecutionDecision {

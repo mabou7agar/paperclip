@@ -476,6 +476,7 @@ export const issueExecutionPolicySchema = z.object({
     .optional()
     .nullable()
     .default(null),
+  reviewEscalationAgentId: z.string().guid().optional().nullable(),
 });
 
 export const issueExecutionMonitorStateSchema = z.object({
@@ -553,6 +554,7 @@ export const issueExecutionStateSchema = z.object({
   changesRequestedCount: z.number().int().nonnegative().optional().default(0),
   reviewProgress: issueReviewProgressStateSchema.nullable().optional(),
   reviewEscalated: z.boolean().optional(),
+  reviewEscalationAgentUsed: z.boolean().optional(),
 });
 
 export const issueRecoveryActionReadModelSchema = z.object({

@@ -16,6 +16,8 @@ export const companies = pgTable(
     spendMonthUtc: text("spend_month_utc"),
     spentMonthlyCents: numeric("spent_monthly_cents", { precision: 24, scale: 7, mode: "number" }).notNull().default(0),
     defaultResponsibleUserId: text("default_responsible_user_id"),
+    /** Agent that receives a capped review before the responsible human, for tasks that name none. */
+    defaultReviewEscalationAgentId: uuid("default_review_escalation_agent_id"),
     requireBoardApprovalForNewAgents: boolean("require_board_approval_for_new_agents")
       .notNull()
       .default(false),

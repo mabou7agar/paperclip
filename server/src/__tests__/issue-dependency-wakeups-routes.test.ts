@@ -18,6 +18,7 @@ vi.setConfig({ testTimeout: 30000 });
 
 const mockWakeup = vi.hoisted(() => vi.fn(async () => undefined));
 const mockFindExistingIssueBlockersResolvedWakeForReadyState = vi.hoisted(() => vi.fn(async () => null));
+const mockListBlockerParkedWakeups = vi.hoisted(() => vi.fn(async (): Promise<unknown[]> => []));
 const mockIssueService = vi.hoisted(() => ({
   getAncestors: vi.fn(),
   getById: vi.fn(),
@@ -123,6 +124,11 @@ vi.mock("../services/issue-dependency-wakeups.js", async () => {
   };
 });
 
+vi.mock("../services/blocker-parked-wakeups.js", async () => ({
+  ...await vi.importActual<typeof import("../services/blocker-parked-wakeups.js")>("../services/blocker-parked-wakeups.js"),
+  listBlockerParkedWakeups: mockListBlockerParkedWakeups,
+}));
+
 async function createApp() {
   const emptyRows: unknown[] = [];
   const whereResult = {
@@ -167,6 +173,7 @@ describe("issue dependency wakeups in issue routes", () => {
     vi.doUnmock("../middleware/index.js");
     vi.clearAllMocks();
     mockFindExistingIssueBlockersResolvedWakeForReadyState.mockResolvedValue(null);
+    mockListBlockerParkedWakeups.mockResolvedValue([]);
     mockIssueService.getAncestors.mockResolvedValue([]);
     mockIssueService.getByIdForUpdate.mockImplementation(async () => mockIssueService.getById());
     mockIssueService.getComment.mockResolvedValue(null);
@@ -245,6 +252,67 @@ describe("issue dependency wakeups in issue routes", () => {
           }),
         }),
       );
+    });
+  });
+
+  describe("a worker parks its own task as blocked", () => {
+    const blocker = (status: string) => ({
+      id: "issue-1", companyId: "company-1", identifier: "PAP-100", title: "Package for QA", description: null,
+      status, priority: "medium", parentId: null, assigneeAgentId: "agent-1", assigneeUserId: null,
+      createdByAgentId: null, createdByUserId: null, executionWorkspaceId: null, labels: [], labelIds: [],
+    });
+    const parkedWake = {
+      agentId: "agent-2",
+      wakeup: {
+        source: "automation", triggerDetail: "system", reason: "issue_blocker_parked",
+        payload: { issueId: "issue-2", blockerParked: { blockerIssueId: "issue-1" } },
+        idempotencyKey: "issue_blocker_parked:issue-2:issue-1:2026-11-22T10:00:00.000Z",
+        contextSnapshot: { issueId: "issue-2", wakeReason: "issue_blocker_parked", source: "issue.blocker_parked" },
+        allowRunCoalescing: false,
+      },
+    };
+
+    // Entering blocked needs a recorded reason; here the task itself waits on another one.
+    beforeEach(() => {
+      mockIssueService.getDependencyReadiness.mockResolvedValue({
+        issueId: "issue-1", blockerIssueIds: ["issue-9"], unresolvedBlockerIssueIds: ["issue-9"], unresolvedBlockerCount: 1,
+        pendingFinalizeBlockerIssueIds: [], allBlockersDone: false, isDependencyReady: false,
+      });
+    });
+
+    it("wakes the assignee waiting on it", async () => {
+      mockIssueService.getById.mockResolvedValue(blocker("in_progress"));
+      mockIssueService.update.mockResolvedValue(blocker("blocked"));
+      mockListBlockerParkedWakeups.mockResolvedValue([parkedWake]);
+
+      const res = await request(await createApp()).patch("/api/issues/issue-1").send({ status: "blocked" });
+      expect(res.status).toBe(200);
+      expect(mockListBlockerParkedWakeups).toHaveBeenCalledWith(expect.anything(), { companyId: "company-1", blockerIssueId: "issue-1" });
+      await vi.waitFor(() => {
+        expect(mockWakeup).toHaveBeenCalledWith("agent-2", expect.objectContaining({
+          reason: "issue_blocker_parked",
+          idempotencyKey: parkedWake.wakeup.idempotencyKey,
+          payload: expect.objectContaining({ issueId: "issue-2" }),
+        }));
+      });
+    });
+
+    it("does not look for waiters when the task was already blocked or moves elsewhere", async () => {
+      mockIssueService.getById.mockResolvedValue(blocker("blocked"));
+      mockIssueService.update.mockResolvedValue(blocker("blocked"));
+      expect((await request(await createApp()).patch("/api/issues/issue-1").send({ title: "Package for QA" })).status).toBe(200);
+      mockIssueService.getById.mockResolvedValue(blocker("todo"));
+      mockIssueService.update.mockResolvedValue(blocker("in_progress"));
+      expect((await request(await createApp()).patch("/api/issues/issue-1").send({ status: "in_progress" })).status).toBe(200);
+      expect(mockListBlockerParkedWakeups).not.toHaveBeenCalled();
+    });
+
+    it("still saves the status change when the waiter lookup fails", async () => {
+      mockIssueService.getById.mockResolvedValue(blocker("in_progress"));
+      mockIssueService.update.mockResolvedValue(blocker("blocked"));
+      mockListBlockerParkedWakeups.mockRejectedValue(new Error("lookup failed"));
+      const res = await request(await createApp()).patch("/api/issues/issue-1").send({ status: "blocked" });
+      expect(res.status).toBe(200);
     });
   });
 
