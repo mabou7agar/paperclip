@@ -1,10 +1,27 @@
 import { forbidden } from "./errors.js";
 import { parseIssueExecutionState } from "./services/issue-execution-policy.js";
 
+export function isWorkflowReviewReturn(input: {
+  previousState: unknown;
+  nextState: unknown;
+  reviewerAgentId: string;
+  returnAgentId: string;
+  status: unknown;
+}) {
+  const previous = parseIssueExecutionState(input.previousState);
+  const next = parseIssueExecutionState(input.nextState);
+  return input.status === "in_progress" && previous?.status === "pending" &&
+    previous.currentParticipant?.type === "agent" && previous.currentParticipant.agentId === input.reviewerAgentId &&
+    previous.returnAssignee?.type === "agent" && previous.returnAssignee.agentId === input.returnAgentId &&
+    next?.status === "changes_requested" && next.lastDecisionOutcome === "changes_requested" &&
+    next.currentStageId === previous.currentStageId && next.currentStageType === previous.currentStageType &&
+    next.returnAssignee?.type === "agent" && next.returnAssignee.agentId === input.returnAgentId;
+}
+
 /** The native workflow may hand off a legacy caller after its final write. */
 export function isLegacyRunSelfHandoff(input: {
   actor: { type: string; source?: string; agentId?: string; runId?: string | null };
-  issue: { id: string; companyId: string; assigneeAgentId: string | null };
+  issue: { id: string; companyId: string; assigneeAgentId: string | null; executionState?: unknown };
   run: { id: string; agentId: string; companyId: string; runtimeMode: string; status?: string;
     contextSnapshot?: Record<string, unknown> | null } | null;
   targetAgentId: string | null;
@@ -21,11 +38,19 @@ export function isLegacyRunSelfHandoff(input: {
       run.companyId !== issue.companyId || run.contextSnapshot?.issueId !== issue.id) return false;
   // Preserve the existing return-to-human behavior.
   if (input.targetAgentId === null && typeof input.targetUserId === "string") return true;
+  if (input.workflowControlledAssignment !== true || input.explicitAssignee || run.status !== "running" ||
+      typeof input.targetAgentId !== "string" || input.targetAgentId === actor.agentId ||
+      input.targetUserId !== null || !actor.agentId) return false;
   const state = parseIssueExecutionState(input.executionState);
-  return input.workflowControlledAssignment === true && !input.explicitAssignee && run.status === "running" &&
-    typeof input.targetAgentId === "string" && input.targetAgentId !== actor.agentId &&
-    input.targetUserId === null && input.status === "in_review" && state?.status === "pending" &&
-    state.currentParticipant?.type === "agent" && state.currentParticipant.agentId === input.targetAgentId;
+  if (input.status === "in_review" && state?.status === "pending" &&
+      state.currentParticipant?.type === "agent" && state.currentParticipant.agentId === input.targetAgentId) return true;
+  return isWorkflowReviewReturn({
+    previousState: issue.executionState,
+    nextState: input.executionState,
+    reviewerAgentId: actor.agentId,
+    returnAgentId: input.targetAgentId,
+    status: input.status,
+  });
 }
 
 export function assertLegacyRunTaskOwnership(

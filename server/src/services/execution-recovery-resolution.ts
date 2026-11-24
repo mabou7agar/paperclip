@@ -7,7 +7,7 @@ import { notifyExecutionRunWork } from "./execution-control-notifications.js";
 import { hasWorkspaceRestoreFailure } from "@paperclipai/shared";
 import { randomUUID } from "node:crypto";
 import { canonicalExecutionUuid } from "./execution-identity.js";
-import { conversationRecoveryActionPredicate, getConversationOwnershipBlocker } from "./conversation-continuation.js";
+import { conversationRecoveryActionPredicate, getConversationOwnershipBlocker, reassignedConversationHoldReleasedPredicate } from "./conversation-continuation.js";
 import { isInterruptedNativePreparationCandidate } from "./cancelled-native-startup.js";
 import { persistActivity } from "./activity-log.js";
 import { appendHeartbeatRunEvent } from "./heartbeat-run-events.js";
@@ -481,7 +481,7 @@ export function unresolvedExecutionDispositions(db: Db, limit: number) {
 
 export function obsoleteExecutionConversationHold() {
   return and(
-    conversationRecoveryActionPredicate(),
+    or(conversationRecoveryActionPredicate(), reassignedConversationHoldReleasedPredicate()),
     sql`not (${issueRecoveryActions.evidence} ? 'systemRecovery')`,
     or(
       inArray(issueRecoveryActions.status, ["active", "escalated"]),
@@ -512,13 +512,13 @@ export async function settleUnrecoverableExecutions(
       await notifyUnsafeWorkspaceExportRecovery(tx, { companyId: candidate.companyId, issueId: candidate.sourceIssueId });
       const [action] = await tx.update(issueRecoveryActions).set({
         status: "resolved",
-        outcome: "cancelled",
-        resolvedAt: now,
+        outcome: candidate.status === "resolved" ? candidate.outcome : "cancelled",
+        resolvedAt: candidate.resolvedAt ?? now,
         updatedAt: now,
-        nextAction: "Automatic attempts stopped. Send a new message to continue the conversation.",
-        resolutionNote: "Conversation continuation does not replay prior tool calls.",
-        wakePolicy: null,
-        monitorPolicy: null,
+        nextAction: candidate.status === "resolved" ? candidate.nextAction : "Automatic attempts stopped. Send a new message to continue the conversation.",
+        resolutionNote: candidate.status === "resolved" ? candidate.resolutionNote : "Conversation continuation does not replay prior tool calls.",
+        wakePolicy: candidate.status === "resolved" ? candidate.wakePolicy : null,
+        monitorPolicy: candidate.status === "resolved" ? candidate.monitorPolicy : null,
         evidence: sql`case when ${issueRecoveryActions.evidence} ? 'automaticRecovery'
           then jsonb_set(${issueRecoveryActions.evidence}, '{automaticRecovery,replay}', '"conversation_continuation"'::jsonb)
           else ${issueRecoveryActions.evidence} end`,
@@ -531,7 +531,7 @@ export async function settleUnrecoverableExecutions(
         action: "issue.execution_recovery_settled",
         entityType: "issue",
         entityId: action.sourceIssueId,
-        details: { recoveryActionId: action.id, outcome: "cancelled", continuation: "conversation" },
+        details: { recoveryActionId: action.id, outcome: action.outcome, continuation: "conversation" },
       });
     }
   });

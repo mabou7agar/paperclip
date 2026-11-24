@@ -51,7 +51,7 @@ import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notificatio
 import { recordChatHandoff, recordAcceptedChatHandoff, lockAcceptedChatHandoffSource, recordChatCompletion, existingChatCompletionReply, acknowledgeChatCompletionReply } from "./chat-completion-delivery.js";
 import { mirrorSlackBoardComment, slackBoardReplyBindings } from "./slack-board-messages.js";
 import { agentRunWritesRevoked, assertAgentRunWriteAllowed } from "../agent-run-cancellation.js";
-import { assertLegacyRunTaskOwnership } from "../legacy-run-task-ownership.js";
+import { assertLegacyRunTaskOwnership, isWorkflowReviewReturn } from "../legacy-run-task-ownership.js";
 import { retryIdempotentDatabaseOperation } from "../database-retry.js";
 import { externalConversationStateSql, nonIdleSlackIssueCondition, resumeSlackConversation } from "./slack-conversation-state.js";
 import { documentService } from "./documents.js";
@@ -11759,7 +11759,13 @@ export function issueService(db: Db) {
           if (actorRun?.runtimeMode === "legacy" && actorRun.contextSnapshot?.issueId === id &&
               receiptExisting.assigneeAgentId === actorAgentId &&
               typeof patch.assigneeAgentId === "string" && patch.assigneeAgentId !== actorAgentId &&
-              parseIssueExecutionState(patch.executionState)?.status === "pending") {
+              (parseIssueExecutionState(patch.executionState)?.status === "pending" || isWorkflowReviewReturn({
+                previousState: receiptExisting.executionState,
+                nextState: patch.executionState,
+                reviewerAgentId: actorAgentId,
+                returnAgentId: patch.assigneeAgentId,
+                status: patch.status,
+              }))) {
             await tx.update(heartbeatRuns).set({ resultJson: sql`jsonb_set(coalesce(${heartbeatRuns.resultJson}, '{}'::jsonb),
               '{legacyWorkflowHandoffIssueId}', to_jsonb(${id}::text), true)` })
               .where(and(eq(heartbeatRuns.id, actorRunId), eq(heartbeatRuns.companyId, receiptExisting.companyId),

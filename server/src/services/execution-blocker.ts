@@ -2,7 +2,7 @@ import { isPreDispatchReviewWait, neverStartedDispatchCancellationPredicate } fr
 import { canonicalExecutionUuid } from "./execution-identity.js";
 import { preDispatchExecutionWaitRecoveryActionPredicate } from "./pre-dispatch-execution-wait.js";
 import { and, desc, eq, gt, inArray, not, or, sql, type SQL } from "drizzle-orm";
-import { conversationRecoveryActionPredicate, getConversationOwnershipBlocker } from "./conversation-continuation.js";
+import { conversationRecoveryActionPredicate, getConversationOwnershipBlocker, reassignedConversationHoldReleasedPredicate } from "./conversation-continuation.js";
 import { z } from "zod";
 import { agentWakeupRequests, chatConversations, chatEndpoints, environmentLeases, heartbeatRunEvents, heartbeatRuns, issueComments, issues, issueRecoveryActions, nativeRunFinalizations, nativeRunResults, toolConnections, workspaceOperations, type Db } from "@paperclipai/db";
 import { canContinueCancelledRun, readRunCancellation } from "./run-cancellation.js";
@@ -109,6 +109,7 @@ export async function hasPendingRunCleanup(db: Db, companyId: string, runId: str
 export function executionBlockerPredicate() {
   return and(
     not(conversationRecoveryActionPredicate()!),
+    not(reassignedConversationHoldReleasedPredicate()),
     not(preDispatchExecutionWaitRecoveryActionPredicate()),
     sql`not (${issueRecoveryActions.cause} = 'legacy_execution_requires_reconciliation' and exists (
       select 1 from ${heartbeatRuns}
