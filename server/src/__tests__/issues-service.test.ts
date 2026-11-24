@@ -6795,6 +6795,47 @@ describeEmbeddedPostgres("issueService.assertCheckoutOwner stale checkout adopti
       assigneeAgentId: seeded.assigneeAgentId });
   });
 
+  it("records the outgoing receipt when a reviewer's legacy run returns the task with changes requested", async () => {
+    const seeded = await seedOwnershipIssue({ checkoutStatus: "failed", assigneeMatchesActor: false });
+    await db.update(heartbeatRuns).set({ contextSnapshot: { issueId: seeded.issueId } })
+      .where(eq(heartbeatRuns.id, seeded.actorRunId));
+    // The actor is the reviewer the task waits on; the seeded assignee is the worker it returns to.
+    const stageId = randomUUID();
+    const pendingReview = { status: "pending", currentStageId: stageId, currentStageIndex: 0, currentStageType: "review",
+      currentParticipant: { type: "agent", agentId: seeded.actorAgentId, userId: null }, completedStageIds: [],
+      returnAssignee: { type: "agent", agentId: seeded.assigneeAgentId, userId: null }, lastDecisionId: null, lastDecisionOutcome: null };
+    await db.update(issues).set({ status: "in_review", assigneeAgentId: seeded.actorAgentId, executionState: pendingReview })
+      .where(eq(issues.id, seeded.issueId));
+    await svc.update(seeded.issueId, { status: "in_progress", assigneeAgentId: seeded.assigneeAgentId,
+      executionState: { ...pendingReview, status: "changes_requested", lastDecisionOutcome: "changes_requested", changesRequestedCount: 1 },
+      actorAgentId: seeded.actorAgentId, actorRunId: seeded.actorRunId });
+    const [receipt] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.actorRunId));
+    expect(receipt.resultJson?.legacyWorkflowHandoffIssueId).toBe(seeded.issueId);
+    // The reviewer no longer owns the task it returned.
+    await expect(svc.update(seeded.issueId, { title: "Stale reviewer edit",
+      actorAgentId: seeded.actorAgentId, actorRunId: seeded.actorRunId }))
+      .rejects.toMatchObject({ status: 403, details: { code: "issue_handed_off" } });
+    expect(await svc.getById(seeded.issueId)).toMatchObject({ status: "in_progress", assigneeAgentId: seeded.assigneeAgentId });
+  });
+
+  it("records no outgoing receipt for a reassignment that is not a workflow handoff or review return", async () => {
+    const seeded = await seedOwnershipIssue({ checkoutStatus: "failed", assigneeMatchesActor: false });
+    await db.update(heartbeatRuns).set({ contextSnapshot: { issueId: seeded.issueId } })
+      .where(eq(heartbeatRuns.id, seeded.actorRunId));
+    const stageId = randomUUID();
+    const pendingReview = { status: "pending", currentStageId: stageId, currentStageIndex: 0, currentStageType: "review",
+      currentParticipant: { type: "agent", agentId: seeded.actorAgentId, userId: null }, completedStageIds: [],
+      returnAssignee: { type: "agent", agentId: seeded.assigneeAgentId, userId: null }, lastDecisionId: null, lastDecisionOutcome: null };
+    await db.update(issues).set({ status: "in_review", assigneeAgentId: seeded.actorAgentId, executionState: pendingReview })
+      .where(eq(issues.id, seeded.issueId));
+    // Same reassignment, but the next state moved to another stage: not a return under this review.
+    await svc.update(seeded.issueId, { status: "in_progress", assigneeAgentId: seeded.assigneeAgentId,
+      executionState: { ...pendingReview, status: "changes_requested", lastDecisionOutcome: "changes_requested", currentStageId: randomUUID() },
+      actorAgentId: seeded.actorAgentId, actorRunId: seeded.actorRunId });
+    const [receipt] = await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, seeded.actorRunId));
+    expect(receipt.resultJson?.legacyWorkflowHandoffIssueId).toBeUndefined();
+  });
+
   it("allows a same-task manager run without an outgoing ownership receipt", async () => {
     const seeded = await seedOwnershipIssue({ checkoutStatus: "failed", assigneeMatchesActor: false });
     await db.update(heartbeatRuns).set({ contextSnapshot: { issueId: seeded.issueId } })

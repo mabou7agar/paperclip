@@ -22,6 +22,7 @@ import { agentWakeupRequests, issueRelations, issues, type Db } from "@paperclip
 
 export const ISSUE_BLOCKER_PARKED_WAKE_REASON = "issue_blocker_parked";
 export const ISSUE_BLOCKER_PARKED_WAKE_SOURCE = "issue.blocker_parked";
+const NATIVE_STATUS_DECISION_SOURCE = "native_status_decision";
 
 /** Waiters that may be woken: not finished, and not parked in the backlog by the board. */
 const WAKEABLE_WAITER_STATUSES = ["todo", "in_progress", "in_review", "blocked"];
@@ -125,7 +126,13 @@ export async function verifyBlockerParkedWake(db: Db, input: {
   idempotencyKey: string | null | undefined;
 }): Promise<boolean> {
   const context = input.contextSnapshot;
-  if (!context || context.wakeReason !== ISSUE_BLOCKER_PARKED_WAKE_REASON || context.source !== ISSUE_BLOCKER_PARKED_WAKE_SOURCE) return false;
+  if (!context || context.wakeReason !== ISSUE_BLOCKER_PARKED_WAKE_REASON) return false;
+  // A native status commit delivers the same wake through its own outbox, whose
+  // dispatcher stamps the native source on every wake it carries. The checks
+  // below (current transition, its key, the blocks edge) are what prove it.
+  const carriedByNativeStatusDecision = context.source === NATIVE_STATUS_DECISION_SOURCE
+    && context.statusDecisionSource === NATIVE_STATUS_DECISION_SOURCE;
+  if (context.source !== ISSUE_BLOCKER_PARKED_WAKE_SOURCE && !carriedByNativeStatusDecision) return false;
   const parked = context.blockerParked as Partial<IssueBlockerParkedWakeContext> | undefined;
   const blockerIssueId = typeof parked?.blockerIssueId === "string" ? parked.blockerIssueId : null;
   if (!blockerIssueId || blockerIssueId === input.issueId || !input.idempotencyKey) return false;

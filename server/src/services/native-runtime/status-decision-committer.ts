@@ -27,6 +27,8 @@ import { readNativePlanWait, type NativePlanWaitSource } from "./native-plan-wai
 import { activeIssueInteractionCondition } from "../issue-question-context.js";
 import { isConversation } from "../agent-conversations.js";
 import { hasPendingNativeChildCompletion, type NativeChildCompletionRecipient } from "./native-child-completion-delivery.js";
+import { listBlockerParkedWakeups } from "../blocker-parked-wakeups.js";
+import { logger } from "../../middleware/logger.js";
 import { and, asc, desc, eq, inArray, notInArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import type { CreateIssueThreadInteraction } from "@paperclipai/shared";
@@ -2484,6 +2486,45 @@ export async function commitNativeStatusDecision(input: {
             childIssueSummaryTruncated: parent.childIssueSummaryTruncated,
           },
         });
+      }
+    }
+
+    // A task parked as blocked tells the assignees waiting on it, once per
+    // transition, exactly as the issue routes do. The lookup and its wakes run
+    // in a savepoint: a failure there rolls back only these wakes and must not
+    // fail the status commit.
+    if (issue.status !== "blocked" && updated.status === "blocked") {
+      try {
+        const parkedWakes = await tx.transaction(async (savepoint) => {
+          const owed = await listBlockerParkedWakeups(savepoint as unknown as Db, {
+            companyId: input.companyId,
+            blockerIssueId: input.issueId,
+          });
+          const enqueued: NativeMaterializedStatusEffect[] = [];
+          for (const parked of owed) {
+            const waiterIssueId = String(parked.wakeup.payload.issueId);
+            const wakeId = await enqueueWake({
+              tx: savepoint as unknown as Db,
+              companyId: input.companyId,
+              issueId: waiterIssueId,
+              agentId: parked.agentId,
+              reason: parked.wakeup.reason,
+              idempotencyKey: parked.wakeup.idempotencyKey,
+              payload: { blockerParked: parked.wakeup.payload.blockerParked },
+              contextSnapshot: parked.wakeup.contextSnapshot,
+            });
+            enqueued.push({
+              effectKind: "blocker_parked_wake",
+              targetType: "agent_wakeup_request",
+              targetId: wakeId,
+              payload: { waiterIssueId, blockerIssueId: input.issueId },
+            });
+          }
+          return enqueued;
+        });
+        materialized.push(...parkedWakes);
+      } catch (err) {
+        logger.warn({ err, issueId: input.issueId }, "failed to wake waiters of a natively parked blocker");
       }
     }
 
