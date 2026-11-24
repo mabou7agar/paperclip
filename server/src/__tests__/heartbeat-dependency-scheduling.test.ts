@@ -44,6 +44,8 @@ import { runningProcesses } from "../adapters/index.ts";
 import { createPostgresRunDispatchAdapter } from "../modules/run-dispatch/adapters/postgres.js";
 import { taskInterruptionPresentation } from "../services/task-interruption-presentation.js";
 import { listBlockerParkedWakeups } from "../services/blocker-parked-wakeups.js";
+import { commitNativeStatusDecision } from "../services/native-runtime/status-decision-committer.js";
+import { NATIVE_STATUS_ARBITER_POLICY_VERSION } from "../services/native-runtime/status-arbiter.js";
 import { issueService } from "../services/issues.js";
 import { isFamilyTaskAssignee } from "../services/unblock-owner-wake.js";
 
@@ -1113,6 +1115,79 @@ describeEmbeddedPostgres("heartbeat dependency-aware queued run selection", () =
     expect(second.wakeups).toHaveLength(1);
     expect(second.runs[0]).not.toBeNull();
     expect(mockAdapterExecute).toHaveBeenCalledTimes(2);
+  });
+
+  it("runs the waiting assignee when a native status commit parks its blocker", async () => {
+    const companyId = randomUUID(), engineerId = randomUUID(), qaId = randomUUID();
+    const blockerId = randomUUID(), waiterId = randomUUID(), runId = randomUUID();
+    const contractId = randomUUID(), resultId = randomUUID(), assessmentId = randomUUID();
+    await db.insert(companies).values({
+      id: companyId, name: "Native parked blocker", issuePrefix: `Q${companyId.replace(/-/g, "").slice(0, 6).toUpperCase()}`,
+      requireBoardApprovalForNewAgents: false, defaultResponsibleUserId: "responsible-user",
+    });
+    await db.insert(companyMemberships).values({ companyId, principalType: "user", principalId: "responsible-user", status: "active", membershipRole: "member" });
+    await db.insert(agents).values([engineerId, qaId].map((id, index) => ({
+      id, companyId, name: index === 0 ? "Backend Engineer" : "QA Engineer", role: index === 0 ? "engineer" : "qa", status: "active",
+      adapterType: "codex_local", adapterConfig: {},
+      runtimeConfig: { heartbeat: { wakeOnDemand: true, maxConcurrentRuns: 1 } }, permissions: {},
+    })));
+    await db.insert(issues).values([
+      { id: blockerId, companyId, title: "Build the package", status: "in_progress", priority: "high", assigneeAgentId: engineerId, responsibleUserId: "responsible-user" },
+      { id: waiterId, companyId, title: "Verify the package", status: "blocked", priority: "high", assigneeAgentId: qaId, responsibleUserId: "responsible-user" },
+    ]);
+    await db.insert(issueRelations).values({ companyId, issueId: blockerId, relatedIssueId: waiterId, type: "blocks" });
+    // The engineer's native run reports the task blocked; the committer records it.
+    await db.insert(completionContracts).values({ id: contractId, companyId, issueId: blockerId, revision: 1,
+      schemaVersion: "paperclip.completion-contract.v1", policyVersion: "parked-test", risk: "standard",
+      completionAuthority: "server_arbiter", incompleteCriteriaPolicy: "preserve_non_terminal",
+      contractJson: { revision: "1", criteria: [] }, canonicalSha256: randomUUID(), createdByActorType: "system", createdByActorId: "test" });
+    await db.insert(heartbeatRuns).values({ id: runId, companyId, agentId: engineerId, status: "running", runtimeMode: "native",
+      nativeIssueId: blockerId, completionContractId: contractId, contextSnapshot: { issueId: blockerId } });
+    await db.insert(nativeRunResults).values({ id: resultId, companyId, issueId: blockerId, runId, completionContractId: contractId,
+      serverFingerprint: randomUUID(), schemaStatus: "accepted", resultJson: {}, canonicalSha256: randomUUID() });
+    const [task] = await db.select().from(issues).where(eq(issues.id, blockerId));
+    await db.insert(workAssessments).values({ id: assessmentId, companyId, issueId: blockerId, runId, contractId, resultId,
+      triggerKind: "native_result", triggerActorCompanyId: companyId, priorIssueStatus: task!.status,
+      priorStatusVersion: task!.statusVersion, policyVersion: "parked-test", assessmentJson: {}, inputDigest: randomUUID() });
+    await db.insert(nativeRunFinalizations).values({ runId, companyId, issueId: blockerId, phase: "arbitrating", resultId });
+    await commitNativeStatusDecision({ db, companyId, issueId: blockerId, runId, assessmentId,
+      priorStatus: task!.status, priorStatusVersion: task!.statusVersion, priorDecisionId: task!.lastStatusDecisionId,
+      decision: { policyVersion: NATIVE_STATUS_ARBITER_POLICY_VERSION, statusAction: "blocked", toStatus: "blocked",
+        reasonCode: "parked_blocker_test", unblockDescriptor: null, effects: [] } });
+    await db.update(heartbeatRuns).set({ status: "succeeded", finishedAt: new Date() }).where(eq(heartbeatRuns.id, runId));
+
+    await heartbeat.dispatchPendingNativeStatusWakeups({ companyId });
+    await heartbeat.drainActiveRunExecutions();
+    const waiterRuns = await db.select({ status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode, contextSnapshot: heartbeatRuns.contextSnapshot })
+      .from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.agentId, qaId)));
+    expect(waiterRuns).toHaveLength(1);
+    expect(waiterRuns[0]!.errorCode ?? null).toBeNull();
+    expect(waiterRuns[0]!.status).toBe("succeeded");
+    // The dependency is still unresolved, so the waiter gets the restricted turn, not its normal work.
+    expect(waiterRuns[0]!.contextSnapshot).toMatchObject({
+      wakeReason: "issue_blocker_parked",
+      dependencyBlockedInteraction: true,
+      unresolvedBlockerIssueIds: [blockerId],
+      blockerParked: { blockerIssueId: blockerId },
+    });
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+
+    // Another dispatch pass delivers nothing new.
+    await heartbeat.dispatchPendingNativeStatusWakeups({ companyId });
+    await heartbeat.drainActiveRunExecutions();
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+
+    // The native source alone is not enough: without the transition's key the wake stays behind the dependency gate.
+    const forged = await heartbeat.wakeup(qaId, {
+      source: "automation", triggerDetail: "system", reason: "issue_blocker_parked",
+      payload: { issueId: waiterId }, requestedByActorType: "agent", requestedByActorId: qaId,
+      contextSnapshot: { ...(waiterRuns[0]!.contextSnapshot as Record<string, unknown>), dependencyBlockedInteraction: undefined },
+    });
+    expect(forged).toBeNull();
+    await heartbeat.drainActiveRunExecutions();
+    expect(mockAdapterExecute).toHaveBeenCalledTimes(1);
+    // The finalization row references the committed decision; release it before shared cleanup.
+    await db.delete(nativeRunFinalizations).where(eq(nativeRunFinalizations.runId, runId));
   });
 
   it("runs the agent a blocked sibling task names as the one who must unblock it", async () => {

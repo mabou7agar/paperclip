@@ -723,6 +723,50 @@ describeEmbeddedPostgres("wake-queue postgres adapter", () => {
     expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId))).toHaveLength(0);
   });
 
+  it("runs the new assignee's parked wake once a verified legacy reassignment released the old conversation hold", async () => {
+    const companyId = await seedCompany();
+    const agentId = await seedAgent({ companyId });
+    const nextAgentId = await seedAgent({ companyId, name: "NextOwner" });
+    // A person reassigned the task while the old agent's legacy conversation run
+    // was live. The run was stopped for it, settled cleanly, and its hold resolved.
+    const issueId = await seedIssue({ companyId, assigneeAgentId: nextAgentId, status: "in_progress" });
+    const runId = await seedRun({ companyId, agentId, status: "cancelled", errorCode: "issue_reassigned", contextSnapshot: { issueId } });
+    const startedAt = new Date(Date.now() - 10 * 60_000), finishedAt = new Date(Date.now() - 5 * 60_000);
+    await db.update(heartbeatRuns).set({ runtimeMode: "legacy", issueId, startedAt, finishedAt, executionStage: "settled",
+      nextEventSeq: 2, runnerProfileJson: { adapterDispatch: { adapterType: "codex_local" } },
+      resultJson: { reassignmentStopConfirmed: true, issueMutationStopId: randomUUID(),
+        cancellation: { source: "control_plane", expected: true } } }).where(eq(heartbeatRuns.id, runId));
+    await db.insert(heartbeatRunEvents).values({ companyId, runId, agentId, seq: 1, eventType: "lifecycle", stream: "system",
+      payload: { phase: "task.run.measured", outcome: "cancelled", durableSettlement: true },
+      createdAt: new Date(finishedAt.getTime() + 1_000) });
+    await db.insert(activityLog).values({ companyId, actorType: "user", actorId: "person", action: "issue.updated",
+      entityType: "issue", entityId: issueId, createdAt: new Date(startedAt.getTime() + 60_000),
+      details: { assigneeAgentId: nextAgentId, _previous: { assigneeAgentId: agentId } } });
+    await db.insert(issueRecoveryActions).values({ companyId, sourceIssueId: issueId, kind: "active_run_watchdog",
+      status: "resolved", outcome: "restored", resolvedAt: finishedAt, returnOwnerAgentId: agentId,
+      cause: "legacy_execution_requires_reconciliation", fingerprint: `reassigned:${runId}`,
+      nextAction: "The new owner continues the task.", evidence: { runId, automaticRecovery: { runId, replay: "blocked" } } });
+    await db.update(issues).set({ executionRunId: runId, checkoutRunId: runId }).where(eq(issues.id, issueId));
+    const assignmentWakeId = await seedDeferredWake({ companyId, agentId: nextAgentId, issueId });
+    await db.update(agentWakeupRequests).set({ source: "assignment", reason: "issue_assigned" })
+      .where(eq(agentWakeupRequests.id, assignmentWakeId));
+    const release = createReleaseIssueExecution({ issueLock: createPostgresWakeQueueAdapter(db, stubDeps),
+      recovery: { escalateStrandedAssignedIssue: async () => { throw new Error("must not escalate a stopped run"); },
+        escalateStrandedRecoveryIssueInPlace: async () => { throw new Error("must not escalate a stopped run"); } },
+    });
+
+    const result = await release({ companyId, runId, now: new Date() });
+
+    expect(result.outcome.kind).toBe("promoted");
+    const successors = await db.select().from(heartbeatRuns).where(and(eq(heartbeatRuns.companyId, companyId),
+      eq(heartbeatRuns.agentId, nextAgentId)));
+    expect(successors).toHaveLength(1);
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.id, assignmentWakeId)))[0])
+      .toMatchObject({ status: "queued", runId: successors[0]!.id });
+    // No new reconciliation incident: the resolved hold is the only recovery record.
+    expect(await db.select().from(issueRecoveryActions).where(eq(issueRecoveryActions.sourceIssueId, issueId))).toHaveLength(1);
+  });
+
   it("releases an acknowledged interrupt Stop without blocking or retiring the settling executor", async () => {
     const companyId = await seedCompany();
     const agentId = await seedAgent({ companyId });
