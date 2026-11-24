@@ -5,6 +5,7 @@ import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { and, eq } from "drizzle-orm";
 import { beforeAll, afterAll, afterEach, describe, it, expect, vi } from "vitest";
+import type { IssueExecutionState } from "@paperclipai/shared";
 import { createDb, companies, agents, projects, projectWorkspaces, executionWorkspaces,
   executionWorkspaceRuntimeLeases, heartbeatRuns, nativeRunFinalizations, issues, activityLog, completionContracts, agentWakeupRequests, type Db } from "@paperclipai/db";
 import { startEmbeddedPostgresTestDatabase } from "../__tests__/helpers/embedded-postgres.js";
@@ -17,6 +18,12 @@ import { CONTROL_PLANE_CONFORMANCE_RESULT, CONTROL_PLANE_CONFORMANCE_TERMINAL } 
 import { SourceReviewCaptureUnavailable } from "./source-review-capture-error.js";
 import { finalizeNativeRun, recordNativeFinalizationFailure } from "./native-runtime/native-run-finalizer.js";
 
+// Opt-in suite. server/vitest.config.ts excludes this file unless
+// PAPERCLIP_SOURCE_MEMORY_TESTS=1, and it also needs the operator-provided
+// SOURCE_MEMORY_BUILT_SERVICE and SOURCE_MEMORY_READER_FIXTURE inputs (see the
+// source_memory job in .github/workflows/pr-trusted.yml). It is still
+// type-checked with the rest of the server.
+//
 // Exercise the actual emitted worker, not a TS-loader child. No authorization
 // service is mocked: only select the operator-qualified production JS artifact.
 vi.mock("./source-memory.js", async () => {
@@ -26,6 +33,13 @@ vi.mock("./source-memory.js", async () => {
   if (!file || !isAbsolute(file) || !file.endsWith(".js")) throw new Error("SOURCE_MEMORY_BUILT_SERVICE must name the qualified emitted service");
   return import(/* @vite-ignore */ pathToFileURL(file).href);
 });
+
+// The issues row types execution_state/execution_policy as open JSON records.
+// These are type-only views of the persisted values; the assertions below still
+// check the stored JSON at runtime.
+const stateOf = (row: { executionState?: unknown } | null | undefined) =>
+  (row?.executionState ?? null) as IssueExecutionState | null;
+const policyColumn = (policy: unknown) => policy as Record<string, unknown> | null;
 
 // Always creates a new disposable database; never uses an external/private DB URL.
 // Requires an approved built server artifact for the real spawned source worker.
@@ -61,7 +75,7 @@ describe('source review handoff transaction (synthetic only)', () => {
     await db.insert(projects).values({ id: projectId, companyId, name: 'Synthetic' });
     await db.insert(projectWorkspaces).values({ id: sourceId, companyId, projectId, name: 'Source', cwd: repo, repoUrl: 'https://github.com/synthetic/review' });
     await db.insert(issues).values({ id: issueId, companyId, projectId, projectWorkspaceId: sourceId, title: 'Review final source', status: 'in_progress', assigneeAgentId: agentId,
-      executionPolicy: normalizeIssueExecutionPolicy({ stages: [{ id: stageId, type: 'review', participants: [{ type: 'agent', agentId: reviewerId, userId: null }] }] }) });
+      executionPolicy: policyColumn(normalizeIssueExecutionPolicy({ stages: [{ id: stageId, type: 'review', participants: [{ type: 'agent', agentId: reviewerId, userId: null }] }] })) });
     await db.insert(executionWorkspaces).values({ id: workspaceId, companyId, projectId, projectWorkspaceId: sourceId, sourceIssueId: issueId,
       mode: 'isolated_workspace', strategyType: 'git_worktree', providerType: 'git_worktree', name: 'Synthetic', cwd: repo, providerRef: repo,
       repoUrl: 'https://github.com/synthetic/review', branchName: 'candidate' });
@@ -88,10 +102,10 @@ describe('source review handoff transaction (synthetic only)', () => {
     const f = await seed();
     expect(await hasConfiguredSourceReviewGate(db, f)).toBe(true);
     const entered = await f.enter(mode === 'explicit' ? f.sha : null);
-    expect(entered?.executionState?.reviewRequest?.candidateSha).toBe(f.sha);
+    expect(stateOf(entered)?.reviewRequest?.candidateSha).toBe(f.sha);
     expect(entered?.assigneeAgentId).toBe(f.reviewerId);
-    expect(entered?.executionState?.sourceReviewCapture).toMatchObject({ issueId: f.issueId, stageId: f.stageId, participantAgentId: f.reviewerId, writerRunId: f.runId });
-    const state = entered!.executionState!, scope = { companyId: f.companyId, issueId: f.issueId, workspaceId: f.workspaceId, bindingRevision: entered!.workspaceBindingRevision };
+    expect(stateOf(entered)?.sourceReviewCapture).toMatchObject({ issueId: f.issueId, stageId: f.stageId, participantAgentId: f.reviewerId, writerRunId: f.runId });
+    const state = stateOf(entered)!, scope = { companyId: f.companyId, issueId: f.issueId, workspaceId: f.workspaceId, bindingRevision: entered!.workspaceBindingRevision };
     expect(sourceReviewCandidateSha(state, f.reviewerId, scope)).toBe(f.sha);
     for (const badScope of [{ ...scope, issueId: randomUUID() }, { ...scope, workspaceId: randomUUID() }, { ...scope, bindingRevision: 99 }]) expect(sourceReviewCandidateSha(state, f.reviewerId, badScope)).toBeNull();
     expect(sourceReviewCandidateSha({ ...state, currentStageId: randomUUID() }, f.reviewerId, scope)).toBeNull();
@@ -100,17 +114,17 @@ describe('source review handoff transaction (synthetic only)', () => {
     f.git('-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.invalid', 'commit', '-qm', 'later HEAD');
     await issueService(db).update(f.issueId, { status: 'in_review' });
     const [after] = await db.select().from(issues).where(eq(issues.id, f.issueId));
-    expect(after!.executionState?.reviewRequest?.candidateSha).toBe(f.sha);
+    expect(stateOf(after)?.reviewRequest?.candidateSha).toBe(f.sha);
     const events = await db.select().from(activityLog).where(and(eq(activityLog.entityId, f.issueId), eq(activityLog.action, 'issue.source_review_candidate_captured')));
     expect(events).toHaveLength(1);
   });
   it('advances two review stages without recapturing reviewer-time HEAD', async () => {
     const f = await seed(), secondStageId = randomUUID(), secondReviewerId = randomUUID();
     await db.insert(agents).values({ id: secondReviewerId, companyId: f.companyId, name: 'Second reviewer', adapterType: 'paperclip_runner' });
-    await db.update(issues).set({ executionPolicy: normalizeIssueExecutionPolicy({ stages: [
+    await db.update(issues).set({ executionPolicy: policyColumn(normalizeIssueExecutionPolicy({ stages: [
       { id: f.stageId, type: 'review', participants: [{ type: 'agent', agentId: f.reviewerId, userId: null }] },
       { id: secondStageId, type: 'review', participants: [{ type: 'agent', agentId: secondReviewerId, userId: null }] },
-    ] }) }).where(eq(issues.id, f.issueId));
+    ] })) }).where(eq(issues.id, f.issueId));
     const entered = await f.enter();
     await writeFile(join(f.repo, 'example.ts'), 'later reviewer-time HEAD\n'); f.git('add', '.');
     f.git('-c', 'core.hooksPath=/dev/null', '-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.invalid', 'commit', '-qm', 'later HEAD');
@@ -118,16 +132,16 @@ describe('source review handoff transaction (synthetic only)', () => {
     const transition = applyIssueExecutionPolicyTransition({ issue: entered!, policy: normalizeIssueExecutionPolicy(entered!.executionPolicy)!,
       requestedStatus: 'done', requestedAssigneePatch: {}, actor: { agentId: f.reviewerId, userId: null }, commentBody: 'Approve the frozen candidate.' });
     const advanced = await issueService(db).update(f.issueId, { ...transition.patch, actorAgentId: f.reviewerId });
-    expect(advanced!.executionState!.sourceReviewCapture).toEqual({ ...entered!.executionState!.sourceReviewCapture,
+    expect(stateOf(advanced)!.sourceReviewCapture).toEqual({ ...stateOf(entered)!.sourceReviewCapture,
       stageId: secondStageId, participantAgentId: secondReviewerId });
-    expect(advanced!.executionState!.reviewRequest!.candidateSha).toBe(f.sha);
+    expect(stateOf(advanced)!.reviewRequest!.candidateSha).toBe(f.sha);
     expect(await db.select().from(activityLog).where(and(eq(activityLog.entityId, f.issueId), eq(activityLog.action, 'issue.source_review_candidate_captured')))).toHaveLength(1);
   });
   it.each(['participant-rebind', 'completed-stage-skip'] as const)('E2 %s preserves the persisted writer candidate through the real policy transaction', async mode => {
     const f = await seed(), replacementId = randomUUID(), skippedId = randomUUID(), nextId = randomUUID();
     await db.insert(agents).values({ id: replacementId, companyId: f.companyId, name: 'Replacement reviewer', adapterType: 'paperclip_runner' });
     const entered = await f.enter();
-    const oldState = entered!.executionState!;
+    const oldState = stateOf(entered)!;
     const completedStageIds = mode === 'completed-stage-skip' ? [skippedId] : [];
     const policy = normalizeIssueExecutionPolicy({ stages: mode === 'participant-rebind' ? [
       { id: f.stageId, type: 'review', participants: [{ type: 'agent', agentId: replacementId, userId: null }] },
@@ -136,7 +150,7 @@ describe('source review handoff transaction (synthetic only)', () => {
       { id: skippedId, type: 'review', participants: [{ type: 'agent', agentId: replacementId, userId: null }] },
       { id: nextId, type: 'review', participants: [{ type: 'agent', agentId: replacementId, userId: null }] },
     ] })!;
-    await db.update(issues).set({ executionPolicy: policy, executionState: { ...oldState, completedStageIds } }).where(eq(issues.id, f.issueId));
+    await db.update(issues).set({ executionPolicy: policyColumn(policy), executionState: { ...oldState, completedStageIds } as unknown as Record<string, unknown> }).where(eq(issues.id, f.issueId));
     const [task] = await db.select().from(issues).where(eq(issues.id, f.issueId));
     // No reviewer owns the writer lease and HEAD has advanced: a recapture must fail.
     await writeFile(join(f.repo, 'example.ts'), 'reviewer-time HEAD\n'); f.git('add', '.');
@@ -145,9 +159,9 @@ describe('source review handoff transaction (synthetic only)', () => {
       requestedStatus: mode === 'participant-rebind' ? 'in_review' : 'done', requestedAssigneePatch: {},
       actor: { agentId: f.reviewerId, userId: null }, commentBody: 'Approve the original frozen candidate.' });
     const updated = await issueService(db).update(f.issueId, { ...transition.patch, actorAgentId: f.reviewerId });
-    expect(updated!.executionState!.sourceReviewCapture).toEqual({ ...oldState.sourceReviewCapture,
+    expect(stateOf(updated)!.sourceReviewCapture).toEqual({ ...oldState.sourceReviewCapture,
       stageId: mode === 'participant-rebind' ? f.stageId : nextId, participantAgentId: replacementId });
-    expect(updated!.executionState!.reviewRequest!.candidateSha).toBe(f.sha);
+    expect(stateOf(updated)!.reviewRequest!.candidateSha).toBe(f.sha);
     expect(updated!.assigneeAgentId).toBe(replacementId);
     expect(await db.select().from(activityLog).where(and(eq(activityLog.entityId, f.issueId), eq(activityLog.action, 'issue.source_review_candidate_captured')))).toHaveLength(1);
   });
@@ -209,7 +223,7 @@ describe('source review handoff transaction (synthetic only)', () => {
     await finalize(); await finalize();
     const [task] = await db.select().from(issues).where(eq(issues.id, f.issueId));
     expect(task).toMatchObject({ status: 'in_review', assigneeAgentId: f.reviewerId });
-    expect(task!.executionState?.reviewRequest?.candidateSha).toBe(f.sha);
+    expect(stateOf(task)?.reviewRequest?.candidateSha).toBe(f.sha);
     expect(await db.select().from(activityLog).where(and(eq(activityLog.entityId, f.issueId), eq(activityLog.action, 'issue.source_review_candidate_captured')))).toHaveLength(1);
     expect(await db.select().from(agentWakeupRequests).where(and(eq(agentWakeupRequests.companyId, f.companyId), eq(agentWakeupRequests.agentId, f.reviewerId)))).toHaveLength(1);
   });

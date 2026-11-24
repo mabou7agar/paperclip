@@ -189,14 +189,29 @@ function makeIssue() {
   };
 }
 
+// Mirrors the update-control fields that issueService.update() removes before
+// it writes the row and builds the receipt. The route passes these alongside
+// the column patch; they are never issue columns and never part of `changes`.
 function issueUpdateWithReceipt(issue: ReturnType<typeof makeIssue>, patch: Record<string, unknown>) {
   const {
+    labelIds: _labelIds,
+    blockedByIssueIds: _blockedByIssueIds,
     actorAgentId: _actorAgentId,
     actorRunId: _actorRunId,
+    caseHandoffId: _caseHandoffId,
     actorRunStopId: _actorRunStopId,
+    sourceReviewHandoffOwner: _sourceReviewHandoffOwner,
+    sourceReviewRequestedCandidate: _sourceReviewRequestedCandidate,
     actorUserId: _actorUserId,
+    companyGuard: _companyGuard,
     workspaceSelectionActor: _workspaceSelectionActor,
-    blockedByIssueIds: _blockedByIssueIds,
+    expectedExecutionPolicy: _expectedExecutionPolicy,
+    expectedStatusVersion: _expectedStatusVersion,
+    expectedReviewSnapshot: _expectedReviewSnapshot,
+    allowProgressReviewConfiguration: _allowProgressReviewConfiguration,
+    parentDepthPolicy: _parentDepthPolicy,
+    expectedParentId: _expectedParentId,
+    originIssueId: _originIssueId,
     ...issuePatch
   } = patch;
   const updated = {

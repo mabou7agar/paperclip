@@ -4302,6 +4302,9 @@ const dependencyTestDatabaseUrl = resolveExternalTestDatabaseUrl("PAPERCLIP_ISSU
       title: "Receipt issue",
       priority: "high",
       description: "new description",
+      // Control fields the PATCH route always sends; they must never reach the receipt.
+      allowProgressReviewConfiguration: true,
+      sourceReviewRequestedCandidate: null,
     });
     expect(fieldUpdate?.changes).toEqual({
       priority: { from: "medium", to: "high" },
