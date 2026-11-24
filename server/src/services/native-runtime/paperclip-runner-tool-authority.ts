@@ -306,7 +306,7 @@ export function taskBridgeApiRequest(tool: string, input: Record<string, any>): 
   const [method, path] = TASK_API_PATHS[tool]!;
   const operation = runnerApiCatalog().find(operation => operation.method === method && operation.path === path);
   if (!operation) throw new Error("runner_task_api_operation_unavailable");
-  const body = tool === "comment_on_task" ? { body: input.body, ...(input.resume === true ? { resume: true } : {}) } : tool === "write_task_document"
+  const body = tool === "comment_on_task" ? { body: input.body, ...(input.resume === true ? { resume: true } : {}), ...(input.notifyAssignee === false ? { notifyAssignee: false } : {}) } : tool === "write_task_document"
     ? { title: input.title, format: "markdown", body: input.body, baseRevisionId: input.baseRevisionId } : undefined;
   return { operationId: operation.operationId, pathParams: { id: input.taskId, ...(input.key ? { key: input.key } : {}) }, ...(body ? { body } : {}) };
 }

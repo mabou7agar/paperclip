@@ -2530,6 +2530,14 @@ function renderPaperclipWakePromptBody(
           "",
         ]
       : [];
+  // Every comment from another agent wakes a task's assignee. Information-only
+  // notes sent that way start runs that only answer "nothing to do", which wake
+  // the next agent in turn; notifyAssignee: false saves them without a wake.
+  const quietCommentGuidanceLines = externalChatContract
+    ? []
+    : [
+        "When a comment you post only acknowledges, cross-links, or notes something that asks nothing of that task's assignee (for example a changed card ID), send it with `notifyAssignee: false` so it is saved without waking them, or skip it. Leave the default when the comment gives, changes, or delivers something the assignee must act on.",
+      ];
   const lines = resumedSession
     ? [
         "## Paperclip Resume Delta",
@@ -2542,6 +2550,7 @@ function renderPaperclipWakePromptBody(
           : [
               "Fetch the API thread only when `fallbackFetchNeeded` is true or you need broader history than this batch.",
             ]),
+        ...quietCommentGuidanceLines,
         "",
         ...externalInteractionContinuationLines,
         ...wakeContractLines,
@@ -2572,6 +2581,7 @@ function renderPaperclipWakePromptBody(
               "Only fetch the API thread when `fallbackFetchNeeded` is true or you need broader history than this batch.",
             ]
           : []),
+        ...quietCommentGuidanceLines,
         "",
         ...externalInteractionContinuationLines,
         ...wakeContractLines,
