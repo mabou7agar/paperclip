@@ -3,18 +3,22 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { eq, sql } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import {
   activityLog,
+  agentTaskSessions,
   agentWakeupRequests,
   agents,
+  approvals,
   budgetPolicies,
   companies,
   createDb,
   environmentLeases,
   heartbeatRunEvents,
   heartbeatRuns,
+  issueApprovals,
   issueComments,
+  issueRelations,
   issues,
   nativeRunFinalizations,
   sandboxCreationOperations,
@@ -671,4 +675,79 @@ describe("report-only ownership reconciliation", () => {
       await coordinator.stop();
     }
   }, 90_000);
+
+  it("reports a stalled task again only after its status version or assignee changes", async () => {
+    const stalled = randomUUID();
+    await db.insert(issues).values({ id: stalled, companyId, title: "Stalled", status: "in_progress",
+      assigneeAgentId: agentId, updatedAt: minutesAgo(30) });
+    const state = createOwnershipReportState();
+    const stalledViolations = (report: OwnershipReport) =>
+      report.newViolations.filter(violation => violation.rule === "I7_visible_next_action" && violation.recordId === stalled);
+
+    const first = await runOwnershipReconciliationPass(db, { state });
+    const [statusVersion] = (await db.select({ statusVersion: issues.statusVersion }).from(issues).where(eq(issues.id, stalled)));
+    expect(stalledViolations(first)).toEqual([expect.objectContaining({ reason: "no_owner_no_wake",
+      monitoringFingerprint: JSON.stringify(["visible_next_action", statusVersion!.statusVersion, agentId]) })]);
+    expect(stalledViolations(await runOwnershipReconciliationPass(db, { state }))).toEqual([]);
+
+    // The same task moved through another status change and is stalled again: a new episode.
+    await db.update(issues).set({ statusVersion: statusVersion!.statusVersion + 1, updatedAt: minutesAgo(30) }).where(eq(issues.id, stalled));
+    expect(stalledViolations(await runOwnershipReconciliationPass(db, { state }))).toHaveLength(1);
+
+    // Reassigned to another agent and stalled there: also new.
+    const other = randomUUID();
+    await db.insert(agents).values({ id: other, companyId, name: "Other", role: "engineer", adapterType: "codex_local" });
+    await db.update(issues).set({ assigneeAgentId: other, updatedAt: minutesAgo(30) }).where(eq(issues.id, stalled));
+    expect(stalledViolations(await runOwnershipReconciliationPass(db, { state }))).toHaveLength(1);
+  });
+
+  it("reports a stalled task exactly at the end of its grace window", async () => {
+    const now = new Date();
+    const stalled = randomUUID();
+    await db.insert(issues).values({ id: stalled, companyId, title: "Boundary", status: "in_progress",
+      assigneeAgentId: agentId, updatedAt: new Date(now.getTime() - 5 * 60_000) });
+    const report = await runOwnershipReconciliationPass(db, { state: createOwnershipReportState(), record: false, now });
+    expect(report.violations.filter(violation => violation.rule === "I7_visible_next_action").map(violation => violation.recordId))
+      .toEqual([stalled]);
+  });
+
+  it("keeps tasks that already have a recorded wait path out of the next-action report", async () => {
+    const pausedAgent = randomUUID();
+    await db.insert(agents).values({ id: pausedAgent, companyId, name: "Paused", role: "engineer", adapterType: "codex_local", status: "paused" });
+    const stalled = (title: string, extra: Partial<typeof issues.$inferInsert> = {}) => ({ id: randomUUID(), companyId, title,
+      status: "in_progress", assigneeAgentId: agentId, updatedAt: minutesAgo(30), ...extra });
+    const control = stalled("No wait path");
+    const pendingReview = stalled("Waiting for its reviewer", { executionState: { status: "pending" } });
+    const waitingOnDependency = stalled("Waiting on a dependency");
+    const dependency = stalled("Dependency not started", { status: "todo" });
+    const waitingOnApproval = stalled("Waiting on an approval");
+    const pausedAssignee = stalled("Assigned to a paused agent", { assigneeAgentId: pausedAgent });
+    const userAssigned = stalled("Also assigned to a person", { assigneeUserId: "person" });
+    const hidden = stalled("Hidden", { hiddenAt: new Date() });
+    const privateTask = stalled("Private", { visibility: "private" });
+    const pluginTask = stalled("Plugin task", { originKind: "plugin:fixture" });
+    const chatTask = stalled("Chat channel task", { originKind: "chat_channel" });
+    const pausedGoal = stalled("Paused session goal");
+    await db.insert(issues).values([control, pendingReview, waitingOnDependency, dependency, waitingOnApproval, pausedAssignee,
+      userAssigned, hidden, privateTask, pluginTask, chatTask, pausedGoal]);
+    await db.insert(issueRelations).values({ companyId, issueId: dependency.id, relatedIssueId: waitingOnDependency.id, type: "blocks" });
+    const approvalId = randomUUID();
+    await db.insert(approvals).values({ id: approvalId, companyId, type: "fixture", payload: {}, status: "pending" });
+    await db.insert(issueApprovals).values({ companyId, issueId: waitingOnApproval.id, approvalId });
+    await db.insert(agentTaskSessions).values({ companyId, agentId, adapterType: "codex_local", taskKey: pausedGoal.id, goalStatus: "paused" });
+
+    const report = await runOwnershipReconciliationPass(db, { state: createOwnershipReportState(), record: false });
+    expect(report.violations.filter(violation => violation.rule === "I7_visible_next_action").map(violation => violation.recordId))
+      .toEqual([control.id]);
+
+    // Each exclusion is the reason, not the fixture: once the wait path is gone, the task is reported.
+    await db.update(issues).set({ status: "done" }).where(eq(issues.id, dependency.id));
+    await db.update(approvals).set({ status: "approved" }).where(eq(approvals.id, approvalId));
+    await db.update(agentTaskSessions).set({ goalStatus: "active" }).where(eq(agentTaskSessions.taskKey, pausedGoal.id));
+    await db.update(issues).set({ updatedAt: minutesAgo(30) })
+      .where(inArray(issues.id, [waitingOnDependency.id, waitingOnApproval.id, pausedGoal.id]));
+    const after = await runOwnershipReconciliationPass(db, { state: createOwnershipReportState(), record: false });
+    expect(after.violations.filter(violation => violation.rule === "I7_visible_next_action").map(violation => violation.recordId).sort())
+      .toEqual([control.id, waitingOnDependency.id, waitingOnApproval.id, pausedGoal.id].sort());
+  });
 });
