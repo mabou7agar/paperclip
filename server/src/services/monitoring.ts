@@ -179,6 +179,17 @@ export function monitoringService(db: Db, deps: MonitoringServiceDeps = {}) {
   return {
     policy,
     alerts: repository.alerts,
+    /**
+     * Whether this observation's owner nudge already ran to an outcome (woken
+     * or failed). Callers use it to skip costly re-checks; a nudge that was
+     * refused by the window or an ineligible agent has no record and may still
+     * fire later, so it reads as not settled.
+     */
+    async ownerNudgeSettled(observation: MonitoringObservation) {
+      const record = await repository.ownerNudgeRecord(monitoringOwnerNudgeId(monitoringAlertId(observation)));
+      const details = (record?.details ?? {}) as Record<string, unknown>;
+      return "ownerNudged" in details || "wakeError" in details;
+    },
     async savePolicy(companyId: string, input: unknown, userId: string) {
       const value = monitoringPolicySchema.parse(input);
       await repository.save(companyId, value);
