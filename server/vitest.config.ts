@@ -54,5 +54,15 @@ export default defineConfig({
       hooks: "list",
     },
     setupFiles: ["./src/__tests__/setup-supertest.ts"],
+    // Most suites seed a fresh company and start real runs. A fresh company's
+    // first run installs the bundled skills, and with skill package storage
+    // on each install builds, stores and re-verifies a package archive
+    // (~0.25 s per skill on a slow disk, ~2.8 s per run), which races the
+    // suites' short spawn waits. Package storage is off by default here; the
+    // suites that test the package path switch it on themselves. An explicit
+    // value in the environment still wins.
+    env: {
+      PAPERCLIP_SKILL_PACKAGE_STORAGE_ENABLED: process.env.PAPERCLIP_SKILL_PACKAGE_STORAGE_ENABLED ?? "false",
+    },
   },
 });

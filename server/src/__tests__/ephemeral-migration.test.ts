@@ -29,6 +29,16 @@ import { skillInstallationMaintenance } from "../services/skill-installation-mai
 import { migrateLocalSkillPackageObjects } from "../services/skill-package-storage-migration.js";
 import { companySkills, companySkillRepositorySnapshots } from "@paperclipai/db";
 
+// This suite exercises skill package storage, which server/vitest.config.ts
+// turns off by default for speed. Switch it on for this file and restore it.
+const previousSkillPackageStorage = process.env.PAPERCLIP_SKILL_PACKAGE_STORAGE_ENABLED;
+beforeAll(() => { process.env.PAPERCLIP_SKILL_PACKAGE_STORAGE_ENABLED = "true"; });
+afterAll(() => {
+  if (previousSkillPackageStorage === undefined) delete process.env.PAPERCLIP_SKILL_PACKAGE_STORAGE_ENABLED;
+  else process.env.PAPERCLIP_SKILL_PACKAGE_STORAGE_ENABLED = previousSkillPackageStorage;
+});
+
+
 // Explicit real-dependency qualification. Never contacts off-host storage in
 // the default test path; use a disposable S3-compatible service and PostgreSQL.
 describe.skipIf(!process.env.PAPERCLIP_TEST_S3_ENDPOINT)("existing-volume enrollment with PostgreSQL and S3", () => {
