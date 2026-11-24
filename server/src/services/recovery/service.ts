@@ -2124,6 +2124,14 @@ export function recoveryService(
     return queued;
   }
 
+  /** The review view's own verdict: in review and no maintained action path. */
+  async function isStalledReviewWithoutPath(issue: RecoveryIssue) {
+    const attention = await issuesSvc.listReviewAttention(issue.companyId, [
+      { id: issue.id, companyId: issue.companyId, status: issue.status },
+    ]);
+    return attention.get(issue.id)?.state === "stalled";
+  }
+
   async function enqueueInitialAssignedTodoDispatch(
     issue: RecoveryIssue,
     agentId: string,
@@ -5239,6 +5247,22 @@ export function recoveryService(
 
       if (issue.status === "in_review") {
         if (!participantAgentId || !pendingExecutionState) {
+          // A review with no review stage at all is maintained by nothing here
+          // (no participant to requeue, and the one-shot review-path recovery
+          // only fires when an existing path is consumed). When the review
+          // view also finds no maintained path, report it: alert-only
+          // monitoring then nudges the assignee once; in any other mode
+          // observe() records nothing and this stays a plain skip. A pending
+          // stage whose participant is a person is a human review: left alone.
+          if (!pendingExecutionState && issue.assigneeAgentId
+            && await isStalledReviewWithoutPath(issue)) {
+            await monitoringService(db).observe({
+              companyId: issue.companyId, issueId: issue.id, kind: "no_execution_path",
+              // Each re-entry into review is a new stuck state; the nudge's
+              // per-task window still bounds the wakes.
+              fingerprint: JSON.stringify(["review_without_path", issue.statusVersion]),
+            });
+          }
           result.skipped += 1;
           continue;
         }
