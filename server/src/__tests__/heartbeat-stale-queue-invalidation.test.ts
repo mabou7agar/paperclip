@@ -107,31 +107,69 @@ async function waitForCondition(fn: () => Promise<boolean>, timeoutMs = 15_000) 
   return fn();
 }
 
-async function cleanupHeartbeatInvalidationFixture(db: ReturnType<typeof createDb>) {
-  await truncateTablesWithDeadlockRetry(
-    db,
-    `
-      TRUNCATE TABLE
-        "company_skills",
-        "issue_comments",
-        "issue_documents",
-        "document_revisions",
-        "documents",
-        "issue_relations",
-        "issue_tree_holds",
-        "issues",
-        "heartbeat_run_events",
-        "cost_events",
-        "activity_log",
-        "heartbeat_runs",
-        "agent_wakeup_requests",
-        "agent_runtime_state",
-        "agents",
-        "companies"
-      RESTART IDENTITY CASCADE
-    `,
-    { attempts: 10, delayMs: () => 100 },
-  );
+const HEARTBEAT_INVALIDATION_FIXTURE_TABLES = [
+  "company_skills",
+  "issue_comments",
+  "issue_documents",
+  "document_revisions",
+  "documents",
+  "issue_relations",
+  "issue_tree_holds",
+  "issues",
+  "heartbeat_run_events",
+  "cost_events",
+  "activity_log",
+  "heartbeat_runs",
+  "agent_wakeup_requests",
+  "agent_runtime_state",
+  "agents",
+  "companies",
+];
+
+// Per-test reset with the same effect as
+//   TRUNCATE <fixture tables> RESTART IDENTITY CASCADE
+// but without TRUNCATE's file churn. TRUNCATE gives every table it touches a
+// new relation file, and CASCADE reaches every company-scoped table (and its
+// indexes and TOAST relations). Across this file's 133 tests that left about
+// 280,000 files in the cluster's data directory, and removing the directory in
+// afterAll took longer than the 30-second hook timeout. DELETE reuses the
+// existing files. FK triggers are disabled for the reset, so every table that
+// CASCADE would reach is listed explicitly; the list is computed from the live
+// schema so new company-scoped tables are covered without editing this file.
+async function buildHeartbeatInvalidationResetStatement(db: ReturnType<typeof createDb>): Promise<string> {
+  const roots = sql.join(HEARTBEAT_INVALIDATION_FIXTURE_TABLES.map((table) => sql`${table}::regclass`), sql`, `);
+  const closure = sql`
+    WITH RECURSIVE reached(oid) AS (
+      SELECT unnest(ARRAY[${roots}])::oid
+      UNION
+      SELECT constraint_row.conrelid
+      FROM pg_constraint constraint_row
+      JOIN reached ON constraint_row.confrelid = reached.oid
+      WHERE constraint_row.contype = 'f'
+    )`;
+  const tables = await db.execute<{ name: string }>(sql`${closure} SELECT oid::regclass::text AS name FROM reached ORDER BY 1`);
+  const sequences = await db.execute<{ name: string; start: string }>(sql`${closure}
+    SELECT sequence_class.oid::regclass::text AS name, sequence_row.seqstart::text AS start
+    FROM pg_depend dependency
+    JOIN reached ON dependency.refobjid = reached.oid
+    JOIN pg_class sequence_class ON sequence_class.oid = dependency.objid AND sequence_class.relkind = 'S'
+    JOIN pg_sequence sequence_row ON sequence_row.seqrelid = sequence_class.oid
+    WHERE dependency.classid = 'pg_class'::regclass
+      AND dependency.refclassid = 'pg_class'::regclass
+      AND dependency.deptype IN ('a', 'i')
+    ORDER BY 1`);
+  const literal = (value: string) => `'${value.replaceAll("'", "''")}'`;
+  return [
+    "DO $reset$ BEGIN",
+    "SET LOCAL session_replication_role = replica;",
+    ...[...tables].map(({ name }) => `DELETE FROM ${name};`),
+    ...[...sequences].map(({ name, start }) => `PERFORM setval(${literal(name)}, ${start}, false);`),
+    "END $reset$;",
+  ].join("\n");
+}
+
+async function cleanupHeartbeatInvalidationFixture(db: ReturnType<typeof createDb>, resetStatement: string) {
+  await truncateTablesWithDeadlockRetry(db, resetStatement, { attempts: 10, delayMs: () => 100 });
 }
 
 type SeedOptions = {
@@ -150,6 +188,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
   let db!: ReturnType<typeof createDb>;
   let heartbeat!: ReturnType<typeof heartbeatService>;
   let tempDb: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>> | null = null;
+  let fixtureResetStatement = "";
   let beforeContinuationDispatchCheck:
     | ((input: { runId: string; issueId: string }) => Promise<void>)
     | null = null;
@@ -174,6 +213,7 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
       },
     });
     await ensureIssueRelationsTable(db);
+    fixtureResetStatement = await buildHeartbeatInvalidationResetStatement(db);
   }, EMBEDDED_POSTGRES_TEST_TIMEOUT_MS);
 
   afterEach(async () => {
@@ -194,9 +234,9 @@ describeEmbeddedPostgres("heartbeat stale queued-run invalidation", () => {
     // that has not yet written its run row. The shared drain helper awaits
     // both in-flight wakeup promises and in-flight run executions first, then
     // re-checks the run table, so a late writer cannot still be in flight when
-    // the TRUNCATE below runs.
+    // the fixture reset below runs.
     await drainHeartbeatRunsToQuiescence(db, heartbeat);
-    await cleanupHeartbeatInvalidationFixture(db);
+    await cleanupHeartbeatInvalidationFixture(db, fixtureResetStatement);
     await db.delete(authUsers).where(eq(authUsers.id, "responsible-user"));
   });
 

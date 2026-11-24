@@ -69,7 +69,11 @@ suite("subscription attribution persisted session scope", () => {
       __paperclipConfigFingerprintVersion: metadata.version, __paperclipConfigCategoryFingerprints: metadata.categoryFingerprints };
     input.session.taskSession = { id: randomUUID(), companyId, agentId, adapterType: "codex_local", taskKey: issueId,
       sessionParamsJson: params, sessionDisplayId: providerSession, lastRunId: variant === "missing-run" ? null : lastRunId,
-    } as NonNullable<HeartbeatSessionPreparationInput["session"]["taskSession"]>;
+      // Remaining columns as a freshly inserted row has them (no goal state, no error).
+      lastError: null, goalCapabilityJson: null, goalJson: null, goalStatus: null, goalDesiredState: null,
+      goalSourceId: null, goalSourceCursor: null, goalRevision: 0, goalObservedAt: null,
+      createdAt: new Date(), updatedAt: new Date(),
+    } satisfies NonNullable<HeartbeatSessionPreparationInput["session"]["taskSession"]>;
     input.config.runtimeConfig = { ...input.config.runtimeConfig, managedAiConnection: { ...managed, subscriptionId: randomUUID() } };
     if (variant === "missing-issue") input.task.issueRef = null;
     return { input, providerSession };

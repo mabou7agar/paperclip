@@ -15,7 +15,9 @@ describe('native source completion rejection (never-paid controller)', () => {
     const transaction = vi.fn(async () => { throw new Error('acceptance transaction must not run'); });
     const fullSha = 'a'.repeat(40), sha256 = 'b'.repeat(64), scope = { companyId: 'company', projectId: 'project', repositoryId: 'github.com/synthetic/completion' };
     const citation = { ...scope, revision: fullSha, path: 'example.ts', startLine: 1, endLine: 1, sha256 };
-    const current = { schema: 1, scope, revision: fullSha, citations: [{ content: 'synthetic\n', standing: 'verified_source_range', citation }] } as SourceMemoryEvidence;
+    // Only the fields the citation consumer reads; the fixture is type-checked against them.
+    const evidence: Pick<SourceMemoryEvidence, 'schema' | 'scope' | 'revision' | 'citations'> = { schema: 1, scope, revision: fullSha, citations: [{ content: 'synthetic\n', standing: 'verified_source_range', citation }] };
+    const current = evidence as SourceMemoryEvidence;
     const submitted = { repo: scope.repositoryId, fullSha, path: citation.path, startLine: 1, endLine: 1, sha256, mode: 'current' as const };
     const result = { ...CONTROL_PLANE_CONFORMANCE_RESULT, sourceCitations: [
       ...Array.from({ length: 19 }, () => submitted), { ...submitted, sha256: 'c'.repeat(64) },

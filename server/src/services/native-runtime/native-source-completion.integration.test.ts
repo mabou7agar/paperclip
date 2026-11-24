@@ -85,7 +85,9 @@ describe("source completion through the outer native executor (synthetic only)",
     const fullSha = "a".repeat(40), sha256 = "b".repeat(64);
     const scope = { companyId: f.companyId, projectId: "synthetic-project", repositoryId: "github.com/synthetic/native-completion" };
     const citation = { ...scope, revision: fullSha, path: "fixture.ts", startLine: 1, endLine: 1, sha256 };
-    const current = { schema: 1, scope, revision: fullSha, citations: [{ content: "synthetic\n", standing: "verified_source_range", citation }] } as SourceMemoryEvidence;
+    // Only the fields the citation consumer reads; the fixture is type-checked against them.
+    const evidence: Pick<SourceMemoryEvidence, "schema" | "scope" | "revision" | "citations"> = { schema: 1, scope, revision: fullSha, citations: [{ content: "synthetic\n", standing: "verified_source_range", citation }] };
+    const current = evidence as SourceMemoryEvidence;
     const submitted = { repo: scope.repositoryId, fullSha, path: citation.path, startLine: 1, endLine: 1, sha256, mode: "current" as const };
     const result = { ...CONTROL_PLANE_CONFORMANCE_RESULT, completionClaim: {
       ...CONTROL_PLANE_CONFORMANCE_RESULT.completionClaim, contractRevision: f.execution.completionContract.contract.revision,
