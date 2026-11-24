@@ -638,7 +638,16 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
       );
   }
 
+  // Every test seeds a fresh company, so its first run installs the bundled
+  // skills, and with package storage on each install builds, stores and
+  // re-verifies a package archive (about 0.25 s per skill on a slow disk,
+  // ~2.8 s per run). That raced the 3 s spawn waits below and failed whole
+  // families of Stop tests on slower machines. Process recovery does not
+  // depend on skill packages; the package path has its own tests.
+  const previousSkillPackageStorage = process.env.PAPERCLIP_SKILL_PACKAGE_STORAGE_ENABLED;
+
   beforeAll(async () => {
+    process.env.PAPERCLIP_SKILL_PACKAGE_STORAGE_ENABLED = "false";
     if (externalTestDatabaseUrl) {
       db = createDb(externalTestDatabaseUrl);
     } else {
@@ -834,6 +843,8 @@ describeEmbeddedPostgres("heartbeat orphaned process recovery", () => {
   });
 
   afterAll(async () => {
+    if (previousSkillPackageStorage === undefined) delete process.env.PAPERCLIP_SKILL_PACKAGE_STORAGE_ENABLED;
+    else process.env.PAPERCLIP_SKILL_PACKAGE_STORAGE_ENABLED = previousSkillPackageStorage;
     for (const child of childProcesses) {
       child.kill("SIGKILL");
     }
