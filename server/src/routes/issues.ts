@@ -14499,6 +14499,7 @@ export function issueRoutes(
         reopen: reopenRequested,
         resume: resumeRequested,
         interrupt: interruptRequested,
+        notifyAssignee: commentNotifyAssignee,
         deferWakeForGoal,
         hiddenAt: hiddenAtRaw,
         expectedExecutionPolicy,
@@ -16542,6 +16543,7 @@ export function issueRoutes(
               issueAtCommentStart: existing,
               reopened,
               currentStatus: issue.status,
+              quietAgentComment: actorIsAgent && commentNotifyAssignee === false,
             });
 
           if (
@@ -20183,6 +20185,8 @@ export function issueRoutes(
           issueAtCommentStart: issue,
           reopened,
           currentStatus: wakeIssueSnapshot.status,
+          // An agent's information-only note (notifyAssignee: false) wakes nobody.
+          quietAgentComment: actorIsAgent && req.body.notifyAssignee === false,
         });
         if (assigneeId && !goalCommentSteered && shouldWakeAssigneeForComment) {
           if (reopened) {

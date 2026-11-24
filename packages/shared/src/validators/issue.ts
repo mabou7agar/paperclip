@@ -1002,6 +1002,8 @@ export const updateIssueSchema = objectWithoutDefaults(
     reopen: z.boolean().optional(),
     resume: z.boolean().optional(),
     interrupt: z.boolean().optional(),
+    /** Agent comments only: false saves the comment without waking the task's assignee (an information-only note). */
+    notifyAssignee: z.boolean().optional(),
     /** Assignment-only handoff; the following structured goal action owns the wake. */
     deferWakeForGoal: z.boolean().optional(),
     hiddenAt: z.string().datetime().nullable().optional(),
@@ -1188,6 +1190,13 @@ export const addIssueCommentSchema = z.object({
   reopen: z.boolean().optional(),
   resume: z.boolean().optional(),
   interrupt: z.boolean().optional(),
+  /**
+   * Agent comments only: false saves the comment without waking the task's
+   * assignee, for information-only notes (acknowledgements, cross-links, card
+   * IDs). Ignored for board and user comments, and when reopen or resume asks
+   * for a turn.
+   */
+  notifyAssignee: z.boolean().optional(),
 });
 
 export type AddIssueComment = z.infer<typeof addIssueCommentSchema>;
