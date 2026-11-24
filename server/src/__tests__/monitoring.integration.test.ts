@@ -12,7 +12,7 @@ const execute = vi.hoisted(() => vi.fn());
 vi.mock("../adapters/index.ts", async () => ({ ...await vi.importActual<typeof import("../adapters/index.ts")>("../adapters/index.ts"),
   getServerAdapter: () => ({ supportsLocalAgentJwt: false, execute }) }));
 import { isBoundedTaskContinuationMonitor, setTaskMonitorSchema } from "../services/issue-monitors.js";
-import { monitoringService, monitoringAlertId, isMonitoringWake } from "../services/monitoring.js";
+import { monitoringService, monitoringAlertId, isMonitoringWake, settleMonitoringOwnerNudges, MONITORING_OWNER_NUDGE_REASON } from "../services/monitoring.js";
 import { recoveryService } from "../services/recovery/index.js";
 import { heartbeatService } from "../services/heartbeat.js";
 import { monitoringRoutes } from "../routes/monitoring.js";
@@ -55,7 +55,7 @@ const support = await getEmbeddedPostgresTestSupport();
 (support.supported ? describe : describe.skip)("event-driven monitoring with real PostgreSQL and queue", () => {
   let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>, db: ReturnType<typeof createDb>;
   beforeAll(async () => { database = await startEmbeddedPostgresTestDatabase("monitoring-"); db = createDb(database.connectionString); }, 90000);
-  afterEach(async () => { await heartbeatService(db).drainActiveRunExecutions(); await db.execute(sql`truncate companies cascade`); execute.mockReset(); });
+  afterEach(async () => { await settleMonitoringOwnerNudges(); await heartbeatService(db).drainActiveRunExecutions(); await db.execute(sql`truncate companies cascade`); execute.mockReset(); });
   afterAll(async () => { await database?.cleanup(); });
   async function seed(status = "in_progress") {
     const companyId = randomUUID(), agentId = randomUUID(), issueId = randomUUID(), runId = randomUUID();
@@ -79,6 +79,9 @@ const support = await getEmbeddedPostgresTestSupport();
         invocationSource: "automation", runtimeMode: "legacy", status: "succeeded", finishedAt: new Date(), contextSnapshot: { issueId: f.issueId } });
       await Promise.all([recovery.reconcileLegacyContinuation(id), recoveryService(db, { enqueueWakeup: enqueue }).reconcileLegacyContinuation(id)]);
     }
+    await settleMonitoringOwnerNudges(); await heartbeatService(db).drainActiveRunExecutions();
+    // The single new alert wakes the assignee once; repeated runs never re-nudge.
+    expect(await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.reason, MONITORING_OWNER_NUDGE_REASON))).toHaveLength(1);
     expect(enqueue).not.toHaveBeenCalled();
     expect(await monitoringService(db).alerts(f.companyId)).toHaveLength(1);
     expect((await db.select().from(issues).where(eq(issues.id, f.issueId)))[0].status).toBe("in_progress");
@@ -122,24 +125,29 @@ const support = await getEmbeddedPostgresTestSupport();
   }, 30000);
   it("guards queued and fresh monitoring turns while allowing explicit owner control", async () => {
     const f = await seed(), heartbeat = heartbeatService(db);
+    execute.mockImplementation(async () => ({ exitCode: 0, signal: null, timedOut: false, errorMessage: null, provider: "test", model: "test-model" }));
     for (let i = 0; i < 4; i++) expect(await heartbeat.wakeup(f.agentId, { source: "automation", reason: "issue_disposition_repair",
       payload: { issueId: f.issueId }, contextSnapshot: { issueId: f.issueId, wakeReason: "issue_disposition_repair" } })).toBeNull();
-    expect(execute).not.toHaveBeenCalled();
     expect(await monitoringService(db).alerts(f.companyId)).toHaveLength(1);
+    // The first held repair raised a new alert, which wakes the assignee once
+    // through the owner-nudge reason that holdWake does not match.
+    await settleMonitoringOwnerNudges(); await heartbeat.drainActiveRunExecutions();
+    expect((await db.select().from(agentWakeupRequests).where(eq(agentWakeupRequests.reason, MONITORING_OWNER_NUDGE_REASON)))).toHaveLength(1);
+    expect(execute).toHaveBeenCalledTimes(1);
     const queued = randomUUID();
     await db.insert(heartbeatRuns).values({ id: queued, companyId: f.companyId, agentId: f.agentId, issueId: f.issueId, status: "queued", invocationSource: "automation",
       contextSnapshot: { issueId: f.issueId, wakeReason: "issue_disposition_repair" } });
     await heartbeat.resumeQueuedRunsForAgent(f.companyId, f.agentId);
     await heartbeat.drainActiveRunExecutions();
     expect((await db.select().from(heartbeatRuns).where(eq(heartbeatRuns.id, queued)))[0]).toMatchObject({ status: "cancelled", errorCode: "monitoring_alert_only" });
-    expect(execute).not.toHaveBeenCalled();
+    expect(execute).toHaveBeenCalledTimes(1);
     execute.mockImplementation(async () => {
       await db.update(issues).set({ status: "done" }).where(eq(issues.id, f.issueId));
       return { exitCode: 0, signal: null, timedOut: false, errorMessage: null, provider: "test", model: "test-model" };
     });
     await heartbeat.wakeup(f.agentId, { source: "on_demand", reason: "issue_disposition_repair", payload: { issueId: f.issueId } });
     await heartbeat.drainActiveRunExecutions();
-    expect(execute).toHaveBeenCalledTimes(1);
+    expect(execute).toHaveBeenCalledTimes(2);
   }, 30000);
   it("deduplicates concurrent observations across service instances and respects company scope", async () => {
     const f = await seed(), input = { companyId: f.companyId, issueId: f.issueId, kind: "monitor_due" as const, fingerprint: "one" };
