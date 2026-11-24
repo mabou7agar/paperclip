@@ -215,7 +215,11 @@ describe("native company skill discovery", () => {
     expect(await f.call("load_skill", { skill: s.id, versionId: s.versionId })).toMatchObject({ path: "SKILL.md" });
   });
 
-  it.each([false, true])("loads long supporting paths from the returned inventory (repository wrapper: %s)", async repository => {
+  // The package store writes every file at its full path under the storage
+  // root. A listed path over 1000 characters plus that root exceeds macOS's
+  // 1024-byte PATH_MAX (mkdir fails with ENAMETOOLONG however short the temp
+  // directory is); Linux, where Paperclip runs, allows 4096. Run it there only.
+  it.skipIf(process.platform === "darwin").each([false, true])("loads long supporting paths from the returned inventory (repository wrapper: %s)", async repository => {
     const f = await fixture(), s = await skill(f.companyId);
     const root = repository ? "skills/review/" : "";
     const path = `${root}${("nested-" + "x".repeat(90) + "/").repeat(12)}checks.md`;
