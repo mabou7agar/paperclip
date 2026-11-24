@@ -1,6 +1,6 @@
 import { hasRequiredWorkspaceRecovery } from "./workspace-restore-recovery-state.js";
 import { and, desc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
-import { environmentLeases, heartbeatRunEvents, heartbeatRuns, issueRecoveryActions, type Db } from "@paperclipai/db";
+import { activityLog, environmentLeases, heartbeatRunEvents, heartbeatRuns, issueRecoveryActions, issues, nativeRunFinalizations, type Db } from "@paperclipai/db";
 import { canonicalExecutionUuid } from "./execution-identity.js";
 import { readProcessStartedAt } from "./hot-restart.js";
 import { hasRemoteTerminationReceipt } from "./remote-execution-termination.js";
@@ -90,6 +90,83 @@ export function conversationRecoveryActionPredicate() {
         )}
     )`,
   );
+}
+
+/** A verified reassignment can release a saved wake for the new owner. */
+export function reassignedConversationHoldReleasedPredicate() {
+  return and(
+    eq(issueRecoveryActions.cause, "legacy_execution_requires_reconciliation"),
+    eq(issueRecoveryActions.kind, "active_run_watchdog"),
+    eq(issueRecoveryActions.status, "resolved"),
+    sql`coalesce(${issueRecoveryActions.evidence}#>>'{automaticRecovery,replay}', '') in ('blocked', 'conversation_continuation')`,
+    sql`not (${issueRecoveryActions.evidence} ?| array['systemRecovery', 'workspaceRestoreRecovery', 'workspaceRestoreFailure'])`,
+    sql`exists (
+      select 1 from ${heartbeatRuns}
+      join ${issues} on ${issues.companyId} = ${heartbeatRuns.companyId}
+        and ${issues.id} = ${issueRecoveryActions.sourceIssueId}
+      where ${heartbeatRuns.companyId} = ${issueRecoveryActions.companyId}
+        and ${heartbeatRuns.id} = ${canonicalExecutionUuid(sql`${issueRecoveryActions.evidence}->>'runId'`)}
+        and ${heartbeatRuns.id}::text = ${issueRecoveryActions.evidence}#>>'{automaticRecovery,runId}'
+        and ${heartbeatRuns.contextSnapshot}->>'issueId' = ${issues.id}::text
+        and (${heartbeatRuns.issueId} is null or ${heartbeatRuns.issueId} = ${issues.id})
+        and ${heartbeatRuns.nativeIssueId} is null
+        and ${heartbeatRuns.runtimeMode} = 'legacy'
+        and ${heartbeatRuns.status} = 'cancelled'
+        and ${heartbeatRuns.errorCode} = 'issue_reassigned'
+        and ${heartbeatRuns.finishedAt} is not null
+        and ${heartbeatRuns.executionStage} = 'settled'
+        and ${heartbeatRuns.controllerLeaseExpiresAt} is null
+        and ${heartbeatRuns.resultJson}->'reassignmentStopConfirmed' = 'true'::jsonb
+        and ${canonicalExecutionUuid(sql`${heartbeatRuns.resultJson}->>'issueMutationStopId'`)} is not null
+        and ${heartbeatRuns.resultJson}#>>'{cancellation,source}' = 'control_plane'
+        and ${heartbeatRuns.resultJson}#>'{cancellation,expected}' = 'true'::jsonb
+        and not (${heartbeatRuns.resultJson} ?| array['workspaceRestoreRecovery', 'workspaceRestoreFailure'])
+        and ${conversationRunPredicate()}
+        and ${issueRecoveryActions.returnOwnerAgentId} = ${heartbeatRuns.agentId}
+        and ${issues.assigneeAgentId} <> ${heartbeatRuns.agentId}
+        and ${issues.status} not in ('done', 'cancelled')
+        and not coalesce(${issues.executionState}#>>'{currentParticipant,agentId}' = ${heartbeatRuns.agentId}::text
+          and ${issues.executionState}->>'status' = 'pending', false)
+        and exists (
+          select 1 from ${heartbeatRunEvents}
+          where ${heartbeatRunEvents.companyId} = ${heartbeatRuns.companyId}
+            and ${heartbeatRunEvents.runId} = ${heartbeatRuns.id}
+            and ${heartbeatRunEvents.agentId} = ${heartbeatRuns.agentId}
+            and ${heartbeatRunEvents.eventType} = 'lifecycle'
+            and ${heartbeatRunEvents.stream} = 'system'
+            and ${heartbeatRunEvents.sourceEventId} is null
+            and ${heartbeatRunEvents.payload}->>'phase' = 'task.run.measured'
+            and ${heartbeatRunEvents.payload}->>'outcome' = 'cancelled'
+            and ${heartbeatRunEvents.payload}->'durableSettlement' = 'true'::jsonb
+            and ${heartbeatRunEvents.createdAt} >= ${heartbeatRuns.finishedAt}
+        )
+        and exists (
+          select 1 from ${activityLog}
+          where ${activityLog.companyId} = ${issues.companyId}
+            and ${activityLog.entityType} = 'issue'
+            and ${activityLog.entityId} = ${issues.id}::text
+            and ${activityLog.action} = 'issue.updated'
+            and ${activityLog.actorType} = 'user'
+            and ${activityLog.details}#>>'{_previous,assigneeAgentId}' = ${heartbeatRuns.agentId}::text
+            and ${activityLog.details}->>'assigneeAgentId' = ${issues.assigneeAgentId}::text
+            and ${activityLog.createdAt} >= coalesce(${heartbeatRuns.startedAt}, ${heartbeatRuns.finishedAt})
+        )
+        and not exists (
+          select 1 from ${environmentLeases}
+          where ${environmentLeases.companyId} = ${heartbeatRuns.companyId}
+            and ${environmentLeases.heartbeatRunId} = ${heartbeatRuns.id}
+            and (${environmentLeases.provider} is distinct from 'local' or ${environmentLeases.releasedAt} is null
+              or ${environmentLeases.status} not in ('released', 'expired')
+              or coalesce(${environmentLeases.cleanupStatus}, 'success') <> 'success'
+              or coalesce(${environmentLeases.metadata}->>'pendingCleanupInFlight', 'false') <> 'false')
+        )
+        and not exists (
+          select 1 from ${nativeRunFinalizations}
+          where ${nativeRunFinalizations.companyId} = ${heartbeatRuns.companyId}
+            and ${nativeRunFinalizations.runId} = ${heartbeatRuns.id}
+        )
+    )`,
+  )!;
 }
 
 /** OS liveness probes do not signal or stop the process. Unknown ownership holds. */

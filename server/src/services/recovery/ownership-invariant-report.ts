@@ -1,8 +1,16 @@
-import { and, asc, eq, inArray, isNotNull, isNull, lt, notExists, or, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNotNull, isNull, lt, notExists, notInArray, or, sql } from "drizzle-orm";
+import { alias } from "drizzle-orm/pg-core";
 import {
+  agents,
+  agentTaskSessions,
   agentWakeupRequests,
+  approvals,
   heartbeatRuns,
+  issueApprovals,
   issueRecoveryActions,
+  issueRelations,
+  issueThreadInteractions,
+  issueTreeHolds,
   issues,
   type Db,
 } from "@paperclipai/db";
@@ -10,7 +18,10 @@ import { taskClosedByAgentSql, TEMPORARY_REFUSAL_TRIGGERS } from "../work-intent
 import { deliveredQueuedCommentIds } from "../queued-comment-delivery.js";
 import { logger } from "../../middleware/logger.js";
 import { persistActivity } from "../activity-log.js";
+import { activeIssueInteractionCondition } from "../issue-question-context.js";
+import { monitoringService } from "../monitoring.js";
 import { currentProcessProbe, proveOwnerGone, type OwnerProof, type ProcessProbe } from "../owner-proof.js";
+import { isAutomaticRecoverySuppressedByPauseHold } from "./pause-hold-guard.js";
 import { LEGACY_OWNER_REASONS, recordVersionAttestations } from "./owner-gone-attestation.js";
 import {
   OWNABLE_KINDS,
@@ -51,6 +62,7 @@ export type InvariantViolation = {
   runId: string | null;
   issueId: string | null;
   reason: string;
+  monitoringFingerprint?: string;
 };
 
 export type KindReport = {
@@ -309,7 +321,8 @@ async function settleKind(db: Db, kindId: string, options: {
   return { settled, watched };
 }
 
-const violationKey = (violation: InvariantViolation) => `${violation.rule}:${violation.kind}:${violation.recordId}`;
+const violationKey = (violation: InvariantViolation) =>
+  `${violation.rule}:${violation.kind}:${violation.recordId}:${violation.monitoringFingerprint ?? ""}`;
 
 /** Refusal texts that name unfinished accounting or cleanup as the reason
  * work could not start, as a PostgreSQL case-insensitive regular expression.
@@ -548,17 +561,48 @@ async function checkExactlyOnceIntents(db: Db, state: OwnershipReportState, now:
   return violations;
 }
 
-/** An agent-assigned in-progress issue with no live run, no pending wake and
- * no open recovery action has no next action (invariant 7). Issues still in
- * their grace window return the time they become checkable. */
+/** An in-progress task needs active execution or a recorded next action.
+ * Issues inside their grace window return the time they become checkable. */
 async function checkVisibleNextAction(db: Db, now: Date, limit: number): Promise<{ violations: InvariantViolation[]; nextDueAt: Date | null }> {
-  const rows: Array<{ id: string; companyId: string; executionRunId: string | null; updatedAt: Date }> = [];
+  const dependency = alias(issues, "waiting_dependency");
+  const selection = {
+    id: issues.id,
+    companyId: issues.companyId,
+    assigneeAgentId: issues.assigneeAgentId,
+    executionRunId: issues.executionRunId,
+    statusVersion: issues.statusVersion,
+    updatedAt: issues.updatedAt,
+  };
+  const rows: Array<Pick<typeof issues.$inferSelect, keyof typeof selection>> = [];
   for (let offset = 0; offset < MAX_RECORDS_PER_KIND; offset += limit) {
-    const page = await db.select({ id: issues.id, companyId: issues.companyId, executionRunId: issues.executionRunId,
-    updatedAt: issues.updatedAt })
-    .from(issues).where(and(eq(issues.status, "in_progress"), isNotNull(issues.assigneeAgentId),
+    const page = await db.select(selection)
+    .from(issues).innerJoin(agents, and(eq(agents.companyId, issues.companyId), eq(agents.id, issues.assigneeAgentId)))
+    .where(and(eq(issues.status, "in_progress"), eq(issues.visibility, "open"),
+      isNull(issues.hiddenAt), isNull(issues.assigneeUserId),
+      isNull(issues.conversationAgentId), sql`coalesce(${issues.originKind}, '') not like 'plugin:%'`,
+      sql`${issues.originKind} is distinct from 'chat_channel'`,
+      notInArray(agents.status, ["paused", "terminated", "pending_approval"]),
       // A saved monitor deadline is a first-class wait path (SPEC-implementation).
       or(isNull(issues.monitorNextCheckAt), lt(issues.monitorNextCheckAt, now)),
+      sql`${issues.executionState}->>'status' is distinct from 'pending'`,
+      notExists(db.select({ one: sql`1` }).from(issueThreadInteractions).where(and(
+        eq(issueThreadInteractions.companyId, issues.companyId), eq(issueThreadInteractions.issueId, issues.id),
+        eq(issueThreadInteractions.status, "pending"), activeIssueInteractionCondition()))),
+      notExists(db.select({ one: sql`1` }).from(issueApprovals).innerJoin(approvals, and(
+        eq(approvals.id, issueApprovals.approvalId), eq(approvals.companyId, issueApprovals.companyId),
+      )).where(and(
+        eq(issueApprovals.companyId, issues.companyId), eq(issueApprovals.issueId, issues.id),
+        eq(approvals.status, "pending")))),
+      notExists(db.select({ one: sql`1` }).from(issueRelations).innerJoin(dependency, and(
+        eq(dependency.companyId, issueRelations.companyId), eq(dependency.id, issueRelations.issueId),
+      )).where(and(
+        eq(issueRelations.companyId, issues.companyId), eq(issueRelations.relatedIssueId, issues.id),
+        eq(issueRelations.type, "blocks"), isNull(dependency.hiddenAt),
+        notInArray(dependency.status, TERMINAL_ISSUE_STATUSES)))),
+      notExists(db.select({ one: sql`1` }).from(agentTaskSessions).where(and(
+        eq(agentTaskSessions.companyId, issues.companyId), eq(agentTaskSessions.agentId, issues.assigneeAgentId),
+        sql`${agentTaskSessions.taskKey} = ${issues.id}::text`,
+        eq(agentTaskSessions.goalStatus, "paused")))),
       notExists(db.select({ one: sql`1` }).from(heartbeatRuns).where(and(
         eq(heartbeatRuns.companyId, issues.companyId), inArray(heartbeatRuns.status, ACTIVE_RUN_STATUSES),
         or(eq(heartbeatRuns.issueId, issues.id), eq(heartbeatRuns.nativeIssueId, issues.id))))),
@@ -574,12 +618,23 @@ async function checkVisibleNextAction(db: Db, now: Date, limit: number): Promise
     if (page.length < limit) break;
   }
   const cutoff = now.getTime() - NEXT_ACTION_GRACE_MS;
+  const companiesWithCandidates = [...new Set(rows.filter(row => row.updatedAt.getTime() <= cutoff)
+    .map(row => row.companyId))];
+  const companiesWithPauseHolds = new Set(companiesWithCandidates.length > 0
+    ? (await db.selectDistinct({ companyId: issueTreeHolds.companyId }).from(issueTreeHolds).where(and(
+      inArray(issueTreeHolds.companyId, companiesWithCandidates),
+      eq(issueTreeHolds.status, "active"), eq(issueTreeHolds.mode, "pause"),
+    ))).map(row => row.companyId)
+    : []);
   const violations: InvariantViolation[] = [];
   let nextDueAt: Date | null = null;
   for (const row of rows) {
-    if (row.updatedAt.getTime() < cutoff) {
+    if (row.updatedAt.getTime() <= cutoff) {
+      if (companiesWithPauseHolds.has(row.companyId) &&
+          await isAutomaticRecoverySuppressedByPauseHold(db, row.companyId, row.id)) continue;
       violations.push({ rule: "I7_visible_next_action", kind: "issue", recordId: row.id, companyId: row.companyId,
-        runId: row.executionRunId, issueId: row.id, reason: row.executionRunId ? "lock_without_live_run" : "no_owner_no_wake" });
+        runId: row.executionRunId, issueId: row.id, reason: row.executionRunId ? "lock_without_live_run" : "no_owner_no_wake",
+        monitoringFingerprint: JSON.stringify(["visible_next_action", row.statusVersion, row.assigneeAgentId]) });
     } else {
       // Rows are ordered by updated_at, so the first one in grace is earliest.
       nextDueAt ??= new Date(row.updatedAt.getTime() + NEXT_ACTION_GRACE_MS);
@@ -735,9 +790,16 @@ export async function runOwnershipReconciliationPass(db: Db, options: {
   violations.push(...byKey.values());
   const newViolations = violations.filter(violation => !state.reported.has(violationKey(violation)));
   if (options.record !== false) {
+    const monitoring = monitoringService(db);
     for (const violation of newViolations) {
       if (!violation.companyId) continue;
       try {
+        if (violation.monitoringFingerprint && violation.issueId) {
+          await monitoring.observe({
+            companyId: violation.companyId, issueId: violation.issueId, kind: "no_execution_path",
+            fingerprint: violation.monitoringFingerprint,
+          });
+        }
         await persistActivity(db, {
           companyId: violation.companyId, actorType: "system", actorId: OWNERSHIP_RECONCILER_ACTOR_ID,
           action: OWNERSHIP_INVARIANT_VIOLATION_ACTION, entityType: "ownership_record", entityId: violation.recordId,
