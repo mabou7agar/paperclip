@@ -1,4 +1,4 @@
-import { and, desc, eq, gte, sql } from "drizzle-orm";
+import { and, desc, eq, gte, lt, sql } from "drizzle-orm";
 import { activityLog, agentWakeupRequests, agents, companyMonitoringPolicies, issueTreeHoldMembers, issueTreeHolds, issues, type Db } from "@paperclipai/db";
 import type { MonitoringObservation, MonitoringPolicy } from "@paperclipai/shared";
 
@@ -65,8 +65,27 @@ export function monitoringRepository(db: Db) {
         }).onConflictDoNothing().returning({ id: activityLog.id })).length > 0;
       });
     },
-    async ownerNudgeExists(id: string) {
-      return (await db.select({ id: activityLog.id }).from(activityLog).where(eq(activityLog.id, id)).limit(1)).length > 0;
+    /** The alert's nudge record, if one was ever claimed. */
+    async ownerNudgeRecord(id: string) {
+      return (await db.select({ details: activityLog.details, createdAt: activityLog.createdAt }).from(activityLog)
+        .where(eq(activityLog.id, id)).limit(1))[0] ?? null;
+    },
+    /** Whether the issue had any owner nudge claimed since the window start (cheap, indexed). */
+    async recentOwnerNudge(companyId: string, issueId: string, since: Date) {
+      return (await db.select({ id: activityLog.id }).from(activityLog).where(and(
+        eq(activityLog.companyId, companyId), eq(activityLog.action, MONITORING_OWNER_NUDGE_ACTION),
+        eq(activityLog.entityType, "issue"), eq(activityLog.entityId, issueId), gte(activityLog.createdAt, since))).limit(1)).length > 0;
+    },
+    /**
+     * Take over a claim whose process stopped before it recorded any outcome.
+     * Only once: the reclaimed mark is set atomically and never cleared.
+     */
+    async reclaimOwnerNudge(id: string, claimedBefore: Date) {
+      return (await db.update(activityLog)
+        .set({ details: sql`coalesce(${activityLog.details}, '{}'::jsonb) || ${JSON.stringify({ reclaimedAt: new Date().toISOString() })}::jsonb` })
+        .where(and(eq(activityLog.id, id), lt(activityLog.createdAt, claimedBefore),
+          sql`not (coalesce(${activityLog.details}, '{}'::jsonb) ?| array['ownerNudged','wakeError','reclaimedAt'])`))
+        .returning({ id: activityLog.id })).length > 0;
     },
     async recordOwnerNudge(id: string, details: Record<string, unknown>) {
       await db.update(activityLog).set({ details: sql`coalesce(${activityLog.details}, '{}'::jsonb) || ${JSON.stringify(details)}::jsonb` })

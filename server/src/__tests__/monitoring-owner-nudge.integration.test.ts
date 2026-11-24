@@ -11,7 +11,7 @@ const execute = vi.hoisted(() => vi.fn());
 vi.mock("../adapters/index.ts", async () => ({ ...await vi.importActual<typeof import("../adapters/index.ts")>("../adapters/index.ts"),
   getServerAdapter: () => ({ supportsLocalAgentJwt: false, execute }) }));
 import {
-  isMonitoringWake, monitoringAlertId, monitoringService, MONITORING_OWNER_NUDGE_REASON, settleMonitoringOwnerNudges,
+  isMonitoringWake, monitoringAlertId, monitoringOwnerNudgeId, monitoringService, MONITORING_OWNER_NUDGE_REASON, settleMonitoringOwnerNudges,
 } from "../services/monitoring.js";
 import { heartbeatService } from "../services/heartbeat.js";
 
@@ -101,6 +101,51 @@ const support = await getEmbeddedPostgresTestSupport();
     expect(wakes).toHaveLength(1);
     expect(wakes[0].runId).toBeTruthy();
     expect(await nudgeRecords(f.companyId)).toHaveLength(1);
+    expect(execute).toHaveBeenCalledTimes(1);
+  }, 30000);
+
+  it("does not nudge an agent parked on an unknown provider quota reset, or a chat conversation", async () => {
+    const quota = await seed(); succeed();
+    await monitoringService(db).observe({ companyId: quota.companyId, issueId: quota.issueId, kind: "no_execution_path",
+      fingerprint: JSON.stringify(["provider_quota_reset_unknown", quota.agentId, randomUUID()]) });
+    const chat = await seed();
+    // An active (not waiting) conversation: the heartbeat's own gates would let this one through.
+    await db.update(issues).set({ conversationAgentId: chat.agentId, conversationUserId: "owner", conversationState: "active" })
+      .where(eq(issues.id, chat.issueId));
+    await monitoringService(db).observe({ companyId: chat.companyId, issueId: chat.issueId, kind: "no_execution_path", fingerprint: "chat" });
+    await settle();
+    expect(await nudgeWakes(quota.companyId)).toHaveLength(0);
+    expect(await nudgeRecords(quota.companyId)).toHaveLength(0);
+    expect(await nudgeWakes(chat.companyId)).toHaveLength(0);
+    expect(await nudgeRecords(chat.companyId)).toHaveLength(0);
+    expect(execute).not.toHaveBeenCalled();
+  }, 30000);
+
+  it("takes over a claim whose process stopped before waking, once, and only after the grace period", async () => {
+    const f = await seed(); succeed();
+    const fresh = { companyId: f.companyId, issueId: f.issueId, kind: "no_execution_path" as const, fingerprint: "lost-fresh" };
+    const stale = { ...fresh, fingerprint: "lost-stale" };
+    const claimRow = (observation: typeof fresh, ageMs: number) => db.insert(activityLog).values({
+      id: monitoringOwnerNudgeId(monitoringAlertId(observation)), companyId: f.companyId, actorType: "system", actorId: "monitoring",
+      action: "monitoring.owner_nudge", entityType: "issue", entityId: f.issueId, agentId: f.agentId, responsibleUserId: "owner",
+      details: { alertId: monitoringAlertId(observation) }, createdAt: new Date(Date.now() - ageMs) });
+    // A claim two minutes old with no outcome may still be in flight: leave it.
+    await claimRow(fresh, 2 * 60 * 1000);
+    await monitoringService(db).observe(fresh);
+    await settle();
+    expect(await nudgeWakes(f.companyId)).toHaveLength(0);
+    // A claim twenty minutes old with no outcome and no wake was lost.
+    await db.delete(activityLog).where(eq(activityLog.id, monitoringOwnerNudgeId(monitoringAlertId(fresh))));
+    await claimRow(stale, 20 * 60 * 1000);
+    await monitoringService(db).observe(stale);
+    await settle();
+    await monitoringService(db).observe(stale);
+    await settle();
+    const wakes = await nudgeWakes(f.companyId);
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0].runId).toBeTruthy();
+    const [record] = await db.select().from(activityLog).where(eq(activityLog.id, monitoringOwnerNudgeId(monitoringAlertId(stale))));
+    expect(record.details).toMatchObject({ ownerNudged: true, wakeupRequestId: wakes[0].id, reclaimedAt: expect.any(String) });
     expect(execute).toHaveBeenCalledTimes(1);
   }, 30000);
 
