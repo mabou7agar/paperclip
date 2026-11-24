@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { activityLog, agents, agentWakeupRequests, authUsers, companies, companyMemberships, createDb, issues } from "@paperclipai/db";
+import { activityLog, agents, agentWakeupRequests, authUsers, companies, companyMemberships, createDb, heartbeatRuns, issues } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
 const execute = vi.hoisted(() => vi.fn());
@@ -87,6 +87,35 @@ const support = await getEmbeddedPostgresTestSupport();
 
   it("changes nothing outside alert-only mode", async () => {
     const f = await seed({ mode: "automatic" }); succeed();
+    await reconcile(f.companyId);
+    expect(await reviewAlerts(f.companyId)).toHaveLength(0);
+    expect(await nudgeWakes(f.companyId)).toHaveLength(0);
+    expect(execute).not.toHaveBeenCalled();
+  }, 60000);
+
+  it("does not report when the assignee's last run was stopped by an operator", async () => {
+    const f = await seed(); succeed();
+    await db.insert(heartbeatRuns).values({ companyId: f.companyId, agentId: f.agentId, issueId: f.issueId, status: "cancelled",
+      errorCode: "operator_interrupted", invocationSource: "assignment", contextSnapshot: { issueId: f.issueId, taskId: f.issueId },
+      startedAt: new Date(Date.now() - 60_000), finishedAt: new Date(Date.now() - 30_000) });
+    await reconcile(f.companyId);
+    expect(await reviewAlerts(f.companyId)).toHaveLength(0);
+    expect(await nudgeWakes(f.companyId)).toHaveLength(0);
+    expect(execute).not.toHaveBeenCalled();
+  }, 60000);
+
+  it("does not report while a due monitor check is still unclaimed", async () => {
+    const f = await seed(); succeed();
+    await db.update(issues).set({ monitorNextCheckAt: new Date(Date.now() - 5_000), monitorAttemptCount: 0 }).where(eq(issues.id, f.issueId));
+    await heartbeatService(db).reconcileStrandedAssignedIssues({ companyId: f.companyId });
+    await settleMonitoringOwnerNudges();
+    expect(await reviewAlerts(f.companyId)).toHaveLength(0);
+    expect(await nudgeWakes(f.companyId)).toHaveLength(0);
+  }, 60000);
+
+  it("does not report for a paused assignee", async () => {
+    const f = await seed(); succeed();
+    await db.update(agents).set({ status: "paused" }).where(eq(agents.id, f.agentId));
     await reconcile(f.companyId);
     expect(await reviewAlerts(f.companyId)).toHaveLength(0);
     expect(await nudgeWakes(f.companyId)).toHaveLength(0);

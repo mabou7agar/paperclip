@@ -1,4 +1,5 @@
 import { saveUnstartedExecutionStageReceipt } from "./unstarted-execution-stage.js";
+import { hasUnconsumedIssueMonitorPath } from "./issue-graph-liveness.js";
 import { unknownQuotaResetBackoffSeconds } from "../provider-quota-reset.js";
 import { phaseRoutingSettingsRepository } from "../../repositories/phase-routing-settings.js";
 import { wakeWaitersOfStalledIssues, type BlockerStallWakeup } from "./blocker-stall-wakeups.js";
@@ -2124,12 +2125,41 @@ export function recoveryService(
     return queued;
   }
 
-  /** The review view's own verdict: in review and no maintained action path. */
-  async function isStalledReviewWithoutPath(issue: RecoveryIssue) {
+  /**
+   * An in-review task with no review stage and no maintained action path is
+   * reported so alert-only monitoring can nudge its assignee once. Cheap
+   * checks first: only alert-only companies, and only until that alert's
+   * nudge has settled, pay for the review-attention classification.
+   */
+  async function reportStalledReviewWithoutPath(issue: RecoveryIssue, agentId: string,
+    latestRun: Awaited<ReturnType<typeof getLatestIssueRun>>) {
+    const monitoring = monitoringService(db);
+    if ((await monitoring.policy(issue.companyId)).mode !== "alert_only") return;
+    // A conversation answers its user; the nudge would skip it anyway.
+    if (issue.conversationAgentId && issue.conversationUserId) return;
+    // An operator or chat-control stop of the assignee's own last run holds:
+    // the earlier stop guards only read a review participant's run.
+    if (latestRun && latestRun.agentId === agentId) {
+      if (isOperatorCancelledRun(latestRun, agentId)) return;
+      if ((await readChatControlRecoveryStop(db, {
+        companyId: issue.companyId, issueId: issue.id, agentId, sourceRunId: latestRun.id,
+      })).kind !== "clear") return;
+    }
+    // A due monitor not yet claimed is still a path; the review view only
+    // counts future checks, so without this the task would get two runs.
+    if (hasUnconsumedIssueMonitorPath(issue, new Date())) return;
+    const observation = {
+      companyId: issue.companyId, issueId: issue.id, kind: "no_execution_path" as const,
+      // Each re-entry into review is a new stuck state; the nudge's per-task
+      // window still bounds the wakes.
+      fingerprint: JSON.stringify(["review_without_path", issue.statusVersion]),
+    };
+    if (await monitoring.ownerNudgeSettled(observation)) return;
     const attention = await issuesSvc.listReviewAttention(issue.companyId, [
       { id: issue.id, companyId: issue.companyId, status: issue.status },
     ]);
-    return attention.get(issue.id)?.state === "stalled";
+    if (attention.get(issue.id)?.state !== "stalled") return;
+    await monitoring.observe(observation);
   }
 
   async function enqueueInitialAssignedTodoDispatch(
@@ -5254,14 +5284,14 @@ export function recoveryService(
           // monitoring then nudges the assignee once; in any other mode
           // observe() records nothing and this stays a plain skip. A pending
           // stage whose participant is a person is a human review: left alone.
-          if (!pendingExecutionState && issue.assigneeAgentId
-            && await isStalledReviewWithoutPath(issue)) {
-            await monitoringService(db).observe({
-              companyId: issue.companyId, issueId: issue.id, kind: "no_execution_path",
-              // Each re-entry into review is a new stuck state; the nudge's
-              // per-task window still bounds the wakes.
-              fingerprint: JSON.stringify(["review_without_path", issue.statusVersion]),
-            });
+          if (!pendingExecutionState && issue.assigneeAgentId === agentId && agentInvokable) {
+            try {
+              await reportStalledReviewWithoutPath(issue, agentId, latestRun);
+            } catch (error) {
+              // Report-only: never let it abort the pass for other tasks.
+              logger.warn({ err: error, companyId: issue.companyId, issueId: issue.id },
+                "failed to report an in-review task without a review path");
+            }
           }
           result.skipped += 1;
           continue;
