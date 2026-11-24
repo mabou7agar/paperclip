@@ -67,6 +67,8 @@ export function monitoringService(db: Db, deps: MonitoringServiceDeps = {}) {
   async function nudgeOwner(observation: MonitoringObservation, alertId: string, issue: NonNullable<Awaited<ReturnType<typeof repository.issue>>>) {
     const agentId = issue.assigneeAgentId;
     if (!agentId || OWNER_NUDGE_SKIPPED_ISSUE_STATUSES.includes(issue.status)) return;
+    // Cheap exit for the common repeat: this alert was already nudged.
+    if (await repository.ownerNudgeExists(monitoringOwnerNudgeId(alertId))) return;
     const agent = await repository.agent(observation.companyId, agentId);
     if (!agent || NON_INVOKABLE_AGENT_STATUSES.includes(agent.status)) return;
     if (await repository.inActiveTreeHold(observation.companyId, issue.id)) return;
@@ -122,15 +124,19 @@ export function monitoringService(db: Db, deps: MonitoringServiceDeps = {}) {
         action: "monitoring.alert", entityType: "issue", entityId: observation.issueId, issueId: observation.issueId,
         details: { ...observation, alertId: id, identifier: issue.identifier, reportOnly: true },
       } });
-      // A detached nudge must not reuse a caller's transaction handle, which
-      // may still be open (or already closed) when the nudge runs.
-      if (OWNER_NUDGE_KINDS.has(observation.kind) && !("rollback" in db)) {
-        const pending: Promise<void> = nudgeOwner(observation, id, issue)
-          .catch(error => logger.warn({ err: error, companyId: observation.companyId, issueId: observation.issueId, alertId: id },
-            "monitoring owner nudge failed"))
-          .finally(() => { pendingOwnerNudges.delete(pending); });
-        pendingOwnerNudges.add(pending);
-      }
+    }
+    // Any observation of an alert that was never nudged may nudge, not only the
+    // one that first recorded it: a task already stuck before this existed keeps
+    // the same alert id and would otherwise never be nudged. The nudge record's
+    // deterministic id and the per-issue window keep it to one.
+    // A detached nudge must not reuse a caller's transaction handle, which may
+    // still be open (or already closed) when the nudge runs.
+    if (OWNER_NUDGE_KINDS.has(observation.kind) && !("rollback" in db)) {
+      const pending: Promise<void> = nudgeOwner(observation, id, issue)
+        .catch(error => logger.warn({ err: error, companyId: observation.companyId, issueId: observation.issueId, alertId: id },
+          "monitoring owner nudge failed"))
+        .finally(() => { pendingOwnerNudges.delete(pending); });
+      pendingOwnerNudges.add(pending);
     }
     return true;
   }

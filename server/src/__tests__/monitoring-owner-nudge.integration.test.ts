@@ -86,6 +86,24 @@ const support = await getEmbeddedPostgresTestSupport();
       ownerNudged: true, wakeupRequestId: wakes[0].id, runId: run.id });
   }, 30000);
 
+  it("nudges once when an alert recorded before nudging existed is observed again", async () => {
+    const f = await seed(); succeed();
+    const observation = { companyId: f.companyId, issueId: f.issueId, kind: "no_execution_path" as const, fingerprint: "stuck-before" };
+    // The alert row a task already stuck before this release carries.
+    await db.insert(activityLog).values({ id: monitoringAlertId(observation), companyId: f.companyId, actorType: "system",
+      actorId: "monitoring", action: "monitoring.alert", entityType: "issue", entityId: f.issueId, responsibleUserId: "owner",
+      details: { ...observation, alertId: monitoringAlertId(observation), reportOnly: true } });
+    expect(await monitoringService(db).observe(observation)).toBe(true);
+    await settle();
+    await monitoringService(db).observe(observation);
+    await settle();
+    const wakes = await nudgeWakes(f.companyId);
+    expect(wakes).toHaveLength(1);
+    expect(wakes[0].runId).toBeTruthy();
+    expect(await nudgeRecords(f.companyId)).toHaveLength(1);
+    expect(execute).toHaveBeenCalledTimes(1);
+  }, 30000);
+
   it("does not nudge twice for the same alert or for a new fingerprint within 24 hours", async () => {
     const f = await seed(); succeed();
     const observation = { companyId: f.companyId, issueId: f.issueId, kind: "missing_disposition" as const, fingerprint: "one" };

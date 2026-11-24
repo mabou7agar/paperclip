@@ -65,6 +65,9 @@ export function monitoringRepository(db: Db) {
         }).onConflictDoNothing().returning({ id: activityLog.id })).length > 0;
       });
     },
+    async ownerNudgeExists(id: string) {
+      return (await db.select({ id: activityLog.id }).from(activityLog).where(eq(activityLog.id, id)).limit(1)).length > 0;
+    },
     async recordOwnerNudge(id: string, details: Record<string, unknown>) {
       await db.update(activityLog).set({ details: sql`coalesce(${activityLog.details}, '{}'::jsonb) || ${JSON.stringify(details)}::jsonb` })
         .where(eq(activityLog.id, id));
