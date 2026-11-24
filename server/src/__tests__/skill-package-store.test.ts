@@ -26,6 +26,16 @@ import { readCustomerSuccessResource } from "../services/customer-success-inspec
 import { repositorySkillProjection } from "../services/skill-repository-package.js";
 import { hasRestorableSnapshot } from "../services/skill-version-cache.js";
 
+// This suite exercises skill package storage, which server/vitest.config.ts
+// turns off by default for speed. Switch it on for this file and restore it.
+const previousSkillPackageStorage = process.env.PAPERCLIP_SKILL_PACKAGE_STORAGE_ENABLED;
+beforeAll(() => { process.env.PAPERCLIP_SKILL_PACKAGE_STORAGE_ENABLED = "true"; });
+afterAll(() => {
+  if (previousSkillPackageStorage === undefined) delete process.env.PAPERCLIP_SKILL_PACKAGE_STORAGE_ENABLED;
+  else process.env.PAPERCLIP_SKILL_PACKAGE_STORAGE_ENABLED = previousSkillPackageStorage;
+});
+
+
 function toSkill(row: typeof companySkills.$inferSelect): CompanySkill {
   return { ...row, sourceType: row.sourceType as CompanySkill["sourceType"], trustLevel: row.trustLevel as CompanySkill["trustLevel"],
     compatibility: row.compatibility as CompanySkill["compatibility"], fileInventory: row.fileInventory.map(entry => ({ path: String(entry.path), kind: entry.kind as CompanySkill["fileInventory"][number]["kind"] })) };

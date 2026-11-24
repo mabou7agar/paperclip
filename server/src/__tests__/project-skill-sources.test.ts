@@ -22,6 +22,16 @@ import { skillAccessService, withSkillActor } from '../services/skill-access.js'
 import type { AuthorizationActor } from '../services/authorization.js';
 import { forbidden, unprocessable } from '../errors.js';
 
+// This suite exercises skill package storage, which server/vitest.config.ts
+// turns off by default for speed. Switch it on for this file and restore it.
+const previousSkillPackageStorage = process.env.PAPERCLIP_SKILL_PACKAGE_STORAGE_ENABLED;
+beforeAll(() => { process.env.PAPERCLIP_SKILL_PACKAGE_STORAGE_ENABLED = "true"; });
+afterAll(() => {
+  if (previousSkillPackageStorage === undefined) delete process.env.PAPERCLIP_SKILL_PACKAGE_STORAGE_ENABLED;
+  else process.env.PAPERCLIP_SKILL_PACKAGE_STORAGE_ENABLED = previousSkillPackageStorage;
+});
+
+
 const externalUrl = resolveExternalTestDatabaseUrl('PAPERCLIP_PROJECT_SKILLS_TEST_DATABASE_URL');
 const support = externalUrl ? { supported: true } : await getEmbeddedPostgresTestSupport();
 describe.skipIf(!support.supported)('automatic project skill sources', () => {

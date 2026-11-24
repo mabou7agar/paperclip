@@ -16,6 +16,16 @@ import { idleWorkSnapshot } from "./task-admission.js";
 import { DELIVERY_QUEUES, notifyDeliveryWork } from "./delivery-work-notifications.js";
 import { logger } from "../middleware/logger.js";
 
+// This suite exercises skill package storage, which server/vitest.config.ts
+// turns off by default for speed. Switch it on for this file and restore it.
+const previousSkillPackageStorage = process.env.PAPERCLIP_SKILL_PACKAGE_STORAGE_ENABLED;
+beforeAll(() => { process.env.PAPERCLIP_SKILL_PACKAGE_STORAGE_ENABLED = "true"; });
+afterAll(() => {
+  if (previousSkillPackageStorage === undefined) delete process.env.PAPERCLIP_SKILL_PACKAGE_STORAGE_ENABLED;
+  else process.env.PAPERCLIP_SKILL_PACKAGE_STORAGE_ENABLED = previousSkillPackageStorage;
+});
+
+
 const support = await getEmbeddedPostgresTestSupport();
 describe.skipIf(!support.supported)("automatic skill package work", () => {
   let database: Awaited<ReturnType<typeof startEmbeddedPostgresTestDatabase>>;
