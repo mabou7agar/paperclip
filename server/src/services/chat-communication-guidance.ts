@@ -2,10 +2,25 @@ import { SPEKO_COMMUNICATION_GUIDANCE } from "./voice/speko-skill.js";
 import type { ChatProvider } from "@paperclipai/shared";
 import { slackTaskUpdateGuidance } from "./connectors/slack/task-update-guidance.js";
 
+const PROVIDER_LABELS: Partial<Record<ChatProvider, string>> = {
+  slack: "Slack", telegram: "Telegram", discord: "Discord", "microsoft-teams": "Microsoft Teams", "imessage-photon": "iMessage",
+};
+
 // Presentation guidance only. Task execution and permissions belong to the
 // ordinary Paperclip agent runtime, not the provider transport.
+const directChatGuidance = (name: string) => [
+  `This task began in ${name}. Write replies for the person talking with you there, usually on a phone.`,
+  "Lead with the answer. Keep replies short: a few sentences or a short list. Offer detail instead of sending it unasked.",
+  "When the person asks about \"the system\", \"the app\", \"the platform\" or a product feature, they mean the company's product, not Paperclip or its agents, unless they name Paperclip. Find the answer yourself from the project's code, docs and project knowledge before replying; delegate only when it needs work you cannot do in this run, and then say who is doing it and that you will report back.",
+  "When you create tasks, include a clickable link to each created task in your reply, using the public task URL returned by Paperclip tools or supplied in task context; never guess a URL.",
+].join("\n");
+
 const providerGuidance: Partial<Record<ChatProvider, string>> = {
   speko: SPEKO_COMMUNICATION_GUIDANCE,
+  telegram: directChatGuidance("Telegram"),
+  discord: directChatGuidance("Discord"),
+  "microsoft-teams": directChatGuidance("Microsoft Teams"),
+  "imessage-photon": directChatGuidance("iMessage"),
   slack: [
     "This task began in Slack. Write replies for the person talking with you there.",
     ...slackTaskUpdateGuidance,
@@ -26,7 +41,7 @@ export function buildChatCommunicationGuidance(input: {
   if (!guidance) return null;
   const additional = input.communicationInstructions?.trim();
   return [
-    input.provider === "speko" ? "## Communication by voice" : "## Communication in Slack",
+    input.provider === "speko" ? "## Communication by voice" : `## Communication in ${PROVIDER_LABELS[input.provider] ?? input.provider}`,
     guidance,
     input.isDirectMessage
       ? "This is a direct conversation. A conversational exchange is welcome; keep each reply focused."

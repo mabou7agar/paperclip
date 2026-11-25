@@ -42,7 +42,18 @@ describe("initial medium communication guidance", () => {
     expect(guidance).toContain("If no public task URL is available, say that the link is unavailable");
   });
 
-  it.each(CHAT_PROVIDERS.filter((provider) => provider !== "slack" && provider !== "speko"))("leaves %s unchanged", (provider) => {
+  const directChatProviders = ["telegram", "discord", "microsoft-teams", "imessage-photon"] as const;
+
+  it.each(directChatProviders)("guides %s replies toward the company's product and applies owner instructions", (provider) => {
+    const guidance = buildChatCommunicationGuidance({ provider, isDirectMessage: true, communicationInstructions: "Answer about OSARH." });
+    expect(guidance).toContain("## Communication in");
+    expect(guidance).toContain("they mean the company's product, not Paperclip");
+    expect(guidance).toContain("Find the answer yourself from the project's code");
+    expect(guidance).toContain('"Answer about OSARH."');
+    expect(guidance).toContain("direct conversation");
+  });
+
+  it.each(CHAT_PROVIDERS.filter((provider) => provider !== "slack" && provider !== "speko" && !(directChatProviders as readonly string[]).includes(provider)))("leaves %s unchanged", (provider) => {
     expect(buildChatCommunicationGuidance({ provider, isDirectMessage: false, communicationInstructions: "Ignored" })).toBeNull();
   });
 
