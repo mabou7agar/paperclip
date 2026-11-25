@@ -572,6 +572,7 @@ import { effectiveProjectWorkspacePolicy, sourcelessProjectWorkspacePolicy } fro
 import type { PluginWorkerManager } from "./plugin-worker-manager.js";
 
 import { computeTaskDrain, applyTaskDrain, startTaskDrain, stopTaskDrain, readTaskDrain } from "./task-admission.js";
+import { sweepIssueOwnerDecision } from "./follow-up-monitoring.js";
 
 const execFile = promisify(execFileCallback);
 const UNSUCCESSFUL_HEARTBEAT_RUN_TERMINAL_STATUSES = [
@@ -4611,10 +4612,19 @@ export function heartbeatService(
     readIdleWatchdogSchedule: taskWatchdogs.readIdleSchedule,
     registerIssueStateRecoveryWork: (coordinator: Parameters<typeof registerIssueRecoveryWork>[1], canRun: () => boolean) =>
       registerIssueRecoveryWork(db, coordinator, {
-        stranded: scope => reconcileStrandedAssignedIssues({ ...scope, skipExternalConversationSettlement: true, skipRelatedRecovery: true }),
+        stranded: async scope => {
+          const result = await reconcileStrandedAssignedIssues({ ...scope, skipExternalConversationSettlement: true, skipRelatedRecovery: true });
+          sweepIssueOwnerDecision(db, scope.companyId, scope.issueId);
+          return result;
+        },
         orphanBlockers: recovery.reconcileUnassignedBlockingIssues,
         recoveryActions: recovery.reconcileActiveRecoveryActions,
-        dependencies: reconcileResolvedDependencyWakes,
+        dependencies: async scope => {
+          const result = await reconcileResolvedDependencyWakes(scope);
+          // Blocked tasks are visited here: a task blocked on an unasked owner decision is the common case.
+          sweepIssueOwnerDecision(db, scope.companyId, scope.issueId);
+          return result;
+        },
         locks: sweepStaleIssueLocks,
         watchdogs: reconcileTaskWatchdogs,
         schedulingSuppressed: async () => (await getSchedulingSuppression(true)).suppressed,

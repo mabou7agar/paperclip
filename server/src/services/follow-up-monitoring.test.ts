@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { findOpenRegisterItems, untrackedFollowUpsInstruction, untrackedRegisterItems } from "./follow-up-monitoring.js";
+import {
+  findOpenRegisterItems, findOwnerDecisionRequest, ownerDecisionInstruction, untrackedFollowUpsInstruction, untrackedRegisterItems,
+} from "./follow-up-monitoring.js";
 
 const gapRegister = `# OSA-474 closure and flag-enable gap register
 
@@ -71,5 +73,31 @@ describe("untrackedFollowUpsInstruction", () => {
     expect(text).toContain("G3 | Rewards flag on tenant 8 | BLOCKED | DevOps (BLOCKED)");
     expect(text).toContain("create one follow-up task");
     expect(text).toContain("owner question card");
+  });
+});
+
+describe("findOwnerDecisionRequest", () => {
+  it("finds a decision handed to the owner", () => {
+    expect(findOwnerDecisionRequest(gapRegister)).toBe("The owner decides");
+    expect(findOwnerDecisionRequest("Both options are ready for the owner\u2019s decision.")).toBe("for the owner's decision");
+    expect(findOwnerDecisionRequest("Parking this, awaiting owner sign-off on the price.")).toBe("awaiting owner");
+    expect(findOwnerDecisionRequest("This needs owner approval before the flag is enabled.")).toBe("needs owner approval");
+    expect(findOwnerDecisionRequest("Owner to decide between A and B.")).toBe("Owner to decide");
+    expect(findOwnerDecisionRequest("Blocked: waiting on the owner for the tenant list.")).toBe("waiting on the owner");
+  });
+
+  it("ignores negations, decisions already made, quotes, code and unrelated owners", () => {
+    expect(findOwnerDecisionRequest("No owner decision needed; I applied the default.")).toBeNull();
+    expect(findOwnerDecisionRequest("This does not need owner approval.")).toBeNull();
+    expect(findOwnerDecisionRequest("The owner's decision: ship G1 and waive G2.")).toBeNull();
+    expect(findOwnerDecisionRequest("The owner's decision was to waive G2.")).toBeNull();
+    expect(findOwnerDecisionRequest("> The owner decides which items become tasks.\n\nFiled all five as tasks.")).toBeNull();
+    expect(findOwnerDecisionRequest("```\nowner decides\n```")).toBeNull();
+    expect(findOwnerDecisionRequest("The code owner reviewed the module; the file owner is the platform team.")).toBeNull();
+  });
+
+  it("asks for one card with concrete options, on a follow-up task when closed", () => {
+    expect(ownerDecisionInstruction("owner decides", false)).toMatch(/Raise one owner question card with concrete options, then wait/);
+    expect(ownerDecisionInstruction("owner decides", true)).toContain("on a follow-up task, since this task is closed");
   });
 });

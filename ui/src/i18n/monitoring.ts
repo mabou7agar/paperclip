@@ -8,6 +8,7 @@ export const monitoringMessages = {
     monitor_due: "A task check is due. Monitoring reported it without starting an agent.",
     stopped_subtree: "Work in this task tree has stopped. Monitoring reported it without assigning recovery work.",
     untracked_follow_ups: "This task closed with open items that have no follow-up tasks. An agent was asked to file them or ask you which to waive.",
+    owner_decision_without_card: "This task waits for your decision, but no question was raised for you. An agent was asked to raise one.",
   },
   ar: {
     title: "مهمة تحتاج إلى انتباه",
@@ -18,5 +19,6 @@ export const monitoringMessages = {
     monitor_due: "حان موعد فحص المهمة. تم الإبلاغ عنه دون تشغيل وكيل.",
     stopped_subtree: "توقف العمل في شجرة المهام. تم الإبلاغ عنه دون إسناد عمل استعادة.",
     untracked_follow_ups: "أُغلقت هذه المهمة وفيها بنود مفتوحة بلا مهام متابعة. طُلب من وكيل إنشاؤها أو سؤالك عن البنود التي يُتنازل عنها.",
+    owner_decision_without_card: "تنتظر هذه المهمة قرارك، لكن لم يُطرح عليك أي سؤال. طُلب من وكيل طرحه.",
   },
 };

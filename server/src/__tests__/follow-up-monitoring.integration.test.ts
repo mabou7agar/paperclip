@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { activityLog, agents, companies, createDb, documents, issueDocuments, issues } from "@paperclipai/db";
+import { activityLog, agents, companies, createDb, documents, issueComments, issueDocuments, issues, issueThreadInteractions } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { followUpMonitoring } from "../services/follow-up-monitoring.js";
 import { monitoringService, settleMonitoringOwnerNudges } from "../services/monitoring.js";
@@ -33,9 +33,10 @@ const support = await getEmbeddedPostgresTestSupport();
     await monitoringService(db).savePolicy(companyId, { mode: "alert_only" }, "owner");
     return { companyId, agentId, ctoId, issueId };
   }
-  async function addDocument(f: { companyId: string; issueId: string }, title: string, body: string) {
+  async function addDocument(f: { companyId: string; issueId: string; agentId?: string }, title: string, body: string) {
     const id = randomUUID();
-    await db.insert(documents).values({ id, companyId: f.companyId, title, latestBody: body, latestRevisionId: randomUUID() });
+    await db.insert(documents).values({ id, companyId: f.companyId, title, latestBody: body, latestRevisionId: randomUUID(),
+      updatedByAgentId: (f as { agentId?: string }).agentId ?? null });
     await db.insert(issueDocuments).values({ companyId: f.companyId, issueId: f.issueId, documentId: id, key: `doc-${id.slice(0, 6)}` });
     return id;
   }
@@ -83,6 +84,48 @@ const support = await getEmbeddedPostgresTestSupport();
     const wakeup = vi.fn(async () => ({ id: randomUUID() }));
     for (const f of [tracked, open, plain]) {
       expect(await followUpMonitoring(db, { wakeup }).checkClosedIssue(f.companyId, f.issueId)).toBeNull();
+    }
+    await settleMonitoringOwnerNudges();
+    expect(wakeup).not.toHaveBeenCalled();
+  });
+
+  it("reports an owner decision with no question card once, and wakes the assignee to raise one", async () => {
+    const f = await seed({ status: "in_progress" });
+    await db.insert(issueComments).values({ companyId: f.companyId, issueId: f.issueId, authorAgentId: f.agentId,
+      body: "Options A and B are ready. The owner decides which one ships." });
+    const wakeup = vi.fn(async () => ({ id: randomUUID() }));
+    const observation = await followUpMonitoring(db, { wakeup }).checkOwnerDecision(f.companyId, f.issueId);
+    await settleMonitoringOwnerNudges();
+    expect(observation).toMatchObject({ kind: "owner_decision_without_card", details: { phrase: "The owner decides" } });
+    expect(wakeup).toHaveBeenCalledTimes(1);
+    const [agentId, options] = wakeup.mock.calls[0] as unknown as [string, { contextSnapshot: Record<string, unknown> }];
+    expect(agentId).toBe(f.agentId);
+    expect(String(options.contextSnapshot.livenessContinuationInstruction)).toContain("Raise one owner question card");
+    await followUpMonitoring(db, { wakeup }).checkOwnerDecision(f.companyId, f.issueId);
+    await settleMonitoringOwnerNudges();
+    expect(await alerts(f.companyId, "owner_decision_without_card")).toHaveLength(1);
+    expect(wakeup).toHaveBeenCalledTimes(1);
+  });
+
+  it("stays quiet when a card was raised after the text, a card is pending on the parent, or a person wrote it", async () => {
+    const asked = await seed({ status: "in_progress" });
+    await db.insert(issueComments).values({ companyId: asked.companyId, issueId: asked.issueId, authorAgentId: asked.agentId,
+      body: "Awaiting owner approval.", createdAt: new Date(Date.now() - 60_000) });
+    await db.insert(issueThreadInteractions).values({ companyId: asked.companyId, issueId: asked.issueId, kind: "ask_user_questions",
+      status: "answered", payload: { version: 1, questions: [] } as never });
+    const parentPending = await seed({ status: "blocked" });
+    const parentId = randomUUID();
+    await db.insert(issues).values({ id: parentId, companyId: parentPending.companyId, title: "Parent", status: "in_progress" });
+    await db.update(issues).set({ parentId }).where(eq(issues.id, parentPending.issueId));
+    await db.insert(issueThreadInteractions).values({ companyId: parentPending.companyId, issueId: parentId, kind: "ask_user_questions",
+      status: "pending", payload: { version: 1, questions: [] } as never, createdAt: new Date(Date.now() - 3_600_000) });
+    await addDocument(parentPending, "Plan", "## Decision\n\nThe owner decides between the two tenants.");
+    const human = await seed({ status: "in_progress" });
+    await db.insert(issueComments).values({ companyId: human.companyId, issueId: human.issueId, authorUserId: "owner",
+      body: "The owner decides this one, I'll come back to it." });
+    const wakeup = vi.fn(async () => ({ id: randomUUID() }));
+    for (const f of [asked, parentPending, human]) {
+      expect(await followUpMonitoring(db, { wakeup }).checkOwnerDecision(f.companyId, f.issueId)).toBeNull();
     }
     await settleMonitoringOwnerNudges();
     expect(wakeup).not.toHaveBeenCalled();

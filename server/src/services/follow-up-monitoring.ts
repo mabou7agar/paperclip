@@ -1,12 +1,13 @@
-import { and, asc, desc, eq, gte, isNull, ne, notInArray } from "drizzle-orm";
-import { agents, companies, documents, issueComments, issueDocuments, issues, type Db } from "@paperclipai/db";
+import { and, asc, desc, eq, gte, inArray, isNull, ne, notInArray } from "drizzle-orm";
+import { agents, companies, documents, issueComments, issueDocuments, issueThreadInteractions, issues, type Db } from "@paperclipai/db";
 import type { MonitoringObservation } from "@paperclipai/shared";
 import { logger } from "../middleware/logger.js";
 import { monitoringService, type MonitoringServiceDeps } from "./monitoring.js";
 
 /**
  * Report-only checks for work that is left where nobody will pick it up:
- * open items written into a closed task's register with no follow-up tasks.
+ * open items written into a closed task's register with no follow-up tasks,
+ * and a decision handed to the owner without an owner question card.
  * They record an alert-only monitoring observation and let the monitoring
  * nudge plumbing (dedup, locking, rate limits) wake one agent.
  */
@@ -115,6 +116,44 @@ export function untrackedFollowUpsInstruction(items: readonly OpenRegisterItem[]
   ].join(" ");
 }
 
+/** Statements that the owner must decide, conservative on purpose. */
+const OWNER_DECISION_PATTERNS = [
+  /\b(?:the |an? )?owner (?:decides|will decide|to decide|must decide|needs to decide|should decide|has to decide)\b/i,
+  /\bfor (?:the )?owner(?:'s)? (?:decision|approval|sign-?off)\b/i,
+  /\bowner's (?:decision|approval)\b/i,
+  /\bawaiting (?:the |an? )?owner\b/i,
+  /\bwaiting (?:on|for) (?:the |an? )?owner\b/i,
+  /\bneeds? (?:the )?owner(?:'s)? approval\b/i,
+];
+const NEGATION_BEFORE = /\b(?:no|not|without|never|don't|doesn't|isn't)\b[^.!?\n]{0,25}$/i;
+/** "the owner's decision: ..." or "... was ..." reports a decision already made. */
+const DECISION_MADE_AFTER = /^\s*(?::|was\b|is to\b|has been\b|came\b)/i;
+
+/**
+ * The phrase in a comment or document that hands a decision to the owner, or
+ * null. Quoted lines and fenced code are ignored, as are negated phrases
+ * ("no owner decision needed") and reports of a decision already made.
+ */
+export function findOwnerDecisionRequest(text: string): string | null {
+  const body = stripFencedCode(text).replace(/[\u2018\u2019]/g, "'")
+    .split(/\r?\n/).filter(line => !/^\s*>/.test(line)).join("\n");
+  for (const pattern of OWNER_DECISION_PATTERNS) {
+    const global = new RegExp(pattern.source, "gi");
+    for (const match of body.matchAll(global)) {
+      const before = body.slice(Math.max(0, match.index! - 40), match.index!);
+      const after = body.slice(match.index! + match[0].length, match.index! + match[0].length + 20);
+      if (NEGATION_BEFORE.test(before) || DECISION_MADE_AFTER.test(after)) continue;
+      return match[0];
+    }
+  }
+  return null;
+}
+
+export function ownerDecisionInstruction(phrase: string, closed: boolean) {
+  return `This task says "${phrase}", but no owner question card was raised, so nobody will decide. ` +
+    `Raise one owner question card with concrete options${closed ? " (on a follow-up task, since this task is closed)" : ""}, then wait for the answer.`;
+}
+
 async function invokableAgent(db: Db, companyId: string, agentId: string | null | undefined) {
   if (!agentId) return null;
   const [agent] = await db.select({ id: agents.id, status: agents.status }).from(agents)
@@ -195,7 +234,74 @@ export function followUpMonitoring(db: Db, deps: MonitoringServiceDeps = {}) {
     return observation;
   }
 
-  return { checkClosedIssue };
+  /**
+   * A task (open, or closed with this check run at close) whose latest agent
+   * comment or agent-written document hands a decision to the owner, with no
+   * owner question card on it or its parent since, is reported once per
+   * source and one agent is nudged to raise the card.
+   */
+  async function checkOwnerDecision(companyId: string, issueId: string): Promise<MonitoringObservation | null> {
+    if ((await monitoring.policy(companyId)).mode !== "alert_only") return null;
+    const [issue] = await db.select({ id: issues.id, status: issues.status, parentId: issues.parentId, assigneeAgentId: issues.assigneeAgentId,
+      assigneeUserId: issues.assigneeUserId, conversationAgentId: issues.conversationAgentId, conversationUserId: issues.conversationUserId })
+      .from(issues).where(and(eq(issues.companyId, companyId), eq(issues.id, issueId))).limit(1);
+    if (!issue || issue.status === "backlog" || issue.assigneeUserId) return null;
+    if (issue.conversationAgentId && issue.conversationUserId) return null;
+    const candidates: { ref: string; at: Date; text: string }[] = [];
+    const [comment] = await db.select({ id: issueComments.id, body: issueComments.body, createdAt: issueComments.createdAt,
+      authorAgentId: issueComments.authorAgentId })
+      .from(issueComments).where(and(eq(issueComments.companyId, companyId), eq(issueComments.issueId, issueId),
+        isNull(issueComments.deletedAt))).orderBy(desc(issueComments.createdAt)).limit(1);
+    // A person writing "the owner decides" is not waiting for a card.
+    if (comment?.authorAgentId) candidates.push({ ref: `comment:${comment.id}`, at: comment.createdAt, text: comment.body });
+    const docs = await db.select({ id: documents.id, body: documents.latestBody, revisionId: documents.latestRevisionId,
+      revisionNumber: documents.latestRevisionNumber, updatedAt: documents.updatedAt, updatedByAgentId: documents.updatedByAgentId })
+      .from(issueDocuments).innerJoin(documents, eq(issueDocuments.documentId, documents.id))
+      .where(and(eq(issueDocuments.companyId, companyId), eq(issueDocuments.issueId, issueId)));
+    for (const doc of docs) {
+      if (doc.updatedByAgentId) candidates.push({ ref: `document:${doc.id}:${doc.revisionId ?? doc.revisionNumber}`, at: doc.updatedAt, text: doc.body });
+    }
+    const source = candidates.map(candidate => ({ ...candidate, phrase: findOwnerDecisionRequest(candidate.text) }))
+      .filter(candidate => candidate.phrase).sort((a, b) => b.at.getTime() - a.at.getTime())[0];
+    if (!source) return null;
+    const cards = await db.select({ status: issueThreadInteractions.status, createdAt: issueThreadInteractions.createdAt })
+      .from(issueThreadInteractions).where(and(eq(issueThreadInteractions.companyId, companyId),
+        inArray(issueThreadInteractions.issueId, issue.parentId ? [issueId, issue.parentId] : [issueId]),
+        eq(issueThreadInteractions.kind, "ask_user_questions")));
+    if (cards.some(card => card.status === "pending" || card.createdAt >= source.at)) return null;
+    const closed = issue.status === "done" || issue.status === "cancelled";
+    const observation: MonitoringObservation = {
+      companyId, issueId, kind: "owner_decision_without_card",
+      fingerprint: JSON.stringify(["owner_decision_without_card", source.ref]),
+      nudgeAgentId: await resolveFollowUpNudgeAgent(db, companyId, issue.assigneeAgentId, { preferRole: "pm" }),
+      nudgeInstruction: ownerDecisionInstruction(source.phrase!, closed),
+      details: { source: source.ref, phrase: source.phrase },
+    };
+    await monitoring.observe(observation);
+    return observation;
+  }
+
+  return { checkClosedIssue, checkOwnerDecision };
+}
+
+/** How often the periodic sweep re-reads one task for an unasked owner decision. */
+const OWNER_DECISION_SWEEP_INTERVAL_MS = 15 * 60 * 1000;
+const ownerDecisionSweptAt = new Map<string, number>();
+
+/**
+ * Called by the periodic issue recovery sweep for each task it visits:
+ * throttled per task, detached and best effort, so it never slows or fails
+ * the recovery pass.
+ */
+export function sweepIssueOwnerDecision(db: Db, companyId: string, issueId: string, now = Date.now()) {
+  const last = ownerDecisionSweptAt.get(issueId);
+  if (last !== undefined && now - last < OWNER_DECISION_SWEEP_INTERVAL_MS) return;
+  if (ownerDecisionSweptAt.size > 50_000) {
+    for (const [key, at] of ownerDecisionSweptAt) if (now - at >= OWNER_DECISION_SWEEP_INTERVAL_MS) ownerDecisionSweptAt.delete(key);
+  }
+  ownerDecisionSweptAt.set(issueId, now);
+  void followUpMonitoring(db).checkOwnerDecision(companyId, issueId).catch(error =>
+    logger.warn({ err: error, companyId, issueId }, "owner decision check failed"));
 }
 
 /** A just-closed task's comment may be written right after the status change. */
@@ -204,8 +310,11 @@ const CLOSED_ISSUE_CHECK_DELAY_MS = 5_000;
 /** Run the closed-task check shortly after the transition commits, detached and best effort. */
 export function scheduleClosedIssueFollowUpCheck(db: Db, companyId: string, issueId: string) {
   const timer = setTimeout(() => {
-    followUpMonitoring(db).checkClosedIssue(companyId, issueId).catch(error =>
+    const checks = followUpMonitoring(db);
+    checks.checkClosedIssue(companyId, issueId).catch(error =>
       logger.warn({ err: error, companyId, issueId }, "closed task follow-up check failed"));
+    checks.checkOwnerDecision(companyId, issueId).catch(error =>
+      logger.warn({ err: error, companyId, issueId }, "closed task owner decision check failed"));
   }, CLOSED_ISSUE_CHECK_DELAY_MS);
   timer.unref?.();
 }
