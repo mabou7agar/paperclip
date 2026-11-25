@@ -1,3 +1,4 @@
+import { ordinaryChatConversation } from "../services/owner-card-push.js";
 import { assertProviderApiPlacementPolicy, managedCursorApiDefaultEnabled, resolveProviderApiPlacement } from "../services/native-runtime/provider-api-placement.js";
 import { isObjectJournalBusyError } from "../services/object-byte-journal.js";
 import { readTaskPanelActivations } from "../services/plugin-task-panels.js";
@@ -6326,6 +6327,7 @@ export function agentRoutes(
               and(
                 eq(chatConversations.companyId, agent.companyId),
                 eq(chatConversations.issueId, issueId),
+                ordinaryChatConversation(),
               ),
             )
             .limit(1)

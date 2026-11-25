@@ -1,3 +1,4 @@
+import { ordinaryChatConversation } from "../owner-card-push.js";
 import { claimRunnerPolicyRecovery } from "../recovery/runner-policy-claim.js";
 import { loadRunnerPolicyTrust } from "../recovery/runner-policy-trust.js";
 import { pendingAddressedInteractionReceiptSql } from "../../repositories/addressed-interactions.js";
@@ -3427,6 +3428,7 @@ export function createHeartbeatQueue(db: Db, dependencies: HeartbeatQueueDepende
                     eq(chatEndpoints.externalExecutionPolicy, "restricted"),
                     eq(chatConversations.companyId, agent.companyId),
                     eq(chatConversations.issueId, issueId),
+                    ordinaryChatConversation(),
                   ),
                 )
                 .limit(1);

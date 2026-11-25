@@ -1,3 +1,4 @@
+import { ordinaryChatConversation } from "../owner-card-push.js";
 import { addressedInteractionWakeContext } from "../addressed-interaction-wake.js";
 import { skillPackageStore, skillVersionMetadataColumns } from "../skill-package-store.js";
 import { skillAccessService } from "../skill-access.js";
@@ -2965,6 +2966,7 @@ export function createHeartbeatRunPreparation(db: Db) {
       .leftJoin(chatConversations, and(
         eq(chatConversations.companyId, issues.companyId),
         eq(chatConversations.issueId, issues.id),
+        ordinaryChatConversation(),
       ))
       .leftJoin(chatEndpoints, and(
         eq(chatEndpoints.companyId, chatConversations.companyId),

@@ -1,3 +1,4 @@
+import { ordinaryChatConversation } from "./owner-card-push.js";
 import { and, desc, eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
@@ -43,6 +44,7 @@ export async function getExternalChannelBindingSummary(
       and(
         eq(chatConversations.companyId, companyId),
         eq(chatConversations.issueId, issueId),
+        ordinaryChatConversation(),
       ),
     )
     .orderBy(desc(chatPublications.createdAt), desc(chatConversations.createdAt))

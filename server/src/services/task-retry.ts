@@ -1,3 +1,4 @@
+import { ordinaryChatConversation } from "./owner-card-push.js";
 import { notifyStrandedAgentStatus } from "./live-run-recovery-notifications.js";
 import { notifyExternalConversationSettlement } from "./external-conversation-settlement-notifications.js";
 import { writeExecutionControl } from "./execution-control-notifications.js";
@@ -354,7 +355,7 @@ function admitTaskRetry(input: TaskRetryRequest) {
     const [chat] = await tx.select({ id: chatConversations.id }).from(chatConversations)
       .innerJoin(chatEndpoints, eq(chatEndpoints.id, chatConversations.endpointId)).where(and(
         eq(chatConversations.companyId, issue.companyId), eq(chatConversations.issueId, issue.id),
-        eq(chatEndpoints.externalExecutionPolicy, "restricted"))).limit(1);
+        eq(chatEndpoints.externalExecutionPolicy, "restricted"), ordinaryChatConversation())).limit(1);
     const boardMessageOrigin = chat && !active && !busy
       ? await readTaskRetryBoardMessageOrigin(db, { companyId: issue.companyId,
         issueId: issue.id, agentId: issue.assigneeAgentId, sourceRunId: latest.id, actorId: input.actorId }) : null;

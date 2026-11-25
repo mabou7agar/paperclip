@@ -1,3 +1,4 @@
+import { ordinaryChatConversation } from "../services/owner-card-push.js";
 import { assertCanCreateProgressReview } from "../services/issue-review-progress.js";
 import { listStalledDependencies } from "../services/recovery/blocker-stall-wakeups.js";
 import { confirmMcpAttachmentCleanup, recordMcpAttachmentCleanup, type McpAttachmentCleanup } from "../services/public-mcp/upload-cleanup.js";
@@ -10671,6 +10672,7 @@ export function issueRoutes(
                 eq(chatEndpoints.externalExecutionPolicy, "restricted"),
                 eq(chatConversations.companyId, lockedIssue.companyId),
                 eq(chatConversations.issueId, lockedIssue.id),
+                ordinaryChatConversation(),
               ),
             )
             .limit(1);

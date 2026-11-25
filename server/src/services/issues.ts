@@ -1,3 +1,4 @@
+import { ordinaryChatConversation } from "./owner-card-push.js";
 import { prepareSourceReviewHandoff } from "./source-review-handoff.js";
 import type { NativeSourceReviewOwner } from "./workspace-source-inspection.js";
 import { assertCanCreateProgressReview, assertReviewProgressOwner, assertCanChangeProgressReview, assertReviewProgressStateWrite, assertReviewProgressStateShape, reconcileReviewProgressSnapshot, type ReviewProgressSnapshot } from "./issue-review-progress.js";
@@ -11373,6 +11374,7 @@ export function issueService(db: Db) {
             and(
               eq(chatConversations.companyId, existing.companyId),
               eq(chatConversations.issueId, existing.id),
+              ordinaryChatConversation(),
             ),
           )
           .limit(1)

@@ -243,6 +243,11 @@ export interface ChatEndpointSetupState {
   callbackSurfaces?: ChatEndpointCallbackSurfaces;
   /** True when at least one previously observed callback still targets an old public URL. */
   callbacksNeedUpdate?: boolean;
+  /**
+   * Telegram only. Pending owner question cards on ordinary tasks are pushed to
+   * the linked owner's Telegram DM unless this is explicitly false.
+   */
+  ownerCardPush?: boolean;
 }
 
 export interface ChatEndpointSetupSecret {
@@ -542,6 +547,8 @@ export interface UpdateChatEndpointInput {
   requireAtMention?: boolean;
   allowGroupChats?: boolean;
   allowUnlinkedPeople?: boolean;
+  /** Telegram only: push owner question cards to the linked owner's DM (default on). */
+  ownerCardPush?: boolean;
 }
 
 export interface ConfigureChatEndpointInput {
