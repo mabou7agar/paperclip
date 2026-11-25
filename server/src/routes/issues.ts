@@ -67,8 +67,8 @@ import {
   acceptSteeredIdentity,
   rejectSteeredIdentity,
 } from "../services/run-identity.js";
-import { createHash, randomUUID } from "node:crypto";
-import { Router, type Request, type Response } from "express";
+import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { Router, type NextFunction, type Request, type Response } from "express";
 import multer from "multer";
 import { z } from "zod";
 import { and, asc, desc, eq, inArray, isNull, notInArray, or, sql, type SQL } from "drizzle-orm";
@@ -4582,13 +4582,49 @@ export function issueRoutes(
     }
   }
 
+  // Evidence share links: a permanent, unguessable URL for one attachment that
+  // opens without a Paperclip login, so evidence can be linked from GitHub
+  // pull requests and Jira issues. The token is an HMAC of the attachment id,
+  // so no table is needed; rotating PAPERCLIP_EVIDENCE_LINK_SECRET (or, when it
+  // is unset, BETTER_AUTH_SECRET) revokes every link at once.
+  function evidenceLinkKey(): Buffer | null {
+    const explicit = process.env.PAPERCLIP_EVIDENCE_LINK_SECRET?.trim();
+    if (explicit) return Buffer.from(explicit, "utf8");
+    const authSecret = process.env.BETTER_AUTH_SECRET?.trim();
+    if (!authSecret) return null;
+    return createHmac("sha256", authSecret).update("paperclip-evidence-link:v1").digest();
+  }
+
+  function evidenceLinkToken(attachmentId: string): string | null {
+    const key = evidenceLinkKey();
+    if (!key) return null;
+    return createHmac("sha256", key).update(`attachment:${attachmentId}`).digest("base64url");
+  }
+
+  function evidenceTokenMatches(attachmentId: string, token: string): boolean {
+    const expected = evidenceLinkToken(attachmentId);
+    if (!expected || typeof token !== "string") return false;
+    const a = Buffer.from(expected, "utf8");
+    const b = Buffer.from(token, "utf8");
+    return a.length === b.length && timingSafeEqual(a, b);
+  }
+
+  function evidenceShareUrl(attachmentId: string): string | null {
+    const token = evidenceLinkToken(attachmentId);
+    const base = process.env.PAPERCLIP_PUBLIC_URL?.trim().replace(/\/+$/, "");
+    if (!token || !base) return null;
+    return `${base}/api/evidence/${encodeURIComponent(attachmentId)}/${token}`;
+  }
+
   function withContentPath<T extends { id: string }>(attachment: T) {
     const contentPath = `/api/attachments/${attachment.id}/content`;
+    const shareUrl = evidenceShareUrl(attachment.id);
     return {
       ...attachment,
       contentPath,
       openPath: contentPath,
       downloadPath: `${contentPath}?download=1`,
+      ...(shareUrl ? { shareUrl } : {}),
     };
   }
 
@@ -20677,22 +20713,14 @@ export function issueRoutes(
     },
   );
 
-  router.get("/attachments/:attachmentId/content", async (req, res, next) => {
-    const attachmentId = req.params.attachmentId as string;
-    const attachment = await getAccessibleResource(
-      req,
-      res,
-      svc.getAttachmentById(attachmentId),
-      "Attachment not found",
-    );
-    if (!attachment) return;
-    const issue = await svc.getById(attachment.issueId);
-    if (!issue) {
-      res.status(404).json({ error: "Issue not found" });
-      return;
-    }
-    if (!(await assertIssueReadAllowed(req, res, issue))) return;
+  type ServedAttachment = NonNullable<Awaited<ReturnType<typeof svc.getAttachmentById>>>;
 
+  async function sendAttachmentContent(
+    req: Request,
+    res: Response,
+    next: NextFunction,
+    attachment: ServedAttachment,
+  ) {
     const contentLength = attachment.byteSize;
     const range = parseAttachmentRangeHeader(
       typeof req.headers.range === "string" ? req.headers.range : undefined,
@@ -20769,6 +20797,43 @@ export function issueRoutes(
       String(contentLength || object.contentLength || 0),
     );
     object.stream.pipe(res);
+  }
+
+  router.get("/attachments/:attachmentId/content", async (req, res, next) => {
+    const attachmentId = req.params.attachmentId as string;
+    const attachment = await getAccessibleResource(
+      req,
+      res,
+      svc.getAttachmentById(attachmentId),
+      "Attachment not found",
+    );
+    if (!attachment) return;
+    const issue = await svc.getById(attachment.issueId);
+    if (!issue) {
+      res.status(404).json({ error: "Issue not found" });
+      return;
+    }
+    if (!(await assertIssueReadAllowed(req, res, issue))) return;
+    await sendAttachmentContent(req, res, next, attachment);
+  });
+
+  // Public evidence link (see evidenceShareUrl). No login: the token is the
+  // capability. Any mismatch answers 404 so ids cannot be probed.
+  router.get("/evidence/:attachmentId/:token", async (req, res, next) => {
+    const attachmentId = req.params.attachmentId as string;
+    const token = req.params.token as string;
+    if (!evidenceTokenMatches(attachmentId, token)) {
+      res.status(404).json({ error: "Not found" });
+      return;
+    }
+    const attachment = await svc.getAttachmentById(attachmentId);
+    if (!attachment) {
+      res.status(404).json({ error: "Not found" });
+      return;
+    }
+    res.setHeader("Referrer-Policy", "no-referrer");
+    res.setHeader("X-Robots-Tag", "noindex, nofollow");
+    await sendAttachmentContent(req, res, next, attachment);
   });
 
   router.delete("/attachments/:attachmentId", async (req, res) => {

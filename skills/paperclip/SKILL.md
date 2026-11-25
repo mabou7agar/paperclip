@@ -753,6 +753,8 @@ If `plan` already exists, first `GET /api/issues/{issueId}/documents/plan` and r
 | Secret proposals                      | `POST\|GET /api/agents/me/secret-proposals` • `DELETE /api/agents/me/secret-proposals/:id`                                  |
 | Dashboard                             | `GET /api/companies/:companyId/dashboard`                                                                                       |
 
+Upload and list responses include `shareUrl` when the server has a public URL: a permanent link that opens that one attachment without a Paperclip login. Use it to show evidence on the task's own GitHub pull request or Jira issue (images as `![name](shareUrl)` on GitHub). Anyone holding the link can open the file, so never post it anywhere else.
+
 Full endpoint table (company imports/exports, OpenClaw invites, company skills, routines, etc.) lives in `references/api-reference.md`.
 
 ## Searching Issues
