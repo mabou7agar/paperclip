@@ -17,9 +17,10 @@ import type { createToolGatewayService } from "./tool-gateway.js";
  *
  * Links are `issue_work_products` rows `{type: "external_issue", provider:
  * "jira", externalId: "KEY-123"}`; all sync state lives in their metadata.
- * Links are made automatically when a task's title or description names a key
- * of a project the company's Jira connection can see (or a browse URL of that
- * site). Each project's own workflow is learned from the transitions Jira
+ * Links are made automatically when a task's title names a key of a project
+ * the company's Jira connection can see (or a browse URL of that site). Only
+ * the title counts: descriptions often mention a story as a reference ("QA for
+ * AT-28"), and syncing from such a task would move the story with it. Each project's own workflow is learned from the transitions Jira
  * offers for the issue, so no transition id is hard-coded.
  *
  * Jira is never called inside a database transaction, and a Jira failure never
@@ -347,10 +348,10 @@ export function jiraStatusSyncService(db: Db, gateway: Gateway, options: { now?:
       eq(issueWorkProducts.type, JIRA_LINK_TYPE), eq(issueWorkProducts.provider, JIRA_LINK_PROVIDER)));
   }
 
-  /** Links every Jira key named in the task title or description that is not linked yet. */
+  /** Links every Jira key named in the task title that is not linked yet (title only; see header). */
   async function linkIssue(issue: IssueRow, context: JiraContext) {
     const host = hostOf(context.siteUrl);
-    const keys = findJiraKeys(`${issue.title}\n${issue.description ?? ""}`, context.projectKeys, host ? [host] : []);
+    const keys = findJiraKeys(issue.title, context.projectKeys, host ? [host] : []);
     if (keys.length === 0) return 0;
     const linked = new Set((await existingLinks(issue.id)).map((link) => (link.externalId ?? "").toUpperCase()));
     let created = 0;
