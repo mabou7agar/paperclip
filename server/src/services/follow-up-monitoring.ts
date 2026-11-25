@@ -120,7 +120,6 @@ export function untrackedFollowUpsInstruction(items: readonly OpenRegisterItem[]
 const OWNER_DECISION_PATTERNS = [
   /\b(?:the |an? )?owner (?:decides|will decide|to decide|must decide|needs to decide|should decide|has to decide)\b/i,
   /\bfor (?:the )?owner(?:'s)? (?:decision|approval|sign-?off)\b/i,
-  /\bowner's (?:decision|approval)\b/i,
   /\bawaiting (?:the |an? )?owner\b/i,
   /\bwaiting (?:on|for) (?:the |an? )?owner\b/i,
   /\bneeds? (?:the )?owner(?:'s)? approval\b/i,
@@ -151,7 +150,8 @@ export function findOwnerDecisionRequest(text: string): string | null {
 
 export function ownerDecisionInstruction(phrase: string, closed: boolean) {
   return `This task says "${phrase}", but no owner question card was raised, so nobody will decide. ` +
-    `Raise one owner question card with concrete options${closed ? " (on a follow-up task, since this task is closed)" : ""}, then wait for the answer.`;
+    `If a decision is due now, raise one owner question card with concrete options${closed ? " (on a follow-up task, since this task is closed)" : ""}, then wait for the answer. ` +
+    "If the text only states a standing rule (for example that merges stay with the owner) and nothing is waiting on the owner yet, raise no card and reply in one line that no decision is due.";
 }
 
 async function invokableAgent(db: Db, companyId: string, agentId: string | null | undefined) {

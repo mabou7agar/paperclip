@@ -91,13 +91,14 @@ describe("findOwnerDecisionRequest", () => {
     expect(findOwnerDecisionRequest("This does not need owner approval.")).toBeNull();
     expect(findOwnerDecisionRequest("The owner's decision: ship G1 and waive G2.")).toBeNull();
     expect(findOwnerDecisionRequest("The owner's decision was to waive G2.")).toBeNull();
+    expect(findOwnerDecisionRequest("Each merge stays the owner's decision; ask through the PM when a PR is ready.")).toBeNull();
     expect(findOwnerDecisionRequest("> The owner decides which items become tasks.\n\nFiled all five as tasks.")).toBeNull();
     expect(findOwnerDecisionRequest("```\nowner decides\n```")).toBeNull();
     expect(findOwnerDecisionRequest("The code owner reviewed the module; the file owner is the platform team.")).toBeNull();
   });
 
   it("asks for one card with concrete options, on a follow-up task when closed", () => {
-    expect(ownerDecisionInstruction("owner decides", false)).toMatch(/Raise one owner question card with concrete options, then wait/);
+    expect(ownerDecisionInstruction("owner decides", false)).toMatch(/raise one owner question card with concrete options, then wait/);
     expect(ownerDecisionInstruction("owner decides", true)).toContain("on a follow-up task, since this task is closed");
   });
 });
