@@ -7,6 +7,9 @@ export const monitoringMessages = {
     no_execution_path: "This task has no live execution path. Monitoring will wait for a real change or your action.",
     monitor_due: "A task check is due. Monitoring reported it without starting an agent.",
     stopped_subtree: "Work in this task tree has stopped. Monitoring reported it without assigning recovery work.",
+    untracked_follow_ups: "This task closed with open items that have no follow-up tasks. An agent was asked to file them or ask you which to waive.",
+    owner_decision_without_card: "This task waits for your decision, but no question was raised for you. An agent was asked to raise one.",
+    review_without_eligible_participant: "A review on this task has no eligible reviewer, and no review escalation agent could take it.",
   },
   ar: {
     title: "مهمة تحتاج إلى انتباه",
@@ -16,5 +19,8 @@ export const monitoringMessages = {
     no_execution_path: "لا يوجد مسار تنفيذ نشط لهذه المهمة. ستنتظر المراقبة تغييراً فعلياً أو إجراءً منك.",
     monitor_due: "حان موعد فحص المهمة. تم الإبلاغ عنه دون تشغيل وكيل.",
     stopped_subtree: "توقف العمل في شجرة المهام. تم الإبلاغ عنه دون إسناد عمل استعادة.",
+    untracked_follow_ups: "أُغلقت هذه المهمة وفيها بنود مفتوحة بلا مهام متابعة. طُلب من وكيل إنشاؤها أو سؤالك عن البنود التي يُتنازل عنها.",
+    owner_decision_without_card: "تنتظر هذه المهمة قرارك، لكن لم يُطرح عليك أي سؤال. طُلب من وكيل طرحه.",
+    review_without_eligible_participant: "لا يوجد مراجع مؤهل لمراجعة هذه المهمة، ولم يتمكن أي وكيل تصعيد للمراجعة من تولّيها.",
   },
 };

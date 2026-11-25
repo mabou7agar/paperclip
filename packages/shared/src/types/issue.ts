@@ -865,6 +865,11 @@ export interface IssueExecutionState {
   reviewEscalated?: boolean;
   /** The policy's escalation agent already took its turn in this cycle; the next cap goes to the human. */
   reviewEscalationAgentUsed?: boolean;
+  /**
+   * The current participant is the company review escalation agent, used
+   * because no configured participant of the stage was eligible.
+   */
+  reviewFallbackParticipant?: boolean;
 }
 
 export interface IssueExecutionDecision {

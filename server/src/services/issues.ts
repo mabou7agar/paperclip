@@ -331,6 +331,11 @@ export type IssuePostCommitAction = {
   runId: string;
   issueId: string;
   issueStatus: string;
+} | {
+  /** Report open register items a closed task left without follow-up tasks. */
+  type: "check_closed_issue_follow_ups";
+  companyId: string;
+  issueId: string;
 };
 
 /** Execute side effects that must never run before the issue transaction commits. */
@@ -339,10 +344,17 @@ export async function executeIssuePostCommitActions(
   actions: readonly IssuePostCommitAction[],
 ): Promise<void> {
   if (actions.length === 0) return;
+  const followUpChecks = actions.filter(action => action.type === "check_closed_issue_follow_ups");
+  if (followUpChecks.length > 0) {
+    const { scheduleClosedIssueFollowUpCheck } = await import("./follow-up-monitoring.js");
+    for (const action of followUpChecks) scheduleClosedIssueFollowUpCheck(db, action.companyId, action.issueId);
+  }
+  const runCancellations = actions.filter(action => action.type === "cancel_native_question_run");
+  if (runCancellations.length === 0) return;
   const { heartbeatService } = await import("./heartbeat.js");
   const heartbeat = heartbeatService(db);
   const cancelledRunIds = new Set<string>();
-  for (const action of actions) {
+  for (const action of runCancellations) {
     if (cancelledRunIds.has(action.runId)) continue;
     cancelledRunIds.add(action.runId);
     try {
@@ -12032,6 +12044,14 @@ export function issueService(db: Db) {
           }
           if (updated.status === "done" || updated.status === "cancelled") {
             await finalizeSummarySlotsForTerminalIssue(tx, updated);
+            if (existing.status !== "done" && existing.status !== "cancelled") {
+              // Report-only, after commit: never blocks or rolls back the close.
+              queuedPostCommitActions.push({
+                type: "check_closed_issue_follow_ups",
+                companyId: updated.companyId,
+                issueId: updated.id,
+              });
+            }
             // Every terminal transition funnels through here, including direct
             // service callers (tree control, recovery, status cards)
             // that never touch the HTTP routes. Governed cards expire; ordinary

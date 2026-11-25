@@ -3,7 +3,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   activityLog, agents, agentWakeupRequests, authUsers, companies, companyMemberships, createDb, heartbeatRuns,
-  issues, issueTreeHoldMembers, issueTreeHolds,
+  issues, issueThreadInteractions, issueTreeHoldMembers, issueTreeHolds,
 } from "@paperclipai/db";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 
@@ -11,7 +11,8 @@ const execute = vi.hoisted(() => vi.fn());
 vi.mock("../adapters/index.ts", async () => ({ ...await vi.importActual<typeof import("../adapters/index.ts")>("../adapters/index.ts"),
   getServerAdapter: () => ({ supportsLocalAgentJwt: false, execute }) }));
 import {
-  isMonitoringWake, monitoringAlertId, monitoringOwnerNudgeId, monitoringService, MONITORING_OWNER_NUDGE_REASON, settleMonitoringOwnerNudges,
+  isMonitoringWake, monitoringAlertId, monitoringOwnerNudgeId, monitoringService, MONITORING_OWNER_NUDGE_REASON, ownerNudgeRepeatDue,
+  settleMonitoringOwnerNudges,
 } from "../services/monitoring.js";
 import { heartbeatService } from "../services/heartbeat.js";
 
@@ -20,6 +21,26 @@ describe("monitoring owner nudge reason", () => {
     expect(isMonitoringWake({ source: "automation", reason: MONITORING_OWNER_NUDGE_REASON })).toBe(false);
     expect(isMonitoringWake({ source: "automation", reason: MONITORING_OWNER_NUDGE_REASON,
       context: { source: "monitoring.owner_nudge" } })).toBe(false);
+  });
+});
+
+describe("repeat owner nudge schedule", () => {
+  const minute = 60 * 1000, now = Date.parse("2026-11-24T20:39:00Z");
+  const ago = (...minutes: number[]) => minutes.map(m => new Date(now - m * minute));
+  it("waits 15 min, 1 h, 4 h, then 12 h after each nudge", () => {
+    expect(ownerNudgeRepeatDue([], now)).toBe(true);
+    expect(ownerNudgeRepeatDue(ago(14), now)).toBe(false);
+    expect(ownerNudgeRepeatDue(ago(15), now)).toBe(true);
+    expect(ownerNudgeRepeatDue(ago(59, 120), now)).toBe(false);
+    expect(ownerNudgeRepeatDue(ago(60, 120), now)).toBe(true);
+    expect(ownerNudgeRepeatDue(ago(239, 300, 400), now)).toBe(false);
+    expect(ownerNudgeRepeatDue(ago(240, 300, 400), now)).toBe(true);
+    expect(ownerNudgeRepeatDue(ago(719, 800, 900, 1000), now)).toBe(false);
+    expect(ownerNudgeRepeatDue(ago(720, 800, 900, 1000), now)).toBe(true);
+  });
+  it("stops at six nudges per task inside the window, whatever their age", () => {
+    expect(ownerNudgeRepeatDue(ago(1000, 1100, 1200, 1300, 1400), now)).toBe(true);
+    expect(ownerNudgeRepeatDue(ago(1000, 1100, 1200, 1300, 1400, 1430), now)).toBe(false);
   });
 });
 
@@ -178,6 +199,53 @@ const support = await getEmbeddedPostgresTestSupport();
     await monitoringService(db).observe({ companyId: f.companyId, issueId: f.issueId, kind: "no_execution_path", fingerprint: "b" });
     await settle();
     expect(await nudgeWakes(f.companyId)).toHaveLength(2);
+  }, 30000);
+
+  it("nudges a persisting no_execution_path again after an earlier alert used the single nudge, on the backoff schedule", async () => {
+    const f = await seed(); succeed();
+    await monitoringService(db).observe({ companyId: f.companyId, issueId: f.issueId, kind: "missing_disposition", fingerprint: "earlier" });
+    await settle();
+    expect(await nudgeWakes(f.companyId)).toHaveLength(1);
+    // The CTO incident: the only nudge went to missing_disposition 20 minutes earlier.
+    const earlier = new Date(Date.now() - 20 * 60 * 1000);
+    await db.update(activityLog).set({ createdAt: earlier }).where(eq(activityLog.action, "monitoring.owner_nudge"));
+    await db.update(agentWakeupRequests).set({ requestedAt: earlier }).where(eq(agentWakeupRequests.reason, MONITORING_OWNER_NUDGE_REASON));
+    // Another missing_disposition alert keeps the single 24 hour rule.
+    await monitoringService(db).observe({ companyId: f.companyId, issueId: f.issueId, kind: "missing_disposition", fingerprint: "later" });
+    await settle();
+    expect(await nudgeWakes(f.companyId)).toHaveLength(1);
+    const observation = { companyId: f.companyId, issueId: f.issueId, kind: "no_execution_path" as const, fingerprint: "build-machine" };
+    await Promise.all(Array.from({ length: 4 }, () => monitoringService(db).observe(observation)));
+    await settle();
+    expect(await nudgeWakes(f.companyId)).toHaveLength(2);
+    expect(await monitoringService(db).ownerNudgeSettled(observation)).toBe(true);
+    // The same alert, still present: not again inside the 1 hour backoff.
+    await monitoringService(db).observe(observation);
+    await settle();
+    expect(await nudgeWakes(f.companyId)).toHaveLength(2);
+    // Past the backoff, the same alert nudges a third time.
+    const older = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    await db.update(activityLog).set({ createdAt: older }).where(eq(activityLog.action, "monitoring.owner_nudge"));
+    expect(await monitoringService(db).ownerNudgeSettled(observation)).toBe(false);
+    await monitoringService(db).observe(observation);
+    await settle();
+    const wakes = await nudgeWakes(f.companyId);
+    expect(wakes).toHaveLength(3);
+    expect(new Set(wakes.map(wake => wake.idempotencyKey)).size).toBe(3);
+    expect(execute).toHaveBeenCalledTimes(3);
+  }, 30000);
+
+  it("does not repeat a nudge while an owner question card is pending on the task", async () => {
+    const f = await seed(); succeed();
+    await monitoringService(db).observe({ companyId: f.companyId, issueId: f.issueId, kind: "missing_disposition", fingerprint: "earlier" });
+    await settle();
+    const earlier = new Date(Date.now() - 30 * 60 * 1000);
+    await db.update(activityLog).set({ createdAt: earlier }).where(eq(activityLog.action, "monitoring.owner_nudge"));
+    await db.insert(issueThreadInteractions).values({ companyId: f.companyId, issueId: f.issueId, kind: "ask_user_questions",
+      status: "pending", payload: { version: 1, questions: [] } as never });
+    await monitoringService(db).observe({ companyId: f.companyId, issueId: f.issueId, kind: "no_execution_path", fingerprint: "waiting" });
+    await settle();
+    expect(await nudgeWakes(f.companyId)).toHaveLength(1);
   }, 30000);
 
   it("converts a held recovery wake into one owner nudge that is delivered", async () => {

@@ -1141,7 +1141,8 @@ function buildActivityToast(
   const action = readString(payload.action);
   const details = readRecord(payload.details);
   if (action === "monitoring.alert" && entityType === "issue" && entityId && typeof details?.alertId === "string" &&
-    ["missing_disposition", "dependency_ready", "no_execution_path", "monitor_due", "stopped_subtree"].includes(String(details.kind))) {
+    ["missing_disposition", "dependency_ready", "no_execution_path", "monitor_due", "stopped_subtree",
+      "untracked_follow_ups", "owner_decision_without_card", "review_without_eligible_participant"].includes(String(details.kind))) {
     return { title: i18n.t("monitoring:title"), body: i18n.t(`monitoring:${details.kind}`), tone: "warn",
       dedupeKey: `monitoring:${details.alertId}`, action: { label: i18n.t("monitoring:open"), href: `/issues/${entityId}` } };
   }

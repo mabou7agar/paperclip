@@ -329,7 +329,9 @@ import {
 } from "../services/issue-dependency-wakeups.js";
 import { listBlockerParkedWakeups } from "../services/blocker-parked-wakeups.js";
 import { isFamilyTaskAssignee } from "../services/unblock-owner-wake.js";
-import { assertReviewEscalationAgent, resolveReviewEscalationAgentId } from "../services/review-escalation-agent.js";
+import {
+  applyIssueExecutionPolicyTransitionWithReviewerFallback, assertReviewEscalationAgent, resolveReviewEscalationAgentId,
+} from "../services/review-escalation-agent.js";
 import { assertEnvironmentSelectionForCompany } from "./environment-selection.js";
 import {
   executionWorkspaceService as executionWorkspaceServiceDirect,
@@ -15078,7 +15080,7 @@ export function issueRoutes(
 
       const transition: ReturnType<typeof applyIssueExecutionPolicyTransition> = expectedStatusVersion !== undefined
         ? { patch: {} }
-        : applyIssueExecutionPolicyTransition({
+        : await applyIssueExecutionPolicyTransitionWithReviewerFallback(db, existing, {
         issue: existing,
         policy: nextExecutionPolicy,
         previousPolicy: previousExecutionPolicy,
@@ -16034,6 +16036,23 @@ export function issueRoutes(
             ),
           },
         });
+      if (transition.reviewerFallback) {
+        // Recorded after the update committed, so it never describes a review that did not start.
+        await logActivity(db, {
+          companyId: issue.companyId,
+          actorType: "system",
+          actorId: "review_participant_fallback",
+          action: "issue.review_participant_fallback",
+          entityType: "issue",
+          entityId: issue.id,
+          details: {
+            identifier: issue.identifier,
+            stageId: transition.reviewerFallback.stageId,
+            reviewerAgentId: transition.reviewerFallback.agentId,
+            reason: "No configured participant of the review stage was eligible (each is the author under review or the acting reviewer); the company default review escalation agent reviews instead.",
+          },
+        }).catch((err) => logger.warn({ err, issueId: issue.id }, "failed to record the review participant fallback"));
+      }
 
       if (
         existing.status === "in_progress" &&

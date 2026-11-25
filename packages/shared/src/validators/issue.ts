@@ -555,6 +555,7 @@ export const issueExecutionStateSchema = z.object({
   reviewProgress: issueReviewProgressStateSchema.nullable().optional(),
   reviewEscalated: z.boolean().optional(),
   reviewEscalationAgentUsed: z.boolean().optional(),
+  reviewFallbackParticipant: z.boolean().optional(),
 });
 
 export const issueRecoveryActionReadModelSchema = z.object({

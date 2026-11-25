@@ -178,7 +178,7 @@ import { createHeartbeatQueueTestDependencies } from "./helpers/heartbeat-queue.
         expect(notified).not.toHaveBeenCalled();
       });
       expect(notified).toHaveBeenCalledTimes(1);
-      expect(actions).toEqual([]);
+      expect(actions).toEqual([{ type: "check_closed_issue_follow_ups", companyId: f.task.companyId, issueId: f.task.id }]);
       await executeIssuePostCommitActions(db, actions);
       expect(notified).toHaveBeenCalledTimes(1);
       const rolledBack: IssuePostCommitAction[] = [];
