@@ -16258,6 +16258,9 @@ export function issueRoutes(
             identifier: issue.identifier,
             issueTitle: issue.title,
             authorizationReason: issueMutationAuthorizationReason,
+            ...(actor.actorType === "agent" && commentNotifyAssignee === false
+              ? { notifyAssignee: false }
+              : {}),
             ...(resumeRequested === true
               ? { resumeIntent: true, followUpRequested: true }
               : {}),
@@ -19910,6 +19913,9 @@ export function issueRoutes(
           identifier: currentIssue.identifier,
           issueTitle: currentIssue.title,
           authorizationReason: commentAuthorizationReason,
+          ...(actor.actorType === "agent" && req.body.notifyAssignee === false
+            ? { notifyAssignee: false }
+            : {}),
           ...(isDirectParentReportDecision(commentAccessDecision)
             ? { directParentReportGrant: true }
             : {}),
