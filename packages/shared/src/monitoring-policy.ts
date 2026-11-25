@@ -9,7 +9,7 @@ export type MonitoringObservation = {
   companyId: string;
   issueId: string;
   kind: "missing_disposition" | "dependency_ready" | "no_execution_path" | "monitor_due" | "stopped_subtree"
-    | "untracked_follow_ups" | "owner_decision_without_card";
+    | "untracked_follow_ups" | "owner_decision_without_card" | "review_without_eligible_participant";
   fingerprint: string;
   /** Follow-up kinds: the agent to nudge instead of the task's assignee. */
   nudgeAgentId?: string | null;

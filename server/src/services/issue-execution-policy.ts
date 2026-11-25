@@ -62,6 +62,12 @@ type TransitionInput = {
    * now. Null or unset: a capped review goes to the human.
    */
   reviewEscalationAgentId?: string | null;
+  /**
+   * The company's default review escalation agent, already confirmed able to
+   * run by the caller. Used only when a review stage has no eligible
+   * participant, and never for the author under review or the acting agent.
+   */
+  fallbackReviewerAgentId?: string | null;
   reviewAssessment?: IssueReviewAssessment;
 };
 
@@ -70,7 +76,32 @@ type TransitionResult = {
   decision?: Pick<IssueExecutionDecision, "stageId" | "stageType" | "outcome" | "body">;
   workflowControlledAssignment?: boolean;
   expectedReviewSnapshot?: ReviewProgressSnapshot;
+  /** Set when the stage went to the fallback reviewer because none of its participants was eligible. */
+  reviewerFallback?: { stageId: string; agentId: string };
 };
+
+export const NO_ELIGIBLE_STAGE_PARTICIPANT_CODE = "no_eligible_stage_participant";
+
+function noEligibleParticipant(stage: IssueExecutionStage) {
+  return unprocessable(`No eligible ${stage.type} participant is configured for this issue`,
+    { code: NO_ELIGIBLE_STAGE_PARTICIPANT_CODE, stageId: stage.id, stageType: stage.type });
+}
+
+/**
+ * The fallback reviewer for a review stage none of whose participants is
+ * eligible: the given agent, unless it is the author whose work is under
+ * review or the actor (who would then approve its own hand-off).
+ */
+export function selectReviewFallbackParticipant(input: {
+  stage: Pick<IssueExecutionStage, "type">;
+  fallbackAgentId: string | null | undefined;
+  exclude: readonly (IssueExecutionStagePrincipal | null | undefined)[];
+}): IssueExecutionStagePrincipal | null {
+  const agentId = input.fallbackAgentId?.trim();
+  if (!agentId || input.stage.type !== "review") return null;
+  const candidate: IssueExecutionStagePrincipal = { type: "agent", agentId, userId: null };
+  return input.exclude.some(principal => principalsEqual(principal ?? null, candidate)) ? null : candidate;
+}
 
 /**
  * Consecutive agent-initiated changes-requested rounds tolerated on one stage
@@ -617,7 +648,11 @@ function buildPendingState(input: {
   returnAssignee: IssueExecutionStagePrincipal | null;
   reviewRequest?: IssueExecutionState["reviewRequest"] | null;
   changesRequestedCount?: number;
+  fallback?: boolean;
 }): IssueExecutionState {
+  // A fallback reviewer re-pended on the same stage stays marked as one.
+  const fallback = input.fallback || Boolean(input.previous?.reviewFallbackParticipant &&
+    input.previous.currentStageId === input.stage.id && principalsEqual(input.previous.currentParticipant, input.participant));
   return {
     status: PENDING_STATUS,
     currentStageId: input.stage.id,
@@ -635,6 +670,7 @@ function buildPendingState(input: {
     ...(input.previous?.reviewProgress?.stageId === input.stage.id ? { reviewProgress: input.previous.reviewProgress } : {}),
     ...(input.previous?.reviewEscalated && input.previous.currentStageId === input.stage.id ? { reviewEscalated: true } : {}),
     ...(input.previous?.reviewEscalationAgentUsed && input.previous.currentStageId === input.stage.id ? { reviewEscalationAgentUsed: true } : {}),
+    ...(fallback ? { reviewFallbackParticipant: true } : {}),
   };
 }
 
@@ -671,6 +707,7 @@ function buildPendingStagePatch(input: {
   returnAssignee: IssueExecutionStagePrincipal | null;
   reviewRequest?: IssueExecutionState["reviewRequest"] | null;
   changesRequestedCount?: number;
+  fallback?: boolean;
 }) {
   input.patch.status = "in_review";
   Object.assign(input.patch, patchForPrincipal(input.participant));
@@ -682,6 +719,7 @@ function buildPendingStagePatch(input: {
     returnAssignee: input.returnAssignee,
     reviewRequest: input.reviewRequest,
     changesRequestedCount: input.changesRequestedCount,
+    fallback: input.fallback,
   });
 }
 
@@ -775,14 +813,20 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
   }
 
   if (activeStage) {
-    const currentParticipant =
+    const configuredParticipant =
       existingState?.currentParticipant ??
       selectStageParticipant(activeStage, {
         exclude: existingState?.returnAssignee ?? null,
       });
+    const activeFallback = configuredParticipant ? null : selectReviewFallbackParticipant({ stage: activeStage,
+      fallbackAgentId: input.fallbackReviewerAgentId, exclude: [existingState?.returnAssignee, actor] });
+    const currentParticipant = configuredParticipant ?? activeFallback;
     if (!currentParticipant) {
-      throw unprocessable(`No eligible ${activeStage.type} participant is configured for this issue`);
+      throw noEligibleParticipant(activeStage);
     }
+    // The fallback reviewer holds the stage like a configured participant.
+    const fallbackHeld = Boolean(activeFallback) || Boolean(existingState?.reviewFallbackParticipant &&
+      principalsEqual(existingState.currentParticipant, currentParticipant));
 
     // An escalated review is deliberately held by a human who is not in the
     // stage's configured participants. Re-selecting a configured (agent)
@@ -830,7 +874,7 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
       }
       return { patch };
     }
-    if (!escalatedHold && !stageHasParticipant(activeStage, currentParticipant)) {
+    if (!escalatedHold && !fallbackHeld && !stageHasParticipant(activeStage, currentParticipant)) {
       const participant = selectStageParticipant(activeStage, {
         preferred: explicitAssignee ?? existingState?.currentParticipant ?? null,
         exclude: existingState?.returnAssignee ?? null,
@@ -886,12 +930,15 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
           };
         }
 
-        const participant = selectStageParticipant(nextStage, {
+        const configuredNextParticipant = selectStageParticipant(nextStage, {
           preferred: explicitAssignee,
           exclude: existingState?.returnAssignee ?? null,
         });
+        const nextFallback = configuredNextParticipant ? null : selectReviewFallbackParticipant({ stage: nextStage,
+          fallbackAgentId: input.fallbackReviewerAgentId, exclude: [existingState?.returnAssignee, actor] });
+        const participant = configuredNextParticipant ?? nextFallback;
         if (!participant) {
-          throw unprocessable(`No eligible ${nextStage.type} participant is configured for this issue`);
+          throw noEligibleParticipant(nextStage);
         }
 
         buildPendingStagePatch({
@@ -902,6 +949,7 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
           participant,
           returnAssignee: existingState?.returnAssignee ?? currentAssignee ?? actor,
           reviewRequest: input.reviewRequest ?? null,
+          fallback: Boolean(nextFallback),
         });
         return {
           patch,
@@ -912,6 +960,7 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
             body: input.commentBody.trim(),
           },
           workflowControlledAssignment: true,
+          ...(nextFallback ? { reviewerFallback: { stageId: nextStage.id, agentId: nextFallback.agentId! } } : {}),
         };
       }
 
@@ -1077,10 +1126,12 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
         participant: currentParticipant,
         returnAssignee: existingState?.returnAssignee ?? currentAssignee ?? actor,
         reviewRequest: effectiveReviewRequest,
+        fallback: Boolean(activeFallback),
       });
       return {
         patch,
         workflowControlledAssignment: true,
+        ...(activeFallback ? { reviewerFallback: { stageId: activeStage.id, agentId: activeFallback.agentId! } } : {}),
       };
     }
 
@@ -1142,8 +1193,11 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
       exclude: returnAssignee,
     });
   }
+  const pendingFallback = participant ? null : selectReviewFallbackParticipant({ stage: pendingStage,
+    fallbackAgentId: input.fallbackReviewerAgentId, exclude: [returnAssignee, actor] });
+  participant = participant ?? pendingFallback;
   if (!participant) {
-    throw unprocessable(`No eligible ${pendingStage.type} participant is configured for this issue`);
+    throw noEligibleParticipant(pendingStage);
   }
 
   buildPendingStagePatch({
@@ -1161,10 +1215,12 @@ function applyIssueExecutionStageTransition(input: TransitionInput): TransitionR
     participant,
     returnAssignee,
     reviewRequest: input.reviewRequest ?? null,
+    fallback: Boolean(pendingFallback),
   });
   return {
     patch,
     workflowControlledAssignment: true,
+    ...(pendingFallback ? { reviewerFallback: { stageId: pendingStage.id, agentId: pendingFallback.agentId! } } : {}),
   };
 }
 

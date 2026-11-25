@@ -13,7 +13,7 @@ export const MONITORING_OWNER_NUDGE_ACTION = "monitoring.owner_nudge";
  * the "no next step" nudges, so neither uses up the other's window.
  */
 export const MONITORING_FOLLOW_UP_NUDGE_KINDS: readonly MonitoringObservation["kind"][] = ["untracked_follow_ups",
-  "owner_decision_without_card"];
+  "owner_decision_without_card", "review_without_eligible_participant"];
 
 /**
  * How a claim is bounded per issue inside the window:

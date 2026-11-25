@@ -161,9 +161,10 @@ async function invokableAgent(db: Db, companyId: string, agentId: string | null 
   return agent && !NON_INVOKABLE_AGENT_STATUSES.includes(agent.status) ? agent.id : null;
 }
 
-async function invokableAgentWithRole(db: Db, companyId: string, role: string) {
+async function invokableAgentWithRole(db: Db, companyId: string, role: string, exclude: readonly string[] = []) {
   const [agent] = await db.select({ id: agents.id }).from(agents).where(and(eq(agents.companyId, companyId), eq(agents.role, role),
-    notInArray(agents.status, NON_INVOKABLE_AGENT_STATUSES))).orderBy(asc(agents.createdAt)).limit(1);
+    notInArray(agents.status, NON_INVOKABLE_AGENT_STATUSES), exclude.length ? notInArray(agents.id, [...exclude]) : undefined))
+    .orderBy(asc(agents.createdAt)).limit(1);
   return agent?.id ?? null;
 }
 
@@ -173,16 +174,18 @@ async function invokableAgentWithRole(db: Db, companyId: string, role: string) {
  * company's review escalation agent, then the CTO.
  */
 export async function resolveFollowUpNudgeAgent(db: Db, companyId: string, assigneeAgentId: string | null,
-  options: { preferRole?: string } = {}) {
-  const assignee = await invokableAgent(db, companyId, assigneeAgentId);
+  options: { preferRole?: string; exclude?: readonly (string | null | undefined)[] } = {}) {
+  const exclude = (options.exclude ?? []).filter((id): id is string => Boolean(id));
+  const usable = (id: string | null) => (id && !exclude.includes(id) ? id : null);
+  const assignee = usable(await invokableAgent(db, companyId, assigneeAgentId));
   if (assignee) return assignee;
   if (options.preferRole) {
-    const preferred = await invokableAgentWithRole(db, companyId, options.preferRole);
+    const preferred = await invokableAgentWithRole(db, companyId, options.preferRole, exclude);
     if (preferred) return preferred;
   }
   const [company] = await db.select({ agentId: companies.defaultReviewEscalationAgentId }).from(companies)
     .where(eq(companies.id, companyId)).limit(1);
-  return await invokableAgent(db, companyId, company?.agentId) ?? await invokableAgentWithRole(db, companyId, "cto");
+  return usable(await invokableAgent(db, companyId, company?.agentId)) ?? await invokableAgentWithRole(db, companyId, "cto", exclude);
 }
 
 export function followUpMonitoring(db: Db, deps: MonitoringServiceDeps = {}) {
