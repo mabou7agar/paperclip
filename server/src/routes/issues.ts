@@ -68,6 +68,11 @@ import {
   rejectSteeredIdentity,
 } from "../services/run-identity.js";
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { readFileSync, statSync } from "node:fs";
+import nodePath from "node:path";
+import type { Readable } from "node:stream";
+import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { resolveDefaultSecretsKeyFilePath } from "../home-paths.js";
 import { Router, type NextFunction, type Request, type Response } from "express";
 import multer from "multer";
 import { z } from "zod";
@@ -4614,6 +4619,114 @@ export function issueRoutes(
     const base = process.env.PAPERCLIP_PUBLIC_URL?.trim().replace(/\/+$/, "");
     if (!token || !base) return null;
     return `${base}/api/evidence/${encodeURIComponent(attachmentId)}/${token}`;
+  }
+
+  // Evidence bucket mirror: when <instance>/secrets/evidence-bucket.json (or
+  // PAPERCLIP_EVIDENCE_BUCKET_CONFIG) names an S3-compatible bucket such as
+  // DigitalOcean Spaces, every new issue attachment is also copied there, and
+  // evidence links serve from the bucket first. Paperclip's own storage is
+  // unchanged. The file holds the credentials, so it lives with the other
+  // server secrets and is re-read when it changes.
+  type EvidenceBucket = { client: S3Client; bucket: string; prefix: string };
+  let evidenceBucketCache: { file: string; mtimeMs: number; bucket: EvidenceBucket | null } | null = null;
+
+  function evidenceBucketConfigPath(): string {
+    return process.env.PAPERCLIP_EVIDENCE_BUCKET_CONFIG?.trim()
+      || nodePath.join(nodePath.dirname(resolveDefaultSecretsKeyFilePath()), "evidence-bucket.json");
+  }
+
+  function evidenceBucket(): EvidenceBucket | null {
+    const file = evidenceBucketConfigPath();
+    let mtimeMs: number;
+    try {
+      mtimeMs = statSync(file).mtimeMs;
+    } catch {
+      evidenceBucketCache = null;
+      return null;
+    }
+    if (evidenceBucketCache && evidenceBucketCache.file === file && evidenceBucketCache.mtimeMs === mtimeMs) {
+      return evidenceBucketCache.bucket;
+    }
+    let bucket: EvidenceBucket | null = null;
+    try {
+      const raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+      const text = (key: string) => (typeof raw[key] === "string" ? (raw[key] as string).trim() : "");
+      const endpoint = text("endpoint");
+      const name = text("bucket");
+      const accessKeyId = text("accessKeyId");
+      const secretAccessKey = text("secretAccessKey");
+      if (endpoint && name && accessKeyId && secretAccessKey) {
+        const prefix = text("prefix").replace(/^\/+/, "");
+        bucket = {
+          bucket: name,
+          prefix: prefix && !prefix.endsWith("/") ? `${prefix}/` : prefix,
+          client: new S3Client({
+            endpoint,
+            region: text("region") || "us-east-1",
+            forcePathStyle: raw.forcePathStyle === true,
+            credentials: { accessKeyId, secretAccessKey },
+            requestChecksumCalculation: "WHEN_REQUIRED",
+          }),
+        };
+      } else {
+        logger.warn({ file }, "evidence bucket config is incomplete; evidence is not mirrored");
+      }
+    } catch (err) {
+      logger.warn(
+        { file, reason: err instanceof Error ? err.message : String(err) },
+        "evidence bucket config is unreadable; evidence is not mirrored",
+      );
+    }
+    evidenceBucketCache = { file, mtimeMs, bucket };
+    return bucket;
+  }
+
+  async function mirrorEvidence(objectKey: string, body: Buffer, contentType: string) {
+    const target = evidenceBucket();
+    if (!target) return;
+    try {
+      await target.client.send(new PutObjectCommand({
+        Bucket: target.bucket,
+        Key: `${target.prefix}${objectKey}`,
+        Body: body,
+        ContentType: contentType,
+      }));
+    } catch (err) {
+      logger.warn(
+        { objectKey, reason: err instanceof Error ? err.message : String(err) },
+        "failed to mirror evidence to the bucket",
+      );
+    }
+  }
+
+  async function openEvidenceFromBucket(
+    objectKey: string,
+    range: { start: number; end: number } | undefined,
+  ): Promise<{ stream: Readable; contentType?: string; contentLength?: number } | null> {
+    const source = evidenceBucket();
+    if (!source) return null;
+    try {
+      const result = await source.client.send(new GetObjectCommand({
+        Bucket: source.bucket,
+        Key: `${source.prefix}${objectKey}`,
+        ...(range ? { Range: `bytes=${range.start}-${range.end}` } : {}),
+      }));
+      if (!result.Body) return null;
+      return {
+        stream: result.Body as Readable,
+        contentType: result.ContentType,
+        contentLength: result.ContentLength,
+      };
+    } catch (err) {
+      const status = (err as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode;
+      if (status !== 404) {
+        logger.warn(
+          { objectKey, reason: err instanceof Error ? err.message : String(err) },
+          "evidence bucket read failed; serving from Paperclip storage",
+        );
+      }
+      return null;
+    }
   }
 
   function withContentPath<T extends { id: string }>(attachment: T) {
@@ -20705,6 +20818,10 @@ export function issueRoutes(
         });
       }
 
+      // Best effort and not awaited: a bucket outage never fails an upload, and
+      // evidence links fall back to Paperclip storage for anything not mirrored.
+      void mirrorEvidence(stored.objectKey, file.buffer, stored.contentType);
+
       const {
         artifactWorkProductId: _artifactWorkProductId,
         ...attachmentResponse
@@ -20720,6 +20837,7 @@ export function issueRoutes(
     res: Response,
     next: NextFunction,
     attachment: ServedAttachment,
+    preferEvidenceBucket = false,
   ) {
     const contentLength = attachment.byteSize;
     const range = parseAttachmentRangeHeader(
@@ -20733,13 +20851,15 @@ export function issueRoutes(
       return;
     }
 
-    const object = await storage.getObject(
-      attachment.companyId,
-      attachment.objectKey,
-      range.kind === "range"
-        ? { range: { start: range.start, end: range.end } }
-        : undefined,
-    );
+    const requestedRange =
+      range.kind === "range" ? { start: range.start, end: range.end } : undefined;
+    const object =
+      (preferEvidenceBucket ? await openEvidenceFromBucket(attachment.objectKey, requestedRange) : null)
+      ?? await storage.getObject(
+        attachment.companyId,
+        attachment.objectKey,
+        requestedRange ? { range: requestedRange } : undefined,
+      );
     const responseContentType = resolveAttachmentResponseContentType({
       storedContentType: attachment.contentType,
       objectContentType: object.contentType,
@@ -20833,7 +20953,7 @@ export function issueRoutes(
     }
     res.setHeader("Referrer-Policy", "no-referrer");
     res.setHeader("X-Robots-Tag", "noindex, nofollow");
-    await sendAttachmentContent(req, res, next, attachment);
+    await sendAttachmentContent(req, res, next, attachment, true);
   });
 
   router.delete("/attachments/:attachmentId", async (req, res) => {
