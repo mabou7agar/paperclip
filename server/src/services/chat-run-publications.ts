@@ -1,3 +1,4 @@
+import { ordinaryChatConversation } from "./owner-card-push.js";
 import { notifyChatNativeProgress } from "./chat-native-progress-notifications.js";
 import { allowsAutomaticRunPublication, chatRunProjectionWindow } from "./chat-run-publication-policy.js";
 import { enqueueSafeNativeChatProgress } from "./chat-native-progress.js";
@@ -412,6 +413,7 @@ function lifecycleMilestonePages(db: Db, since: Date, scope?: ChatRunMilestoneSc
           eq(chatConversations.companyId, heartbeatRuns.companyId),
           sql`${issueIdFromContext} = ${chatConversations.issueId}::text`,
           inArray(chatConversations.state, ["active", "waiting"]),
+          ordinaryChatConversation(),
         ),
       )
       .innerJoin(

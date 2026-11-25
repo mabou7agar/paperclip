@@ -175,6 +175,7 @@ function providerSetupState(
           getWebhookPublicBaseUrl(),
           row.assignedAgentName,
         ),
+        ...(endpoint.provider === "telegram" ? { ownerCardPush: endpoint.setup?.ownerCardPush !== false } : {}),
         ...(endpoint.provider === "github"
           ? {
               webhookSecretConfigured: row.credentialSecretRefs.some(
@@ -452,6 +453,11 @@ function providerSetupState(
           values.allowGroupChats = input.allowGroupChats;
         if (input.allowUnlinkedPeople !== undefined)
           values.allowUnlinkedPeople = input.allowUnlinkedPeople;
+        if (input.ownerCardPush !== undefined) {
+          if (existing.endpoint.provider !== "telegram")
+            throw unprocessable("Owner card push only applies to Telegram connections");
+          values.setup = { ...(values.setup ?? existing.endpoint.setup), ownerCardPush: input.ownerCardPush };
+        }
         await managementContext?.reauthorize();
       await db.transaction(async (tx) => {
           await credentialLease.assertOwned(tx);

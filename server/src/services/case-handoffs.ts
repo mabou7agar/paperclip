@@ -1,3 +1,4 @@
+import { ordinaryChatConversation } from "./owner-card-push.js";
 import { createHash, randomUUID } from "node:crypto";
 import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
@@ -152,7 +153,7 @@ async function resolveHandoffTaskParent(tx: Db, actor: AuthorizationActor, compa
 
 async function eligible(tx: Db, issue: IssueRow) {
   if (issue.conversationAgentId || (await tx.select({ id: chatConversations.id }).from(chatConversations)
-    .where(and(eq(chatConversations.companyId, issue.companyId), eq(chatConversations.issueId, issue.id))).limit(1)).length) {
+    .where(and(eq(chatConversations.companyId, issue.companyId), eq(chatConversations.issueId, issue.id), ordinaryChatConversation())).limit(1)).length) {
     throw unprocessable("Case handoffs require an ordinary work task");
   }
   if (issue.workMode !== "standard" || !["todo", "in_progress"].includes(issue.status) || issue.executionState?.status === "pending") {
@@ -296,7 +297,7 @@ export function caseHandoffService(db: Db) {
     if (issue.assigneeUserId) throw unprocessable("Terminal case handoff requires agent-assigned or unassigned work");
     if (issue.workMode !== "standard" || !["todo", "in_progress", "in_review", "blocked", "done"].includes(issue.status)
       || issue.conversationAgentId || (await tx.select({ id: chatConversations.id }).from(chatConversations)
-        .where(and(eq(chatConversations.companyId, companyId), eq(chatConversations.issueId, issue.id))).limit(1)).length) {
+        .where(and(eq(chatConversations.companyId, companyId), eq(chatConversations.issueId, issue.id), ordinaryChatConversation())).limit(1)).length) {
       throw unprocessable("Terminal handoff requires an ordinary standard work task");
     }
     if (actor.type === "agent" && ((source && sourceIssue?.id !== issue.id)

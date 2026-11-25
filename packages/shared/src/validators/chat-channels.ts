@@ -103,6 +103,7 @@ export const updateChatEndpointSchema = z
     requireAtMention: z.boolean().optional(),
     allowGroupChats: z.boolean().optional(),
     allowUnlinkedPeople: z.boolean().optional(),
+    ownerCardPush: z.boolean().optional(),
   })
   .strict()
   .refine((value) => Object.keys(value).length > 0, {
