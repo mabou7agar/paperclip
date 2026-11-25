@@ -11972,6 +11972,10 @@ export function issueService(db: Db) {
           userId: actorUserId ?? null,
         });
         await recordChatCompletion(tx, receiptExisting, updated);
+        // Linked Jira issues follow the task status; the worker runs after commit.
+        if (receiptExisting.status !== updated.status || issueData.title !== undefined || issueData.description !== undefined) {
+          await notifyDeliveryWork(tx, DELIVERY_QUEUES.jiraStatusSync, updated.id);
+        }
         if (receiptExisting.status !== "done" && updated.status === "done") await recordTaskCompletionReceipt(tx as unknown as Db, updated);
         // An operator explicitly choosing a disposition owns that decision,
         // including choosing In Review while the conversation is Idle.

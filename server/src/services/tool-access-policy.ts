@@ -174,6 +174,62 @@ function cachedRead<T>(
   return pending;
 }
 
+/**
+ * Built-in server integrations that call one connection's tools as the
+ * `system` actor, with no agent, run, gateway or person behind the call.
+ *
+ * Why a fixed allowlist here instead of a tool profile, grant or allow policy:
+ * those are company data a person edits, and none of them can name a
+ * `system` principal (explicit grants exist only for agents and users). A
+ * built-in sync must work for every company without a hand-made policy, yet
+ * must not open anything else. So the allowance is code, and it is narrow:
+ *   - only the exact server-chosen actor id below (the gateway's
+ *     executeSystemConnectionTool sets it; agent and gateway sessions always
+ *     carry an agent, run, gateway or token id, which disqualifies them);
+ *   - only the named upstream tools, and only at `read` or `write` risk,
+ *     never `destructive` (a catalog entry re-rated destructive stops working);
+ *   - only on a connection whose active catalog proves it is the Atlassian
+ *     Jira server (it lists the marker tool);
+ *   - it runs after every company policy, so a block, Ask first or rate limit
+ *     that matches these calls still wins.
+ */
+export const BUILT_IN_SYSTEM_INTEGRATIONS = {
+  jira_status_sync: {
+    markerUpstreamTool: "getTransitionsForJiraIssue",
+    upstreamToolNames: [
+      "getAccessibleAtlassianResources",
+      "getVisibleJiraProjects",
+      "getJiraIssue",
+      "getTransitionsForJiraIssue",
+      "transitionJiraIssue",
+      "addCommentToJiraIssue",
+    ],
+  },
+} as const;
+
+export type BuiltInSystemIntegrationId = keyof typeof BUILT_IN_SYSTEM_INTEGRATIONS;
+
+/** Pure part of the built-in integration check; the marker tool lookup is separate. */
+export function builtInSystemIntegrationFor(ctx: {
+  actorType: string;
+  actorId: string;
+  agentId: string | null;
+  heartbeatRunId: string | null;
+  gatewayId: string | null;
+  connectionId: string | null;
+  upstreamToolName: string | null;
+  riskLevel: string | null;
+}, extra: { originatingAgentId?: string | null; gatewayTokenId?: string | null } = {}): BuiltInSystemIntegrationId | null {
+  if (ctx.actorType !== "system" || ctx.agentId || ctx.heartbeatRunId || ctx.gatewayId
+    || extra.originatingAgentId || extra.gatewayTokenId || !ctx.connectionId) return null;
+  if (!Object.prototype.hasOwnProperty.call(BUILT_IN_SYSTEM_INTEGRATIONS, ctx.actorId)) return null;
+  const id = ctx.actorId as BuiltInSystemIntegrationId;
+  const integration = BUILT_IN_SYSTEM_INTEGRATIONS[id];
+  if (ctx.riskLevel !== "read" && ctx.riskLevel !== "write") return null;
+  if (!ctx.upstreamToolName || !(integration.upstreamToolNames as readonly string[]).includes(ctx.upstreamToolName)) return null;
+  return id;
+}
+
 // The database returns ids in this canonical form.
 const CANONICAL_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
@@ -1680,6 +1736,24 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
       profileState.profiles.some((profile) => isConnectionAccessProfile(profile, ctx.connectionId))
       || profileState.entries.some((entry) => entry.connectionId === ctx.connectionId || profileEntryMatches(entry, ctx))
     );
+    const integrationId = builtInSystemIntegrationFor(ctx, {
+      originatingAgentId: input.runContext?.originatingAgentId ?? null,
+      gatewayTokenId: input.runContext?.gatewayTokenId ?? null,
+    });
+    if (integrationId && ctx.catalogStatus === "active") {
+      const marker = BUILT_IN_SYSTEM_INTEGRATIONS[integrationId].markerUpstreamTool;
+      const markerConnectionId = ctx.connectionId!;
+      const [markerEntry] = await cachedRead(cache, `builtin-marker:${ctx.companyId}:${markerConnectionId}:${marker}`, async () =>
+        db.select({ id: toolCatalogEntries.id }).from(toolCatalogEntries).where(and(
+          eq(toolCatalogEntries.companyId, ctx.companyId),
+          eq(toolCatalogEntries.connectionId, markerConnectionId),
+          eq(toolCatalogEntries.toolName, marker),
+          eq(toolCatalogEntries.status, "active"),
+        )).limit(1));
+      if (markerEntry) {
+        return decision("allow", "allow_builtin_integration", `Tool access allowed for the built-in ${integrationId} integration.`, effectiveProfileIds, [], { redactionPlan: redaction.redactionPlan, policyExplanation: { builtInIntegration: integrationId } });
+      }
+    }
     if (await explicitGrant(ctx, cache, { toolTargetedOnly: governedByConnectionProfile })) {
       return decision("allow", "allow_explicit_grant", "Tool access allowed by explicit grant.", effectiveProfileIds, [], { redactionPlan: redaction.redactionPlan });
     }
