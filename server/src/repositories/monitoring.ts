@@ -1,8 +1,21 @@
-import { and, desc, eq, gte, lt, sql } from "drizzle-orm";
-import { activityLog, agentWakeupRequests, agents, companyMonitoringPolicies, issueTreeHoldMembers, issueTreeHolds, issues, type Db } from "@paperclipai/db";
+import { and, desc, eq, gte, inArray, lt, or, sql } from "drizzle-orm";
+import {
+  activityLog, agentWakeupRequests, agents, companyMonitoringPolicies, heartbeatRuns, issueThreadInteractions, issueTreeHoldMembers,
+  issueTreeHolds, issues, type Db,
+} from "@paperclipai/db";
 import type { MonitoringObservation, MonitoringPolicy } from "@paperclipai/shared";
 
 export const MONITORING_OWNER_NUDGE_ACTION = "monitoring.owner_nudge";
+
+/**
+ * How a claim is bounded per issue inside the window:
+ * - single: no other owner nudge on the issue (the original rule);
+ * - repeat: the earlier nudges' times still allow one more (backoff and cap).
+ */
+export type OwnerNudgeClaimMode = { kind: "single" } | { kind: "repeat"; allow: (previous: Date[]) => boolean };
+
+/** When a nudge record last woke its agent: a reclaimed claim woke at its takeover, not its creation. */
+const nudgedAt = sql<Date>`greatest(${activityLog.createdAt}, (${activityLog.details} ->> 'reclaimedAt')::timestamptz)`.mapWith(activityLog.createdAt);
 
 export function monitoringRepository(db: Db) {
   return {
@@ -46,10 +59,22 @@ export function monitoringRepository(db: Db) {
      */
     async claimOwnerNudge(input: {
       id: string; companyId: string; issueId: string; agentId: string; reason: string; since: Date;
-      responsibleUserId: string | null; details: Record<string, unknown>;
+      responsibleUserId: string | null; details: Record<string, unknown>; mode?: OwnerNudgeClaimMode;
     }) {
       return db.transaction(async tx => {
         await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${`monitoring-owner-nudge:${input.issueId}`}))`);
+        const mode = input.mode ?? { kind: "single" };
+        if (mode.kind === "repeat") {
+          const previous = await tx.select({ createdAt: nudgedAt }).from(activityLog).where(and(
+            eq(activityLog.companyId, input.companyId), eq(activityLog.action, MONITORING_OWNER_NUDGE_ACTION),
+            eq(activityLog.entityType, "issue"), eq(activityLog.entityId, input.issueId), gte(activityLog.createdAt, input.since)));
+          if (!mode.allow(previous.map(row => row.createdAt))) return false;
+          return (await tx.insert(activityLog).values({
+            id: input.id, companyId: input.companyId, actorType: "system", actorId: "monitoring",
+            action: MONITORING_OWNER_NUDGE_ACTION, entityType: "issue", entityId: input.issueId, agentId: input.agentId,
+            responsibleUserId: input.responsibleUserId, details: input.details,
+          }).onConflictDoNothing().returning({ id: activityLog.id })).length > 0;
+        }
         const [recentRecord] = await tx.select({ id: activityLog.id }).from(activityLog).where(and(
           eq(activityLog.companyId, input.companyId), eq(activityLog.action, MONITORING_OWNER_NUDGE_ACTION),
           eq(activityLog.entityType, "issue"), eq(activityLog.entityId, input.issueId), gte(activityLog.createdAt, input.since))).limit(1);
@@ -75,6 +100,26 @@ export function monitoringRepository(db: Db) {
       return (await db.select({ id: activityLog.id }).from(activityLog).where(and(
         eq(activityLog.companyId, companyId), eq(activityLog.action, MONITORING_OWNER_NUDGE_ACTION),
         eq(activityLog.entityType, "issue"), eq(activityLog.entityId, issueId), gte(activityLog.createdAt, since))).limit(1)).length > 0;
+    },
+    /** When the issue's owner nudges claimed since the window start woke their agent. */
+    async ownerNudgeTimes(companyId: string, issueId: string, since: Date) {
+      return (await db.select({ createdAt: nudgedAt }).from(activityLog).where(and(
+        eq(activityLog.companyId, companyId), eq(activityLog.action, MONITORING_OWNER_NUDGE_ACTION),
+        eq(activityLog.entityType, "issue"), eq(activityLog.entityId, issueId), gte(activityLog.createdAt, since))))
+        .map(row => row.createdAt);
+    },
+    /** A pending owner question card on the task: the owner, not the agent, acts next. */
+    async pendingOwnerCard(companyId: string, issueId: string) {
+      return (await db.select({ id: issueThreadInteractions.id }).from(issueThreadInteractions).where(and(
+        eq(issueThreadInteractions.companyId, companyId), eq(issueThreadInteractions.issueId, issueId),
+        eq(issueThreadInteractions.kind, "ask_user_questions"), eq(issueThreadInteractions.status, "pending"))).limit(1)).length > 0;
+    },
+    /** A queued, running or retry-scheduled run of this agent on this task. */
+    async activeIssueRun(companyId: string, agentId: string, issueId: string) {
+      return (await db.select({ id: heartbeatRuns.id }).from(heartbeatRuns).where(and(
+        eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.agentId, agentId),
+        inArray(heartbeatRuns.status, ["queued", "running", "scheduled_retry"]),
+        or(eq(heartbeatRuns.issueId, issueId), sql`${heartbeatRuns.contextSnapshot} ->> 'issueId' = ${issueId}`))).limit(1)).length > 0;
     },
     /**
      * Take over a claim whose process stopped before it recorded any outcome.

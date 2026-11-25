@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Db } from "@paperclipai/db";
 import { monitoringPolicySchema, PROVIDER_QUOTA_MONITOR_SERVICE_NAME, type MonitoringObservation } from "@paperclipai/shared";
 import { MONITORING_OWNER_NUDGE_ACTION, monitoringRepository } from "../repositories/monitoring.js";
@@ -9,8 +9,9 @@ import type { WakeupOptions } from "./heartbeat/run-preparation.js";
 
 /**
  * Alert-only mode records a stuck task and stops automatic recovery. For the two
- * "nobody will act next" kinds, the task's own assignee is woken once so it can
- * continue, settle, or record what it waits for. This reason is deliberately not
+ * "nobody will act next" kinds, the task's own assignee is woken so it can
+ * continue, settle, or record what it waits for: once per window, or on a
+ * backoff schedule while no_execution_path persists. This reason is deliberately not
  * matched by isMonitoringWake, so holdWake never cancels it.
  */
 export const MONITORING_OWNER_NUDGE_REASON = "issue_monitoring_owner_nudge";
@@ -22,6 +23,28 @@ const PROVIDER_QUOTA_RESET_UNKNOWN_FINGERPRINT = "provider_quota_reset_unknown";
 export const MONITORING_OWNER_NUDGE_INSTRUCTION =
   "This task has no next step recorded. Continue it, settle it, or record what it is waiting for.";
 const OWNER_NUDGE_KINDS: ReadonlySet<MonitoringObservation["kind"]> = new Set(["no_execution_path", "missing_disposition"]);
+/**
+ * "Nobody can wake this task" (no_execution_path, which also carries the I7
+ * visible-next-action invariant) is nudged again while it persists: a single
+ * nudge spent on an earlier alert left a task idle for hours. Other kinds keep
+ * one nudge per task per window.
+ */
+const REPEAT_OWNER_NUDGE_KINDS: ReadonlySet<MonitoringObservation["kind"]> = new Set(["no_execution_path"]);
+/** Wait after the 1st, 2nd, 3rd and every later nudge on the task before nudging again. */
+export const MONITORING_OWNER_NUDGE_REPEAT_BACKOFF_MS = [15 * 60 * 1000, 60 * 60 * 1000, 4 * 60 * 60 * 1000, 12 * 60 * 60 * 1000];
+export const MONITORING_OWNER_NUDGE_REPEAT_MAX_PER_WINDOW = 6;
+
+/**
+ * Whether a repeatable alert may nudge again, given the task's owner nudges
+ * (of any kind) inside the 24 hour window.
+ */
+export function ownerNudgeRepeatDue(previous: readonly Date[], now: number): boolean {
+  if (previous.length === 0) return true;
+  if (previous.length >= MONITORING_OWNER_NUDGE_REPEAT_MAX_PER_WINDOW) return false;
+  const last = Math.max(...previous.map(at => at.getTime()));
+  const backoff = MONITORING_OWNER_NUDGE_REPEAT_BACKOFF_MS[Math.min(previous.length, MONITORING_OWNER_NUDGE_REPEAT_BACKOFF_MS.length) - 1]!;
+  return now - last >= backoff;
+}
 const OWNER_NUDGE_SKIPPED_ISSUE_STATUSES = ["done", "cancelled", "backlog"];
 const OWNER_NUDGE_ISSUE_STATUSES = ["todo", "in_progress", "in_review", "blocked"];
 const NON_INVOKABLE_AGENT_STATUSES = ["paused", "terminated", "pending_approval"];
@@ -79,43 +102,67 @@ export function monitoringService(db: Db, deps: MonitoringServiceDeps = {}) {
     // Recovery parks an agent whose provider quota reset is unknown so that it
     // is not retried; a nudge would only start a run that fails on quota.
     if (observation.fingerprint.startsWith(`["${PROVIDER_QUOTA_RESET_UNKNOWN_FINGERPRINT}"`)) return;
-    const nudgeId = monitoringOwnerNudgeId(alertId);
-    const idempotencyKey = `monitoring-owner-nudge:${alertId}`;
+    let nudgeId = monitoringOwnerNudgeId(alertId);
+    let idempotencyKey = `monitoring-owner-nudge:${alertId}`;
     const now = Date.now();
+    const since = new Date(now - MONITORING_OWNER_NUDGE_WINDOW_MS);
+    const repeatable = REPEAT_OWNER_NUDGE_KINDS.has(observation.kind);
     const record = await repository.ownerNudgeRecord(nudgeId);
     let reclaimed = false;
+    let repeat = false;
     if (record) {
       // Normally this alert was already nudged: stop here (cheap repeat path).
       // A claim with no outcome means its process stopped between claiming
       // and waking; after a grace period it may be taken over, once.
       const details = (record.details ?? {}) as Record<string, unknown>;
-      if ("ownerNudged" in details || "wakeError" in details || "reclaimedAt" in details) return;
-      const claimedBefore = new Date(now - MONITORING_OWNER_NUDGE_RECLAIM_GRACE_MS);
-      if (record.createdAt >= claimedBefore) return;
-      const wake = await repository.wakeByIdempotencyKey(observation.companyId, idempotencyKey);
-      if (wake) {
-        await repository.recordOwnerNudge(nudgeId, { ownerNudged: wake.status !== "skipped", wakeupRequestId: wake.id,
-          wakeStatus: wake.status, runId: wake.runId ?? null });
-        return;
+      if ("ownerNudged" in details || "wakeError" in details || "reclaimedAt" in details) {
+        if (!repeatable || !ownerNudgeRepeatDue(await repository.ownerNudgeTimes(observation.companyId, issue.id, since), now)) return;
+        repeat = true;
+      } else {
+        const claimedBefore = new Date(now - MONITORING_OWNER_NUDGE_RECLAIM_GRACE_MS);
+        if (record.createdAt >= claimedBefore) return;
+        const wake = await repository.wakeByIdempotencyKey(observation.companyId, idempotencyKey);
+        if (wake) {
+          await repository.recordOwnerNudge(nudgeId, { ownerNudged: wake.status !== "skipped", wakeupRequestId: wake.id,
+            wakeStatus: wake.status, runId: wake.runId ?? null });
+          return;
+        }
+        if (!(await repository.reclaimOwnerNudge(nudgeId, claimedBefore))) return;
+        reclaimed = true;
       }
-      if (!(await repository.reclaimOwnerNudge(nudgeId, claimedBefore))) return;
-      reclaimed = true;
-    } else if (await repository.recentOwnerNudge(observation.companyId, issue.id, new Date(now - MONITORING_OWNER_NUDGE_WINDOW_MS))) {
+    } else if (repeatable) {
+      // Another alert on this task was nudged inside the window: nudge again
+      // only on the backoff schedule, below the per-window cap.
+      const previous = await repository.ownerNudgeTimes(observation.companyId, issue.id, since);
+      if (!ownerNudgeRepeatDue(previous, now)) return;
+      repeat = previous.length > 0;
+    } else if (await repository.recentOwnerNudge(observation.companyId, issue.id, since)) {
       // Another alert on this task was nudged inside the window: skip the
       // agent and hold lookups below on every 30 s recovery pass.
       return;
+    }
+    if (repeat) {
+      // Each repeat is its own record and wake; the claim's lock and backoff
+      // re-check keep concurrent observers to one.
+      nudgeId = randomUUID();
+      idempotencyKey = `monitoring-owner-nudge:${alertId}:${nudgeId}`;
     }
     const agent = await repository.agent(observation.companyId, agentId);
     if (!agent || NON_INVOKABLE_AGENT_STATUSES.includes(agent.status)) return;
     if (await repository.inActiveTreeHold(observation.companyId, issue.id)) return;
     const { issueTreeControlService } = await import("./issue-tree-control.js");
     if (await issueTreeControlService(db).getActivePauseHoldGate(observation.companyId, issue.id)) return;
+    // The owner answers a pending question card; the agent does not act next.
+    if (await repository.pendingOwnerCard(observation.companyId, issue.id)) return;
+    // A repeat is never needed while the agent already has a run on the task.
+    if (repeat && await repository.activeIssueRun(observation.companyId, agentId, issue.id)) return;
     if (!reclaimed) {
       const claimed = await repository.claimOwnerNudge({
         id: nudgeId, companyId: observation.companyId, issueId: issue.id, agentId, reason: MONITORING_OWNER_NUDGE_REASON,
-        since: new Date(now - MONITORING_OWNER_NUDGE_WINDOW_MS), responsibleUserId: issue.responsibleUserId ?? issue.createdByUserId,
+        since, responsibleUserId: issue.responsibleUserId ?? issue.createdByUserId,
         details: { alertId, kind: observation.kind, fingerprint: observation.fingerprint, agentId, issueStatus: issue.status,
-          identifier: issue.identifier, reason: MONITORING_OWNER_NUDGE_REASON, idempotencyKey },
+          identifier: issue.identifier, reason: MONITORING_OWNER_NUDGE_REASON, idempotencyKey, ...(repeat ? { repeat: true } : {}) },
+        mode: repeat ? { kind: "repeat", allow: previous => ownerNudgeRepeatDue(previous, now) } : { kind: "single" },
       });
       if (!claimed) return;
     }
@@ -186,6 +233,12 @@ export function monitoringService(db: Db, deps: MonitoringServiceDeps = {}) {
      * fire later, so it reads as not settled.
      */
     async ownerNudgeSettled(observation: MonitoringObservation) {
+      if (REPEAT_OWNER_NUDGE_KINDS.has(observation.kind)) {
+        // A repeatable alert is settled only while no further nudge is due.
+        const previous = await repository.ownerNudgeTimes(observation.companyId, observation.issueId,
+          new Date(Date.now() - MONITORING_OWNER_NUDGE_WINDOW_MS));
+        return previous.length > 0 && !ownerNudgeRepeatDue(previous, Date.now());
+      }
       const record = await repository.ownerNudgeRecord(monitoringOwnerNudgeId(monitoringAlertId(observation)));
       const details = (record?.details ?? {}) as Record<string, unknown>;
       return "ownerNudged" in details || "wakeError" in details;
