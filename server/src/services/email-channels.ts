@@ -1,3 +1,4 @@
+import { ordinaryChatConversation } from "./owner-card-push.js";
 import { budgetServiceInTransaction } from "./budgets.js";
 import { notifyToolConnectionHealth, writeToolConnectionHealthChange } from "./tool-connection-health-notifications.js";
 import type { ConnectionManagementContext } from "./connection-management.js";
@@ -579,6 +580,7 @@ export function emailChannelService(db: Db, options: EmailChannelOptions) {
             eq(chatConversations.companyId, endpoint.companyId),
             eq(chatConversations.issueId, task.id),
             eq(chatEndpoints.externalExecutionPolicy, "restricted"),
+            ordinaryChatConversation(),
           ),
         )
         .limit(1);

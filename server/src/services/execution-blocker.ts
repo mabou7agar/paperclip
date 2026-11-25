@@ -1,3 +1,4 @@
+import { ordinaryChatConversation } from "./owner-card-push.js";
 import { isPreDispatchReviewWait, neverStartedDispatchCancellationPredicate } from "./pre-dispatch-review-wait.js";
 import { canonicalExecutionUuid } from "./execution-identity.js";
 import { preDispatchExecutionWaitRecoveryActionPredicate } from "./pre-dispatch-execution-wait.js";
@@ -337,6 +338,7 @@ export async function getExecutionBlocker(db: Db, companyId: string, issueId: st
     eq(toolConnections.companyId, companyId), eq(toolConnections.id, chatEndpoints.connectionId),
   )).where(and(
     eq(chatConversations.companyId, companyId), eq(chatConversations.issueId, issueId),
+    ordinaryChatConversation(),
   )).limit(1) : [];
   let nextAction = action.nextAction;
   if (canRetry && !eligibleContinuation) nextAction += " Try again or send a new message to continue once the previous execution has stopped.";

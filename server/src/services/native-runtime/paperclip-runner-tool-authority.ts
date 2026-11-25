@@ -1,3 +1,4 @@
+import { ordinaryChatConversation } from "../owner-card-push.js";
 import { completionReceiptForRun } from "../task-completion-receipts.js";
 import { budgetServiceInTransaction } from "../budgets.js";
 import { resolveTaskWatchdogMutationScope, taskWatchdogScopeAllowsIssueMutation } from "../task-watchdog-scope.js";
@@ -2238,6 +2239,7 @@ export class PaperclipRunnerToolAuthority {
       if (assigneeUserId) await this.#assertCompanyPerson(tx, assigneeUserId);
       const [externalChat] = await tx.select({ id: chatConversations.id }).from(chatConversations).where(and(
         eq(chatConversations.companyId, this.binding.companyId), eq(chatConversations.issueId, taskId),
+        ordinaryChatConversation(),
       )).limit(1);
       if (externalChat) throw new Error("paperclip_runner_reassignment_conversation_locked");
       return target;

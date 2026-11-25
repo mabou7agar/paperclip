@@ -27,6 +27,13 @@ import type {
 import { projectSafeChatPublication } from "./chat-publication-projection.js";
 import { publicChatTaskUrl } from "./chat-task-url.js";
 import {
+  getOrCreateOwnerCardConversation,
+  ordinaryChatConversation,
+  ownerCardFallbackText,
+  resolveOwnerCardRecipients,
+} from "./owner-card-push.js";
+import { logger } from "../middleware/logger.js";
+import {
   chatQuestionFormActionRecords,
   createChatQuestionFormDraft,
 } from "./chat-question-forms.js";
@@ -243,6 +250,34 @@ export function nativeChatConfirmation(
 }
 
 /**
+ * Owner card push: pending owner cards also go to each opted-in Telegram
+ * endpoint's linked owner DM, unless an agent binding on that endpoint
+ * already carries the card. The work runs in a savepoint so a failure here
+ * never rolls back the interaction that is being created.
+ */
+async function ownerCardPushBindings(
+  db: ChatPublicationDb,
+  interaction: IssueThreadInteraction,
+  excludeEndpointIds: string[],
+) {
+  try {
+    return await db.transaction(async (tx) => {
+      const recipients = await resolveOwnerCardRecipients(tx, interaction, { excludeEndpointIds });
+      const bindings = [];
+      for (const recipient of recipients) {
+        const conversation = await getOrCreateOwnerCardConversation(tx, { recipient, issueId: interaction.issueId });
+        if (conversation.state !== "active" && conversation.state !== "waiting") continue;
+        bindings.push({ conversation, endpoint: recipient.endpoint, ownerPush: true });
+      }
+      return bindings;
+    });
+  } catch (error) {
+    logger.warn({ interactionId: interaction.id, error: error instanceof Error ? error.message : String(error) }, "owner card push skipped");
+    return [];
+  }
+}
+
+/**
  * Enqueues one immutable outbox item per live external task binding. A lone
  * closed single-select question receives compact executable buttons. Slack and
  * Teams can also receive an opaque modal opener for safe text and closed
@@ -257,8 +292,10 @@ export async function enqueueIssueInteractionChatPublications(
   // user/system-authored interaction, or let one agent speak through another
   // agent's endpoint. If the interaction names a source run, verify that run's
   // company and agent instead of trusting the denormalized creator alone.
-  if (!interaction.createdByAgentId) return [];
-  if (interaction.sourceRunId) {
+  // Owner card push (below) is the one exception: it delivers an owner card
+  // to the owner's own linked Telegram DM, whoever created the card.
+  let agentAuthored = Boolean(interaction.createdByAgentId);
+  if (agentAuthored && interaction.sourceRunId) {
     const sourceRun = await db
       .select({ agentId: heartbeatRuns.agentId })
       .from(heartbeatRuns)
@@ -266,13 +303,13 @@ export async function enqueueIssueInteractionChatPublications(
         and(
           eq(heartbeatRuns.id, interaction.sourceRunId),
           eq(heartbeatRuns.companyId, interaction.companyId),
-          eq(heartbeatRuns.agentId, interaction.createdByAgentId),
+          eq(heartbeatRuns.agentId, interaction.createdByAgentId!),
         ),
       )
       .then((rows) => rows[0] ?? null);
-    if (!sourceRun) return [];
+    if (!sourceRun) agentAuthored = false;
   }
-  const bindings = await db
+  const agentBindings = agentAuthored ? (await db
     .select({
       conversation: chatConversations,
       endpoint: chatEndpoints,
@@ -292,14 +329,21 @@ export async function enqueueIssueInteractionChatPublications(
         eq(chatConversations.issueId, interaction.issueId),
         inArray(chatConversations.state, ["active", "waiting"]),
         inArray(chatEndpoints.status, ["active", "verifying"]),
+        ordinaryChatConversation(),
       ),
-    );
+    )).filter(({ endpoint }) => endpoint.assignedAgentId === interaction.createdByAgentId)
+    .map((binding) => ({ ...binding, ownerPush: false })) : [];
+  const ownerBindings = await ownerCardPushBindings(
+    db,
+    interaction,
+    agentBindings.map(({ endpoint }) => endpoint.id),
+  );
+  const bindings = [...agentBindings, ...ownerBindings];
   if (bindings.length === 0) return [];
 
   const taskUrl = publicChatInteractionTaskUrl(interaction.issueId);
   const inserted: Array<typeof chatPublications.$inferSelect> = [];
-  for (const { conversation, endpoint } of bindings) {
-    if (endpoint.assignedAgentId !== interaction.createdByAgentId) continue;
+  for (const { conversation, endpoint, ownerPush } of bindings) {
     if (endpoint.provider !== "slack" && interaction.kind !== "ask_user_questions" && interaction.kind !== "request_confirmation") continue;
     let connectionDecline = endpoint.provider === "slack" && endpoint.capabilities.actions && interaction.kind === "connection_intent" ? interaction : null;
     let suggestions = endpoint.provider === "slack" && endpoint.capabilities.actions ? nativeChatSuggestions(interaction) : null;
@@ -405,7 +449,14 @@ export async function enqueueIssueInteractionChatPublications(
             : [];
     if (connectionDecline && taskUrl) actions.unshift({ type: "link", label: "Review connection", url: taskUrl });
     if (suggestions && taskUrl) actions.push({ type: "link", label: "Revise in Paperclip", url: taskUrl });
-    const text = [presentation.title, presentation.body, taskUrl ? `Open the task in Paperclip to respond: ${taskUrl}` : "Open the task in Paperclip to respond."].join("\n\n");
+    // Owner push cards Telegram cannot answer with one tap are sent as one
+    // message listing every question and option, with the task link.
+    const ownerFallback = ownerPush && !supportsCallbacks && !confirmation && !formDraft
+      ? ownerCardFallbackText(interaction, taskUrl)
+      : null;
+    const text = ownerFallback
+      ? [ownerFallback.title, ownerFallback.body].join("\n\n")
+      : [presentation.title, presentation.body, taskUrl ? `Open the task in Paperclip to respond: ${taskUrl}` : "Open the task in Paperclip to respond."].join("\n\n");
     const payload = projectSafeChatPublication({
       classification: "external",
       source: "issue_interaction",
@@ -420,8 +471,8 @@ export async function enqueueIssueInteractionChatPublications(
               : interaction.kind === "request_confirmation"
                 ? "confirmation"
                 : "status",
-          title: interaction.kind === "ask_user_questions" && question ? question.prompt : presentation.title,
-          body: presentation.body,
+          title: ownerFallback ? ownerFallback.title : interaction.kind === "ask_user_questions" && question ? question.prompt : presentation.title,
+          body: ownerFallback ? ownerFallback.body : presentation.body,
           actions,
           ...(suggestions && suggestedOptions.length > 1 ? { selection: {
             actionId: confirmationActionTokens.find(item => item.decision === "accept")!.actionId,

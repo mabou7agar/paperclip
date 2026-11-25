@@ -1,3 +1,4 @@
+import { ordinaryChatConversation } from "../../owner-card-push.js";
 import { chatConversations, issues, type Db } from "@paperclipai/db";
 import { and, desc, eq } from "drizzle-orm";
 import type { EndpointRow } from "../runtime-types.js";
@@ -31,6 +32,9 @@ export async function resolveInboundConversationBinding(
                 thread.channelId,
               ),
               eq(chatConversations.externalThreadId, thread.id),
+              // Owner card DMs share the native thread but never take over
+              // the person's ordinary conversation with the agent.
+              ordinaryChatConversation(),
             ),
           )
           .orderBy(desc(chatConversations.sessionGeneration))

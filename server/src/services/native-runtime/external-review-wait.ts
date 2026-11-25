@@ -1,3 +1,4 @@
+import { ordinaryChatConversation } from "../owner-card-push.js";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { chatConversations, chatEndpoints, heartbeatRuns, issues, statusDecisions, type Db } from "@paperclipai/db";
 import { readInheritedGitHubReviewWait } from "../chat-channels/github/review-wait.js";
@@ -53,6 +54,7 @@ export async function listExternalReviewWaits(db: Db, companyId: string, issueId
       eq(chatConversations.companyId, issues.companyId),
       eq(chatConversations.issueId, issues.id),
       inArray(chatConversations.state, ["active", "waiting"]),
+      ordinaryChatConversation(),
     ))
     .innerJoin(chatEndpoints, and(
       eq(chatEndpoints.id, chatConversations.endpointId),
