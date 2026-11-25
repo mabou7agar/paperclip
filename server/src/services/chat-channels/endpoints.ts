@@ -1,4 +1,5 @@
 import { notifyChatCompanyAuthorityChange } from "../chat-run-milestone-notifications.js";
+import { supportsChatCommunicationInstructions } from "../chat-communication-guidance.js";
 import { chatConnectionTransport } from "./provider-catalog.js";
 import type { ConnectionManagementContext } from "../connection-management.js";
 import { slackSetupState } from "./slack/setup.js";
@@ -407,8 +408,8 @@ function providerSetupState(
           updatedAt: new Date(),
         };
         if (input.communicationInstructions !== undefined) {
-          if (existing.endpoint.provider !== "slack") {
-            throw unprocessable("Communication instructions are currently supported for Slack connections");
+          if (!supportsChatCommunicationInstructions(existing.endpoint.provider)) {
+            throw unprocessable("Communication instructions are not supported for this connection type");
           }
           values.communicationInstructions = input.communicationInstructions;
         }
