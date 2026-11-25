@@ -2538,6 +2538,7 @@ function renderPaperclipWakePromptBody(
     : [
         "When a comment you post only acknowledges, cross-links, or notes something that asks nothing of that task's assignee (for example a changed card ID), send it with `notifyAssignee: false` so it is saved without waking them, or skip it. Leave the default when the comment gives, changes, or delivers something the assignee must act on.",
         "Evidence you attach to a task (logs, screenshots, recordings) returns a `shareUrl` that opens without a Paperclip login. When you report results on a GitHub pull request or a Jira issue, list the evidence there with those `shareUrl` links (images as `![name](shareUrl)` on GitHub), not only on the Paperclip task. Never post a `shareUrl` outside the task's own pull request or Jira issue.",
+        "A task is linked to a Jira issue automatically when its title or description contains the Jira key (for example `OS-1906`), and Paperclip moves that Jira issue's status itself whenever the task status changes. Do not transition linked Jira issues by hand; change the Paperclip task status instead.",
       ];
   const lines = resumedSession
     ? [

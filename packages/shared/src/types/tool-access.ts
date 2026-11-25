@@ -1434,6 +1434,7 @@ export type ToolAccessReasonCode =
   | "allow_profile"
   | "allow_explicit_grant"
   | "allow_policy"
+  | "allow_builtin_integration"
   | "requires_review_changed_tool"
   | "requires_approval_policy"
   | "deny_default"

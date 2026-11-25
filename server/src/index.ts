@@ -61,6 +61,7 @@ import {
 } from "./services/native-runtime/native-workspace-sync-retention.js";
 import { markGitRestorePointExpired } from "./services/git-restore-point-storage.js";
 import { subscribeAllCompanyLiveEvents } from "./services/live-events.js";
+import { jiraStatusSyncService, JIRA_SWEEP_INTERVAL_MS } from "./services/jira-status-sync.js";
 import { DELIVERY_QUEUES } from "./services/delivery-work-notifications.js";
 import { registerBudgetEnforcementWork, registerCostAccountingWork } from "./services/budget-enforcement-worker.js";
 import { caseHandoffDeliveryService } from "./services/case-handoff-delivery.js";
@@ -1460,6 +1461,30 @@ async function startServerWithDatabaseTeardown(
       .catch(err => logger.error({ err }, "post-commit chat completion delivery failed")));
   });
   server.on("close", unsubscribeChatCompletions);
+  // Linked Jira issues follow task status. Status commits in issueService.update
+  // notify this queue (hint = task id); other status writers and missed events
+  // are caught by the periodic sweep. One run at a time per process.
+  const jiraStatusSync = jiraStatusSyncService(db as any, app.locals.toolGateway);
+  let jiraNextSweepAt = Date.now();
+  const jiraStatusWorker = deliveryWork.register(DELIVERY_QUEUES.jiraStatusSync, {
+    retryMs: JIRA_SWEEP_INTERVAL_MS,
+    coalesceMs: 500,
+    run: async (signal) => {
+      jiraNextSweepAt = Date.now() + JIRA_SWEEP_INTERVAL_MS;
+      await jiraStatusSync.sweep(signal);
+    },
+    hasPending: () => jiraStatusSync.hasPending(),
+    onSettled: (hints) => { for (const id of hints ?? []) jiraStatusSync.noteIssueChanged(id); },
+    nextRunAt: () => jiraNextSweepAt,
+    nextRunAtOnError: () => Date.now() + JIRA_SWEEP_INTERVAL_MS,
+  });
+  const unsubscribeJiraStatus = subscribeAllCompanyLiveEvents(event => {
+    if (event.type !== "activity.logged" || typeof event.payload.entityId !== "string"
+      || (event.payload.action !== "issue.updated" && event.payload.action !== "issue.created")) return;
+    jiraStatusSync.noteIssueChanged(event.payload.entityId);
+    jiraStatusWorker.wake();
+  });
+  server.on("close", unsubscribeJiraStatus);
   const cleanupInspectionRuntime = environmentRuntimeService(db as any, { pluginWorkerManager });
   const environmentCustomImages = environmentCustomImageService(db as any, { pluginWorkerManager });
   const historicalCleanup = historicalCleanupVerificationService(db as any, {

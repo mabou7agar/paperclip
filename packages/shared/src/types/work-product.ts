@@ -5,13 +5,15 @@ export type IssueWorkProductType =
   | "branch"
   | "commit"
   | "artifact"
-  | "document";
+  | "document"
+  | "external_issue";
 
 export type IssueWorkProductProvider =
   | "paperclip"
   | "github"
   | "vercel"
   | "s3"
+  | "jira"
   | "custom";
 
 export type IssueWorkProductStatus =

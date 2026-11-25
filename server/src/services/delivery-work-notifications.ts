@@ -158,6 +158,7 @@ export const DELIVERY_QUEUES = {
   caseHandoffs: "case-handoffs",
   nativeHarnessBackupExpiration: "native-harness-backup-expiration",
   nativeCheckpointExpiration: "native-checkpoint-expiration",
+  jiraStatusSync: "jira-status-sync",
 } as const;
 export type DeliveryQueue = typeof DELIVERY_QUEUES[keyof typeof DELIVERY_QUEUES];
 

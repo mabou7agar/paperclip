@@ -163,6 +163,8 @@ import {
   remoteUrlCredentialMatchesPublicUrl,
 } from "./remote-url-credentials.js";
 import {
+  BUILT_IN_SYSTEM_INTEGRATIONS,
+  type BuiltInSystemIntegrationId,
   createToolAccessDecisionCache,
   runContextSnapshotString,
   toolAccessPolicyService,
@@ -9915,6 +9917,139 @@ export function createToolGatewayService(
         timeoutMs: input.timeoutMs,
         signal: input.signal,
       });
+    },
+
+    /**
+     * Runs one tool of one connection for a built-in server integration (for
+     * example the Jira status sync), as the `system` actor. It goes through the
+     * normal policy decision, invocation record, call events and activity log.
+     * The policy service allows only the integration's own tools on a matching
+     * connection (see BUILT_IN_SYSTEM_INTEGRATIONS); company blocks still win.
+     * A built-in integration never asks a person: an Ask first decision is
+     * recorded as a denial. A repeated idempotency key returns the earlier
+     * invocation's outcome without calling the provider again.
+     */
+    async executeSystemConnectionTool(input: {
+      companyId: string;
+      connectionId: string;
+      integration: BuiltInSystemIntegrationId;
+      upstreamToolName: string;
+      parameters: Record<string, unknown>;
+      issueId?: string | null;
+      idempotencyKey?: string | null;
+      timeoutMs?: number;
+    }): Promise<
+      | { outcome: "succeeded"; invocationId: string; result: unknown; replayed: boolean }
+      | { outcome: "denied" | "failed"; invocationId: string | null; reasonCode: string; message: string; replayed: boolean }
+    > {
+      const allowedTools = BUILT_IN_SYSTEM_INTEGRATIONS[input.integration]?.upstreamToolNames as readonly string[] | undefined;
+      if (!allowedTools?.includes(input.upstreamToolName)) {
+        return { outcome: "denied", invocationId: null, reasonCode: "deny_missing_tool", message: `Tool ${input.upstreamToolName} is not part of ${input.integration}.`, replayed: false };
+      }
+      const tool = (await connectedMcpToolsForConnection(input.companyId, input.connectionId))
+        .find((candidate) => candidate.upstreamToolName === input.upstreamToolName || candidate.name === input.upstreamToolName);
+      if (!tool) {
+        return { outcome: "denied", invocationId: null, reasonCode: "tool_not_found", message: `Tool ${input.upstreamToolName} is not connected.`, replayed: false };
+      }
+      const session: ToolGatewaySession = {
+        id: `system:${input.integration}`,
+        token: `system:${input.integration}`,
+        companyId: input.companyId,
+        agentId: null,
+        runId: null,
+        issueId: input.issueId ?? null,
+        projectId: null,
+        originatingAgentId: null,
+        actorType: "system",
+        actorId: input.integration,
+        responsibleUserId: null,
+        createdAt: new Date(),
+        expiresAt: new Date(Date.now() + DEFAULT_SESSION_TTL_MS),
+      };
+      const parameters = await governedToolArguments(session, tool, input.parameters);
+      const argumentValidation = await validateToolContent({
+        value: parameters, direction: "arguments", sensitiveMode: "redact", promptInjectionMode: "ignore",
+      });
+      const decisionInput = policyInputForTool({
+        session, tool, parameters,
+        idempotencyKey: input.idempotencyKey ?? null,
+        consumeRateLimit: true,
+      });
+      const rawDecision = await policyService.decide(decisionInput);
+      const accessDecision: ToolAccessDecision = rawDecision.decision === "require_approval"
+        ? { ...rawDecision, decision: "deny", allowed: false, reasonCode: "deny_policy_block",
+          explanation: `${rawDecision.explanation} Built-in integrations do not request approvals.` }
+        : rawDecision;
+      const recorded = await recordToolInvocation(decisionInput, accessDecision);
+      const invocationId = recorded.invocation.id;
+      if (recorded.replayed) {
+        const prior = recorded.invocation;
+        if (prior.status === "succeeded") {
+          return { outcome: "succeeded", invocationId, result: storedInvocationResult(prior) ?? null, replayed: true };
+        }
+        return { outcome: prior.policyDecision === "deny" ? "denied" : "failed", invocationId,
+          reasonCode: prior.errorCode ?? prior.status, message: prior.errorMessage ?? `Earlier call ${prior.status}.`, replayed: true };
+      }
+      await policyService.writeAudit(decisionInput, accessDecision);
+      const auditBase = {
+        session, companyId: input.companyId, agentId: null, runId: null, issueId: session.issueId,
+        actorType: "system" as const, actorId: input.integration,
+      };
+      if (!accessDecision.allowed) {
+        void emitConnectionInvoked(db, invocationId);
+        await writeAudit({ ...auditBase, action: "tool_gateway.call_denied", details: {
+          source: "system", integration: input.integration, invocationId, decision: accessDecision.decision,
+          reasonCode: accessDecision.reasonCode, matchedPolicyIds: accessDecision.matchedPolicyIds,
+          tool: tool.name, ...toolAuditMetadata(tool), argumentsSummary: argumentValidation.summary,
+        } });
+        return { outcome: "denied", invocationId, reasonCode: accessDecision.reasonCode, message: accessDecision.explanation, replayed: false };
+      }
+      await startToolInvocation(db, invocationId);
+      const startedAt = Date.now();
+      try {
+        if (tool.providerType !== "mcp_remote_http" && tool.providerType !== "provider_rest") {
+          throw new ToolGatewayHttpError(404, `Tool "${tool.name}" is not a remote tool`, "tool_not_found");
+        }
+        const execution = await executeRemoteHttpTool(session, tool, parameters,
+          timeoutMs(input.timeoutMs, tool), invocationId, undefined, input.timeoutMs === undefined);
+        // The result is parsed by server code and never shown to a model, so it
+        // is redacted but not sent to the prompt-injection classifier.
+        const resultValidation = await validateToolContent({
+          value: execution.result, direction: "result", sensitiveMode: "redact", promptInjectionMode: "ignore",
+        });
+        const providerResult = asRecord(resultValidation.value);
+        if (providerResult?.error) {
+          throw new ToolGatewayHttpError(502, toolResultErrorMessage(providerResult, execution.failureInstructions), "tool_error");
+        }
+        await persistToolTestOutcome(db, invocationId, { status: "succeeded", result: resultValidation.summary });
+        await writeToolCallEvent({ invocationId, session, eventType: "call_completed", outcome: "success", toolName: tool.name,
+          policyDecision: "allow", reasonCode: "tool_completed", argumentsSummary: argumentValidation.summary,
+          resultSummary: resultValidation.summary, metadata: { source: "system", integration: input.integration }, tool });
+        await writeAudit({ ...auditBase, action: "tool_gateway.call_completed", details: {
+          source: "system", integration: input.integration, invocationId, decision: "allow", reasonCode: accessDecision.reasonCode,
+          tool: tool.name, ...toolAuditMetadata(tool), durationMs: Date.now() - startedAt,
+          argumentsSummary: argumentValidation.summary, resultSummary: resultValidation.summary,
+        } });
+        void emitConnectionInvoked(db, invocationId);
+        return { outcome: "succeeded", invocationId, result: resultValidation.value, replayed: false };
+      } catch (err) {
+        const status = err instanceof ToolGatewayHttpError ? err.status : 502;
+        const reasonCode = err instanceof ToolContentValidationError ? err.reasonCode
+          : err instanceof ToolGatewayHttpError ? err.reasonCode : "tool_execution_failed";
+        const message = err instanceof Error ? err.message : String(err);
+        await persistToolTestOutcome(db, invocationId, {
+          status: status === 504 ? "timed_out" : status === 429 ? "rate_limited" : "failed", errorCode: reasonCode, errorMessage: message,
+        });
+        await writeToolCallEvent({ invocationId, session, eventType: "call_failed", outcome: status === 504 ? "timeout" : "failure",
+          toolName: tool.name, policyDecision: "allow", reasonCode, argumentsSummary: argumentValidation.summary,
+          metadata: { source: "system", integration: input.integration }, tool });
+        await writeAudit({ ...auditBase, action: status === 504 ? "tool_gateway.call_deferred" : "tool_gateway.call_failed", details: {
+          source: "system", integration: input.integration, invocationId, reasonCode, tool: tool.name, ...toolAuditMetadata(tool),
+          durationMs: Date.now() - startedAt, argumentsSummary: argumentValidation.summary, error: message,
+        } });
+        void emitConnectionInvoked(db, invocationId);
+        return { outcome: "failed", invocationId, reasonCode, message, replayed: false };
+      }
     },
 
     /**

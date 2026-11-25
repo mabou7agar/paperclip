@@ -61,6 +61,7 @@ function typeIcon(type: string) {
     case "preview_url": return Globe;
     case "runtime_service": return Server;
     case "artifact": return Package;
+    case "external_issue": return Globe;
     default: return FileText;
   }
 }
