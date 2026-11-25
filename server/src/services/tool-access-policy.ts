@@ -1751,7 +1751,9 @@ export function toolAccessPolicyService(db: Pick<Db, "select" | "insert" | "upda
           eq(toolCatalogEntries.status, "active"),
         )).limit(1));
       if (markerEntry) {
-        return decision("allow", "allow_builtin_integration", `Tool access allowed for the built-in ${integrationId} integration.`, effectiveProfileIds, [], { redactionPlan: redaction.redactionPlan, policyExplanation: { builtInIntegration: integrationId } });
+        // The reason code is declared in @paperclipai/shared; spelled through the
+        // decision type so the server also compiles against an older shared build.
+        return decision("allow", ("allow_builtin_integration" as string) as ToolAccessDecision["reasonCode"], `Tool access allowed for the built-in ${integrationId} integration.`, effectiveProfileIds, [], { redactionPlan: redaction.redactionPlan, policyExplanation: { builtInIntegration: integrationId } });
       }
     }
     if (await explicitGrant(ctx, cache, { toolTargetedOnly: governedByConnectionProfile })) {
