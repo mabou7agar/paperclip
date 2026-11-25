@@ -7,6 +7,7 @@ export const monitoringMessages = {
     no_execution_path: "This task has no live execution path. Monitoring will wait for a real change or your action.",
     monitor_due: "A task check is due. Monitoring reported it without starting an agent.",
     stopped_subtree: "Work in this task tree has stopped. Monitoring reported it without assigning recovery work.",
+    untracked_follow_ups: "This task closed with open items that have no follow-up tasks. An agent was asked to file them or ask you which to waive.",
   },
   ar: {
     title: "مهمة تحتاج إلى انتباه",
@@ -16,5 +17,6 @@ export const monitoringMessages = {
     no_execution_path: "لا يوجد مسار تنفيذ نشط لهذه المهمة. ستنتظر المراقبة تغييراً فعلياً أو إجراءً منك.",
     monitor_due: "حان موعد فحص المهمة. تم الإبلاغ عنه دون تشغيل وكيل.",
     stopped_subtree: "توقف العمل في شجرة المهام. تم الإبلاغ عنه دون إسناد عمل استعادة.",
+    untracked_follow_ups: "أُغلقت هذه المهمة وفيها بنود مفتوحة بلا مهام متابعة. طُلب من وكيل إنشاؤها أو سؤالك عن البنود التي يُتنازل عنها.",
   },
 };

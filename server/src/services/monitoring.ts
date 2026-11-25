@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { Db } from "@paperclipai/db";
 import { monitoringPolicySchema, PROVIDER_QUOTA_MONITOR_SERVICE_NAME, type MonitoringObservation } from "@paperclipai/shared";
-import { MONITORING_OWNER_NUDGE_ACTION, monitoringRepository } from "../repositories/monitoring.js";
+import { MONITORING_FOLLOW_UP_NUDGE_KINDS, MONITORING_OWNER_NUDGE_ACTION, monitoringRepository } from "../repositories/monitoring.js";
 import { logger } from "../middleware/logger.js";
 import { logActivity, publishActivity } from "./activity-log.js";
 import { isBoundedTaskContinuationMonitor } from "./issue-monitors.js";
@@ -22,7 +22,16 @@ export const MONITORING_OWNER_NUDGE_RECLAIM_GRACE_MS = 10 * 60 * 1000;
 const PROVIDER_QUOTA_RESET_UNKNOWN_FINGERPRINT = "provider_quota_reset_unknown";
 export const MONITORING_OWNER_NUDGE_INSTRUCTION =
   "This task has no next step recorded. Continue it, settle it, or record what it is waiting for.";
-const OWNER_NUDGE_KINDS: ReadonlySet<MonitoringObservation["kind"]> = new Set(["no_execution_path", "missing_disposition"]);
+const OWNER_NUDGE_KINDS: ReadonlySet<MonitoringObservation["kind"]> = new Set(["no_execution_path", "missing_disposition",
+  ...MONITORING_FOLLOW_UP_NUDGE_KINDS]);
+/**
+ * Work left outside any task. These may concern a task that is already closed,
+ * may wake an agent other than its assignee (observation.nudgeAgentId), carry
+ * their own instruction, and get one nudge per alert and per kind and task in
+ * the window.
+ */
+const FOLLOW_UP_NUDGE_KINDS: ReadonlySet<MonitoringObservation["kind"]> = new Set(MONITORING_FOLLOW_UP_NUDGE_KINDS);
+const FOLLOW_UP_NUDGE_ISSUE_STATUSES = ["todo", "in_progress", "in_review", "blocked", "done", "cancelled"];
 /**
  * "Nobody can wake this task" (no_execution_path, which also carries the I7
  * visible-next-action invariant) is nudged again while it persists: a single
@@ -92,8 +101,9 @@ export function monitoringService(db: Db, deps: MonitoringServiceDeps = {}) {
     return heartbeatService(db).wakeup(agentId, opts);
   });
   async function nudgeOwner(observation: MonitoringObservation, alertId: string, issue: NonNullable<Awaited<ReturnType<typeof repository.issue>>>) {
-    const agentId = issue.assigneeAgentId;
-    if (!agentId || OWNER_NUDGE_SKIPPED_ISSUE_STATUSES.includes(issue.status)) return;
+    const followUp = FOLLOW_UP_NUDGE_KINDS.has(observation.kind);
+    const agentId = followUp ? observation.nudgeAgentId ?? issue.assigneeAgentId : issue.assigneeAgentId;
+    if (!agentId || (followUp ? issue.status === "backlog" : OWNER_NUDGE_SKIPPED_ISSUE_STATUSES.includes(issue.status))) return;
     // A chat conversation answers its user; a generic "no next step" turn
     // could be posted into the user's chat.
     // Same test as isConversation() in agent-conversations.ts, inlined: that
@@ -136,7 +146,7 @@ export function monitoringService(db: Db, deps: MonitoringServiceDeps = {}) {
       const previous = await repository.ownerNudgeTimes(observation.companyId, issue.id, since);
       if (!ownerNudgeRepeatDue(previous, now)) return;
       repeat = previous.length > 0;
-    } else if (await repository.recentOwnerNudge(observation.companyId, issue.id, since)) {
+    } else if (await repository.recentOwnerNudge(observation.companyId, issue.id, since, followUp ? observation.kind : undefined)) {
       // Another alert on this task was nudged inside the window: skip the
       // agent and hold lookups below on every 30 s recovery pass.
       return;
@@ -162,7 +172,8 @@ export function monitoringService(db: Db, deps: MonitoringServiceDeps = {}) {
         since, responsibleUserId: issue.responsibleUserId ?? issue.createdByUserId,
         details: { alertId, kind: observation.kind, fingerprint: observation.fingerprint, agentId, issueStatus: issue.status,
           identifier: issue.identifier, reason: MONITORING_OWNER_NUDGE_REASON, idempotencyKey, ...(repeat ? { repeat: true } : {}) },
-        mode: repeat ? { kind: "repeat", allow: previous => ownerNudgeRepeatDue(previous, now) } : { kind: "single" },
+        mode: repeat ? { kind: "repeat", allow: previous => ownerNudgeRepeatDue(previous, now) }
+          : { kind: "single", ...(followUp ? { alertKind: observation.kind } : {}) },
       });
       if (!claimed) return;
     }
@@ -173,14 +184,18 @@ export function monitoringService(db: Db, deps: MonitoringServiceDeps = {}) {
         requestedByActorType: "system", requestedByActorId: "monitoring", idempotencyKey,
         // Never merge into a queued recovery run that holdWake will cancel.
         allowRunCoalescing: false,
-        issueStateGuard: { assigneeAgentId: agentId, statuses: OWNER_NUDGE_ISSUE_STATUSES },
+        // A follow-up nudge may concern a closed task or wake a non-assignee;
+        // it is guarded only against the assignee it was decided for.
+        ...(!followUp ? { issueStateGuard: { assigneeAgentId: agentId, statuses: OWNER_NUDGE_ISSUE_STATUSES } }
+          : issue.assigneeAgentId === agentId ? { issueStateGuard: { assigneeAgentId: agentId, statuses: FOLLOW_UP_NUDGE_ISSUE_STATUSES } }
+            : {}),
         payload: { issueId: issue.id, taskId: issue.id, monitoringAlertId: alertId, monitoringAlertKind: observation.kind },
         contextSnapshot: {
           issueId: issue.id, taskId: issue.id, wakeReason: MONITORING_OWNER_NUDGE_REASON, source: "monitoring.owner_nudge",
           monitoringAlertId: alertId, monitoringAlertKind: observation.kind,
           // Rendered to the agent as the wake's reason and instruction.
           livenessContinuationReason: `monitoring_${observation.kind}`,
-          livenessContinuationInstruction: MONITORING_OWNER_NUDGE_INSTRUCTION,
+          livenessContinuationInstruction: (followUp && observation.nudgeInstruction) || MONITORING_OWNER_NUDGE_INSTRUCTION,
         },
       });
       const wake = await repository.wakeByIdempotencyKey(observation.companyId, idempotencyKey);
@@ -200,7 +215,8 @@ export function monitoringService(db: Db, deps: MonitoringServiceDeps = {}) {
   async function observe(observation: MonitoringObservation) {
     if ((await policy(observation.companyId)).mode !== "alert_only") return false;
     const issue = await repository.issue(observation.companyId, observation.issueId);
-    if (!issue || (["done", "cancelled"].includes(issue.status) && observation.kind !== "stopped_subtree")) return true;
+    if (!issue || (["done", "cancelled"].includes(issue.status) && observation.kind !== "stopped_subtree" &&
+      !FOLLOW_UP_NUDGE_KINDS.has(observation.kind))) return true;
     const id = monitoringAlertId(observation);
     if (await repository.alert(id, observation, issue.responsibleUserId ?? issue.createdByUserId)) {
       publishActivity({ companyId: observation.companyId, pluginEvent: null, payload: {
