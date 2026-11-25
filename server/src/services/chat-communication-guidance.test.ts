@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CHAT_PROVIDERS, updateChatEndpointSchema } from "@paperclipai/shared";
-import { buildChatCommunicationGuidance } from "./chat-communication-guidance.js";
+import { buildChatCommunicationGuidance, supportsChatCommunicationInstructions } from "./chat-communication-guidance.js";
 
 describe("initial medium communication guidance", () => {
   it.each([true, false])("requires result and review updates in Slack (direct=%s)", (isDirectMessage) => {
@@ -55,6 +55,15 @@ describe("initial medium communication guidance", () => {
 
   it.each(CHAT_PROVIDERS.filter((provider) => provider !== "slack" && provider !== "speko" && !(directChatProviders as readonly string[]).includes(provider)))("leaves %s unchanged", (provider) => {
     expect(buildChatCommunicationGuidance({ provider, isDirectMessage: false, communicationInstructions: "Ignored" })).toBeNull();
+  });
+
+  it("allows owner instructions exactly where the guidance carries them", () => {
+    for (const provider of ["slack", "telegram", "discord", "microsoft-teams", "imessage-photon"] as const) {
+      expect(supportsChatCommunicationInstructions(provider)).toBe(true);
+    }
+    for (const provider of ["github", "agentmail", "speko"] as const) {
+      expect(supportsChatCommunicationInstructions(provider)).toBe(false);
+    }
   });
 
   it("accepts clearing instructions and rejects oversized instructions and unsupported controls", () => {

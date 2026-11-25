@@ -31,6 +31,11 @@ const providerGuidance: Partial<Record<ChatProvider, string>> = {
   ].join("\n\n"),
 };
 
+/** Providers whose task guidance carries the endpoint owner's communication instructions. */
+export function supportsChatCommunicationInstructions(provider: ChatProvider): boolean {
+  return provider !== "speko" && Boolean(providerGuidance[provider]);
+}
+
 /** Captured once when the external conversation creates its task. */
 export function buildChatCommunicationGuidance(input: {
   provider: ChatProvider;
