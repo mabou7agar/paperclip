@@ -23,6 +23,7 @@ import {
   chatEndpointResources,
   chatExternalPrincipals,
   chatIdentityLinks,
+  authUsers,
   companyMemberships,
 } from "@paperclipai/db";
 
@@ -427,4 +428,37 @@ export function createChatInboundAuthority(db: Db, options: InboundAuthorityOpti
     return resource;
   }
   return { findAuthorizedIdentityLink, ensurePrincipal, sponsorAllowsGuest, lockCurrentPrincipalAuthorization, requireCurrentExternalActionAuthorization, isExternalActionAuthorizationChange, ensureResource };
+}
+
+type KeyValueRow = { type: "key_value"; label: string; value: string };
+
+/**
+ * Who a linked chat sender is inside the company: their Paperclip member name
+ * and company role, shown to the agent beside the provider name so it can treat
+ * the person by role (a team role is carried in the member name, for example
+ * "Sara (Support)"). Nothing is shown for guests or when the member is missing.
+ */
+export async function chatSenderMemberRows(
+  db: DbOrTransaction,
+  companyId: string,
+  userId: string | null,
+): Promise<KeyValueRow[]> {
+  if (!userId) return [];
+  const [row] = await db
+    .select({ name: authUsers.name, role: companyMemberships.membershipRole })
+    .from(authUsers)
+    .leftJoin(
+      companyMemberships,
+      and(
+        eq(companyMemberships.companyId, companyId),
+        eq(companyMemberships.principalType, "user"),
+        eq(companyMemberships.principalId, authUsers.id),
+      ),
+    )
+    .where(eq(authUsers.id, userId))
+    .limit(1);
+  if (!row) return [];
+  const rows: KeyValueRow[] = [{ type: "key_value", label: "Paperclip member", value: row.name }];
+  if (row.role) rows.push({ type: "key_value", label: "Company role", value: row.role });
+  return rows;
 }

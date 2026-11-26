@@ -48,7 +48,7 @@ import type { DiscordGatewayOwnership } from "./chat-channels/runtime-types.js";
 import { createInboundAdmission } from "./chat-channels/inbound/admission.js";
 import { createInboundEnvelope } from "./chat-channels/inbound/envelope.js";
 import { sameTeamsThreadIdentity, durableExternalThreadIdentity, canonicalProviderResourceId, nonDirectDestinationAllowed, linearControlCommand, actionThreadMatchesConversation } from "./chat-channels/inbound/surfaces.js";
-import { createChatInboundAuthority } from "./chat-channels/inbound/authorization.js";
+import { chatSenderMemberRows, createChatInboundAuthority } from "./chat-channels/inbound/authorization.js";
 import { createTeamsRoutes } from "./chat-channels/microsoft-teams/routes.js";
 import type { LiveInboundMessage } from "./chat-channels/runtime-types.js";
 import { DELIVERY_PROCESSING_STALE_MS, normalizedDeliveryThreadId, normalizedLifecycleEffect, deliveryReady, pendingInboundWakeupCondition, lifecycleRuntimeFence, normalizedLifecycleWithRuntimeFence } from "./chat-channels/inbound/delivery-ledger.js";
@@ -2321,6 +2321,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
                         ? "Linked Paperclip user"
                         : "Sponsored external guest (restricted)",
                     },
+                    ...(await chatSenderMemberRows(taskTx, taskEndpoint.companyId, taskUserId)),
                   ],
                 },
               ],
