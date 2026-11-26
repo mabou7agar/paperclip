@@ -69,6 +69,7 @@ const chatProviderName = (provider) =>
     slack: "Slack",
     telegram: "Telegram",
     "imessage-photon": "iMessage Photon",
+    whatsapp: "WhatsApp",
   })[provider];
 const channelMethod = (
   provider,
@@ -432,6 +433,14 @@ const apps = [
     channelMethod("imessage-photon", [field("projectSecret", "Project secret", "Photon project secret")], ["direct_message", "group_chat"],
       "Connect a Photon Cloud project. Pro shared lines support DMs after sender enrollment in Photon and identity linking in Paperclip. Dedicated lines also support individually enabled groups.",
       { register: "https://photon.codes/", docs: "https://photon.codes/docs/spectrum-ts/providers/imessage/connection-and-routing" }),
+  ],
+  [
+    "whatsapp", "WhatsApp",
+    "Let people start and continue Paperclip work with an agent from WhatsApp, using a phone number you link by QR code.",
+    "communication", "whatsapp.com", ["https://wa.me/*", "https://web.whatsapp.com/*"],
+    channelMethod("whatsapp", [], ["direct_message"],
+      "Use a dedicated WhatsApp number for this agent. Paperclip shows a QR code: open WhatsApp on that phone, go to Linked devices, and scan it (or link with a pairing code instead). Direct messages only; each person links their WhatsApp number to their Paperclip account before the agent acts for them. This uses WhatsApp's linked-device protocol rather than the WhatsApp Business API, so use a number you are prepared to have restricted by WhatsApp.",
+      { docs: "https://faq.whatsapp.com/1317564962315842" }),
   ],
   [
     "telegram",

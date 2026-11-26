@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "slug": "whatsapp",
+  "name": "WhatsApp",
+  "description": "Let people start and continue Paperclip work with an agent from WhatsApp, using a phone number you link by QR code.",
+  "categories": [
+    "communication"
+  ],
+  "featured": false,
+  "branding": {
+    "logoUrl": "/brands/apps/whatsapp.svg"
+  },
+  "urlPatterns": [
+    "https://wa.me/*",
+    "https://web.whatsapp.com/*"
+  ],
+  "methods": [
+    {
+      "key": "chat-agent",
+      "label": "Chat with an agent",
+      "purpose": "channel",
+      "provider": "whatsapp",
+      "transport": "chat_sdk",
+      "auth": "api_key",
+      "ownershipModes": [
+        "customer"
+      ],
+      "whenToUse": "Let people in WhatsApp start and continue work with one Paperclip agent.",
+      "credentialFields": [],
+      "guidanceMd": "Use a dedicated WhatsApp number for this agent. Paperclip shows a QR code: open WhatsApp on that phone, go to Linked devices, and scan it (or link with a pairing code instead). Direct messages only; each person links their WhatsApp number to their Paperclip account before the agent acts for them. This uses WhatsApp's linked-device protocol rather than the WhatsApp Business API, so use a number you are prepared to have restricted by WhatsApp.",
+      "consoleLinks": {
+        "docs": "https://faq.whatsapp.com/1317564962315842"
+      },
+      "riskTier": "S3",
+      "requiredResourceFilters": [
+        "direct_message"
+      ]
+    }
+  ]
+}
