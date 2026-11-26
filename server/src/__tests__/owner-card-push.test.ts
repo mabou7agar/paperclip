@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { and, eq, sql } from "drizzle-orm";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   agents,
   applyPendingMigrations,
@@ -23,6 +23,7 @@ import { enqueueIssueInteractionChatPublications } from "../services/chat-intera
 import { getExternalChannelBindingSummary } from "../services/chat-channel-binding.js";
 import { resolveInboundConversationBinding } from "../services/chat-channels/inbound/conversation-binding.js";
 import { issueThreadInteractionService } from "../services/issue-thread-interactions.js";
+import { questionResponseDeliveryService } from "../services/question-response-delivery.js";
 import {
   getEmbeddedPostgresTestSupport,
   startEmbeddedPostgresTestDatabase,
@@ -164,6 +165,25 @@ describeEmbeddedPostgres("owner card push to Telegram", () => {
       isLinear: () => true,
     });
     expect(inbound.latestConversation).toBeNull();
+  });
+
+  it("resumes the agent as an ordinary card answer after the card was pushed to Telegram", async () => {
+    // Regression (26 Nov 2026): every answer to a pushed card was flagged as an
+    // external-chat continuation, whose run then failed at setup with
+    // reviewed_chat_execution_binding_not_authorized, so the agent never resumed.
+    const fixture = await seed();
+    await fixture.link("owner-user", "434343", "owner");
+    const service = issueThreadInteractionService(db);
+    const card = await service.create({ id: fixture.issueId, companyId: fixture.companyId }, singleQuestion, { agentId: fixture.agentId });
+    expect(await publicationsFor(fixture.companyId, card.id)).not.toHaveLength(0);
+    await service.answerQuestions({ id: fixture.issueId, companyId: fixture.companyId }, card.id, {
+      answers: [{ questionId: "env", optionIds: ["staging"] }],
+    }, { userId: "owner-user" });
+    const wakeup = vi.fn().mockResolvedValue(null);
+    await questionResponseDeliveryService(db, { heartbeat: { wakeup } as never, steer: vi.fn() }).deliver(card.id);
+    expect(wakeup).toHaveBeenCalledWith(fixture.agentId, expect.objectContaining({
+      payload: expect.objectContaining({ interactionId: card.id, externalChatContinuation: false }),
+    }));
   });
 
   it("formats cards Telegram cannot answer with one tap as text with the task link", async () => {
