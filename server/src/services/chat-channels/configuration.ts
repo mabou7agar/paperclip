@@ -101,6 +101,8 @@ type ChatConfigurationOptions = Pick<ReturnType<typeof createChatCredentials>, "
   nativeBotIdentityClaimBarrier?: () => Promise<void>;
   allowLocalVoiceBoard?: boolean;
   stageConfigurationEffects?: (transaction: Db, endpointId: string, actorUserId: string | null | undefined) => Promise<void>;
+  /** Best effort: log the linked WhatsApp number out once its endpoint is archived. */
+  unlinkWhatsApp?: (endpoint: EndpointRow) => Promise<void>;
 };
 export function createChatConfiguration(db: Db, options: ChatConfigurationOptions) {
   const { endpointRecord, get, withCredentialMutationLease, getWebhookPublicBaseUrl, invalidateRuntime, nativeBotIdentityMatches, assertNativeBotIdentityAvailable, isNativeBotIdentityUniqueViolation, nativeBotIdentityConflict, legacyGitHubLabelsMatchVerifiedCredentials, normalizedCredentials, verifyCredentials, persistCredentials, clearCredentials, resolveCredentials, prepareProviderInventory, reconcileProviderResourceRows, reconcileDiscordCommands, runtimeFor, runtimeContextForRecord, stageTelegramMaintenance, processTelegramMaintenance, recordTelegramStopSubscription, fetchImpl, redactError, runtimeGeneration, leasedChatProvider, PROVIDER_LABELS, SUPPLIED_CREDENTIAL_KEYS, PROVIDER_CREDENTIAL_CHECK_TIMEOUT_MS, isSupportedTelegramWebhookBaseUrl } = options;
@@ -550,6 +552,7 @@ export function createChatConfiguration(db: Db, options: ChatConfigurationOption
       });
       if (endpoint.provider === "slack") await options.slackRegistration.cleanup(endpoint.id, credentialLease);
       await invalidateRuntime(endpoint.id).catch(() => undefined);
+      if (endpoint.provider === "whatsapp") await options.unlinkWhatsApp?.(endpoint).catch(() => undefined);
       if (endpoint.provider === "telegram") {
         await credentialLease.assertOwned();
         const action = await stageTelegramMaintenance(
@@ -571,7 +574,8 @@ export function createChatConfiguration(db: Db, options: ChatConfigurationOption
     ) {
       throw unprocessable("Unsupported chat endpoint setup action");
     }
-    if (!getWebhookPublicBaseUrl() && endpoint.provider !== "discord" && endpoint.provider !== "imessage-photon" && !(endpoint.provider === "github" && endpoint.setup.github?.cloudRegistrationId)) {
+    // WhatsApp events arrive from the sidecar on the private network, so it needs no public URL.
+    if (!getWebhookPublicBaseUrl() && endpoint.provider !== "discord" && endpoint.provider !== "imessage-photon" && endpoint.provider !== "whatsapp" && !(endpoint.provider === "github" && endpoint.setup.github?.cloudRegistrationId)) {
       throw unprocessable(
         `A public HTTPS Paperclip URL is required before connecting ${PROVIDER_LABELS[endpoint.provider]}`,
       );
@@ -960,6 +964,14 @@ export function createChatConfiguration(db: Db, options: ChatConfigurationOption
       intakeAfter: Date.parse(String((endpoint.setup as InternalSetupState).photonIntakeAfter ?? endpoint.setup.testStartedAt ?? endpoint.createdAt.toISOString())),
       credentials: { allocation: credentials.allocation === "shared" ? "shared" : "dedicated", projectId: credentials.projectId, lineId: credentials.lineId, projectSecret: credentials.projectSecret, phoneNumber: endpoint.botExternalId! },
     };
+    if (endpoint.provider === "whatsapp") {
+      if (!endpoint.botExternalId) throw conflict("Link WhatsApp before starting this channel");
+      return {
+        provider: "whatsapp",
+        userName,
+        credentials: { accountId: endpoint.publicId, phoneNumber: endpoint.botExternalId },
+      };
+    }
     if (endpoint.provider === "slack")
       return slackRuntimeConfig(endpoint, userName, credentials);
     if (endpoint.provider === "telegram")

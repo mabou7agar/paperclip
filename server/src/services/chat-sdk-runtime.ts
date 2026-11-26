@@ -1,5 +1,7 @@
 import { isPassiveSlackAction, normalizeSlackSelectionAction, slackSelectionValues } from "./chat-channels/slack/cards.js";
 import { PhotonChatAdapter, parsePhotonThreadId } from "./photon/adapter.js";
+import { WhatsAppChatAdapter, type WhatsAppMediaLocator } from "./whatsapp/adapter.js";
+import { whatsAppSidecarConfig } from "./whatsapp/config.js";
 import { PhotonLineAuthentication } from "./photon/cloud.js";
 import { PhotonState } from "./photon/state.js";
 import { PhotonReceiver } from "./photon/receiver.js";
@@ -137,8 +139,8 @@ const DISCORD_GATEWAY_HEALTHY_SESSION_MS = 60_000;
 
 /** Public Paperclip provider ids. The Teams SDK name remains an internal detail. */
 export type ChatSdkProvider =
-  "slack" | "github" | "discord" | "microsoft-teams" | "telegram" | "imessage-photon";
-type ChatSdkAdapterKey = "slack" | "github" | "discord" | "teams" | "telegram" | "imessage-photon";
+  "slack" | "github" | "discord" | "microsoft-teams" | "telegram" | "imessage-photon" | "whatsapp";
+type ChatSdkAdapterKey = "slack" | "github" | "discord" | "teams" | "telegram" | "imessage-photon" | "whatsapp";
 
 interface ProviderConfigBase {
   /** Agent-derived native bot display/mention name. */
@@ -212,8 +214,14 @@ export interface ResolvedPhotonChatConfig extends ProviderConfigBase {
   intakeAfter: number;
   credentials: { allocation?: "dedicated" | "shared"; projectId: string; projectSecret: string; lineId: string; phoneNumber: string };
 }
+export interface ResolvedWhatsAppChatConfig extends ProviderConfigBase {
+  provider: "whatsapp";
+  /** accountId is the endpoint public id; the sidecar secret is instance-level. */
+  credentials: { accountId: string; phoneNumber: string };
+}
 export type ResolvedChatSdkProviderConfig =
   | ResolvedPhotonChatConfig
+  | ResolvedWhatsAppChatConfig
   | ResolvedSlackChatConfig
   | ResolvedGitHubChatConfig
   | ResolvedDiscordChatConfig
@@ -236,6 +244,7 @@ interface DurableAttachmentMetadata {
 
 type ChatSdkAttachmentLocator =
   | PhotonAttachmentLocator
+  | WhatsAppMediaLocator
   | GitHubPublicAttachmentLocator
   | TeamsInlineImageLocator
   | TelegramMediaLocator
@@ -1360,6 +1369,7 @@ function createProviderAdapter(
   const resolvedLogger = adapterLogger(logger);
   switch (config.provider) {
     case "imessage-photon": throw new Error("Photon adapter requires scoped persistence");
+    case "whatsapp": throw new Error("WhatsApp adapter is constructed by the endpoint runtime");
     case "slack": {
       const adapterConfig: SlackAdapterConfig = {
         ...config.credentials,
@@ -2115,6 +2125,8 @@ export class ChatSdkEndpointRuntime {
       ? new PhotonChatAdapter(options.providerConfig.userName,
           new PhotonLineAuthentication(options.providerConfig.credentials, options.providerConfig.credentials.projectSecret),
           new PhotonState({ companyId: options.companyId, endpointId: options.endpointId }, options.persistence))
+      : options.providerConfig.provider === "whatsapp"
+      ? new WhatsAppChatAdapter(options.providerConfig.userName, options.providerConfig.credentials, () => whatsAppSidecarConfig())
       : createProviderAdapter(
       options.providerConfig,
       options.logger,
@@ -2757,6 +2769,17 @@ export class ChatSdkEndpointRuntime {
       const metadata = durableAttachmentMetadata(attachment);
       return locator && metadata ? { version: 1, provider: "telegram", attachment: metadata, locator } : null;
     }
+    if (this.adapter instanceof WhatsAppChatAdapter) {
+      // Source-bound like Photon: the locator names this account and the
+      // exact inbound message id that carried the media.
+      const locator = attachment.fetchMetadata?.kind === "whatsapp_media" && source?.messageId &&
+        attachment.fetchMetadata.accountId === this.adapter.identity.accountId &&
+        attachment.fetchMetadata.messageId === source.messageId
+        ? { kind: "whatsapp_media" as const, accountId: this.adapter.identity.accountId, messageId: source.messageId }
+        : null;
+      const metadata = durableAttachmentMetadata(attachment);
+      return locator && metadata ? { version: 1, provider: "whatsapp", attachment: metadata, locator } : null;
+    }
     if (this.adapter instanceof PhotonChatAdapter && source?.message) {
       const thread = this.adapter.decodeThreadId(source.threadId);
       const locator = photonAttachmentLocator(attachment, thread.lineId, thread.chatGuid, source.message);
@@ -2932,6 +2955,14 @@ export class ChatSdkEndpointRuntime {
     descriptor: unknown,
     source?: ChatSdkAttachmentSource,
   ): Attachment | null {
+    if (this.adapter instanceof WhatsAppChatAdapter) {
+      if (!isRecord(descriptor) || descriptor.version !== 1 || descriptor.provider !== this.provider || !source || !isRecord(descriptor.locator)) return null;
+      const locator = descriptor.locator;
+      const metadata = isRecord(descriptor.attachment) ? durableAttachmentMetadata(descriptor.attachment as unknown as Attachment) : null;
+      if (!metadata || locator.kind !== "whatsapp_media" || locator.accountId !== this.adapter.identity.accountId || locator.messageId !== source.messageId) return null;
+      const fetcher = this.adapter.mediaFetcher({ kind: "whatsapp_media", accountId: this.adapter.identity.accountId, messageId: source.messageId });
+      return { ...metadata, fetchData: () => fetcher() };
+    }
     if (this.adapter instanceof PhotonChatAdapter && isRecord(descriptor) && descriptor.version === 1 && descriptor.provider === this.provider && source) {
       const parsed = photonAttachmentLocatorSchema.safeParse(descriptor.locator);
       const thread = this.adapter.decodeThreadId(source.threadId);
@@ -3114,6 +3145,7 @@ export class ChatSdkEndpointRuntime {
         };
         break;
       case "photon_attachment":
+      case "whatsapp_media":
       case "teams_inline_image":
         return null; // Only the exact source-bound branch above may authorize it.
       case "telegram_media":

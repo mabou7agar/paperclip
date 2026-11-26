@@ -344,6 +344,7 @@ import {
   inspectPhotonProjectSchema,
   photonProjectIdSchema,
   photonLineIdSchema,
+  whatsAppLinkSchema,
   publishChatPublicationSchema,
   resolveChatActionSchema,
   resolveChatPublicationSchema,
@@ -2709,6 +2710,67 @@ registry.registerPath({
     502: { description: "Photon returned an invalid response; inspect provider health" },
     503: { description: "Photon temporarily unavailable; retry later" },
   },
+});
+
+const whatsAppLinkViewSchema = z.object({
+  state: z.enum(["qr", "pairing_code", "linked", "logged_out", "connecting"]),
+  qrPngDataUrl: z.string().optional(),
+  qrIssuedAt: z.string().datetime().optional(),
+  code: z.string().optional(),
+  linkedAs: z.string().optional(),
+  lastError: z.string().optional(),
+  endpointStatus: z.enum(["draft", "verifying", "active", "paused", "attention", "revoked", "archived"]),
+}).strict();
+const whatsAppErrorResponses = {
+  401: r.unauthorized,
+  403: r.forbidden,
+  404: r.notFound,
+  409: r.conflict,
+  422: r.unprocessable,
+  502: { description: "The WhatsApp service refused Paperclip's signature or answered invalidly" },
+  503: { description: "WhatsApp is not configured on this instance or its service is unavailable; retry later" },
+};
+
+registry.registerPath({
+  "x-paperclip-transport": "rest",
+  "x-paperclip-connection-management": "connections:configure",
+  method: "post",
+  path: "/api/chat-endpoints/{endpointId}/whatsapp/link",
+  tags: ["chat-channels"],
+  summary: "Start or restart linking a WhatsApp number to this channel",
+  description:
+    "Requires connection-management access. `qr` returns a QR code image that WhatsApp refreshes about every 20 seconds; `code` asks WhatsApp for a pairing code for `phone`. Poll the link status until the phone is linked. Responses are not cached.",
+  request: {
+    params: z.object({ endpointId: z.string().uuid() }),
+    body: jsonBody(whatsAppLinkSchema),
+  },
+  responses: { 200: r.ok(whatsAppLinkViewSchema), 400: r.badRequest, ...whatsAppErrorResponses },
+});
+
+registry.registerPath({
+  "x-paperclip-transport": "rest",
+  "x-paperclip-connection-management": "connections:configure",
+  method: "get",
+  path: "/api/chat-endpoints/{endpointId}/whatsapp/link-status",
+  tags: ["chat-channels"],
+  summary: "Read WhatsApp linking state; finishes channel setup once the phone is linked",
+  description:
+    "Requires connection-management access. The first read that sees a linked number verifies it and moves the channel to its test step, exactly like the provider setup action. A logout seen on a live channel moves it to attention. Never returns the WhatsApp service address or secret.",
+  request: { params: z.object({ endpointId: z.string().uuid() }) },
+  responses: { 200: r.ok(whatsAppLinkViewSchema), ...whatsAppErrorResponses },
+});
+
+registry.registerPath({
+  "x-paperclip-transport": "rest",
+  "x-paperclip-connection-management": "connections:configure",
+  method: "post",
+  path: "/api/chat-endpoints/{endpointId}/whatsapp/unlink",
+  tags: ["chat-channels"],
+  summary: "Log the linked WhatsApp number out of this channel",
+  description:
+    "Requires connection-management access. Logs the number out of WhatsApp, deletes its saved login, and moves a live channel to attention until the same number is linked again.",
+  request: { params: z.object({ endpointId: z.string().uuid() }) },
+  responses: { 200: r.ok(whatsAppLinkViewSchema), ...whatsAppErrorResponses },
 });
 
 registry.registerPath({

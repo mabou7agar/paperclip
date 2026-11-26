@@ -355,7 +355,7 @@ async function resolveQuestionResponseChain(
   const provider =
     parent?.provider ??
     (
-      ["slack", "github", "discord", "microsoft-teams", "telegram", "imessage-photon", "speko"] as const
+      ["slack", "github", "discord", "microsoft-teams", "telegram", "imessage-photon", "whatsapp", "speko"] as const
     ).find(
       (candidate) =>
         sourceContext.source === `chat:${candidate}` ||

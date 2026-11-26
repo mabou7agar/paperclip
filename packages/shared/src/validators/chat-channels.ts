@@ -121,6 +121,12 @@ export const inspectPhotonProjectSchema = z.object({
   projectSecret: z.string().min(1).max(4096),
 }).strict();
 
+/** Start or restart WhatsApp linking: a QR code, or a pairing code for a number. */
+export const whatsAppLinkSchema = z.union([
+  z.object({ mode: z.literal("qr") }).strict(),
+  z.object({ mode: z.literal("code"), phone: z.string().trim().min(7).max(32).regex(/^\+?[0-9 ()-]+$/) }).strict(),
+]);
+
 export const configureChatEndpointSchema = z
   .object({
     action: z.enum([

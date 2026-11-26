@@ -94,6 +94,7 @@ function providerSetupState(
     case "speko":
       return { step, providerUrl: "https://platform.speko.ai/", webhookUrl } as const;
     case "imessage-photon": return { step, providerUrl: "https://photon.codes/", testStartedAt: endpoint.setup.testStartedAt } as const;
+    case "whatsapp": return { step, providerUrl: "https://web.whatsapp.com/", testStartedAt: endpoint.setup.testStartedAt } as const;
     case "agentmail": return endpoint.setup;
     case "slack": {
       return slackSetupState({ endpoint, webhookUrl, step, assignedAgentName });
@@ -360,7 +361,7 @@ function providerSetupState(
         // database created before the column default was hardened.
         requireAtMention: input.provider === "slack",
         allowGroupChats: !["microsoft-teams", "speko"].includes(input.provider),
-        allowUnlinkedPeople: !["slack", "imessage-photon", "speko"].includes(input.provider),
+        allowUnlinkedPeople: !["slack", "imessage-photon", "whatsapp", "speko"].includes(input.provider),
         capabilities: CAPABILITIES[input.provider],
         setup: {
           step: "provider_setup",

@@ -10,6 +10,7 @@ import { verifyGitHubCredentials } from "./github/credentials.js";
 import { verifySpekoCredentials } from "./speko/credentials.js";
 import { verifyTeamsCredentials } from "./microsoft-teams/credentials.js";
 import { createPhotonCredentialChecks } from "./imessage-photon/credentials.js";
+import type { createWhatsAppCredentialChecks } from "./whatsapp/credentials.js";
 
 import type { EndpointRow, DbOrTransaction } from "./runtime-types.js";
 
@@ -83,10 +84,11 @@ type ChatCredentialsOptions = {
   redactError: (error: unknown) => string;
   credentialFingerprint: (refs: ToolCredentialSecretRef[]) => string;
   verifyPhotonCredentials: ReturnType<typeof createPhotonCredentialChecks>["verifyPhotonCredentials"];
+  verifyWhatsAppCredentials: ReturnType<typeof createWhatsAppCredentialChecks>["verifyWhatsAppCredentials"];
   preservesWebhookVerification?: (endpoint: EndpointRow, setup: EndpointRow["setup"], credentials: Record<string, string>) => boolean;
 };
 export function createChatCredentials(db: Db, options: ChatCredentialsOptions) {
-  const { secrets, PROVIDER_LABELS, REQUIRED_CREDENTIALS, PROVIDER_CREDENTIAL_CHECK_TIMEOUT_MS, fetchImpl, redactError, credentialFingerprint, verifyPhotonCredentials } = options;
+  const { secrets, PROVIDER_LABELS, REQUIRED_CREDENTIALS, PROVIDER_CREDENTIAL_CHECK_TIMEOUT_MS, fetchImpl, redactError, credentialFingerprint, verifyPhotonCredentials, verifyWhatsAppCredentials } = options;
 
 
   async function normalizedCredentials(
@@ -100,6 +102,8 @@ export function createChatCredentials(db: Db, options: ChatCredentialsOptions) {
       if (typeof rawValue === "string" && rawValue.trim())
         values[key] = key === "privateKey" ? rawValue : rawValue.trim();
     }
+    // WhatsApp's only identity is the endpoint itself; the sidecar secret is instance-level.
+    if (endpoint.provider === "whatsapp") values.accountId = endpoint.publicId;
     if (endpoint.provider === "telegram" && !values.webhookSecret) {
       values.webhookSecret = randomBytes(32).toString("hex");
     }
@@ -123,6 +127,7 @@ export function createChatCredentials(db: Db, options: ChatCredentialsOptions) {
     credentials: Record<string, string>,
   ): Promise<VerifiedProviderIdentity> {
     if (provider === "imessage-photon") return verifyPhotonCredentials(credentials);
+    if (provider === "whatsapp") return verifyWhatsAppCredentials(credentials);
     if (provider === "slack") return verifySlackCredentials(credentials, fetchImpl, PROVIDER_CREDENTIAL_CHECK_TIMEOUT_MS);
     if (provider === "discord") return verifyDiscordCredentials(credentials, fetchImpl, redactError);
     if (provider === "telegram") return verifyTelegramCredentials(credentials, fetchImpl, PROVIDER_CREDENTIAL_CHECK_TIMEOUT_MS);
@@ -151,7 +156,9 @@ export function createChatCredentials(db: Db, options: ChatCredentialsOptions) {
     return (
       provider === "github" ||
       provider === "discord" ||
-      provider === "microsoft-teams" || provider === "imessage-photon"
+      provider === "microsoft-teams" || provider === "imessage-photon" ||
+      // One phone number is one WhatsApp identity across every company.
+      provider === "whatsapp"
     );
   }
 
@@ -208,7 +215,7 @@ export function createChatCredentials(db: Db, options: ChatCredentialsOptions) {
             : eq(chatEndpoints.companyId, endpoint.companyId),
           eq(chatEndpoints.provider, endpoint.provider),
           ne(chatEndpoints.id, endpoint.id),
-          endpoint.provider === "imessage-photon" ? ne(chatEndpoints.status, "archived") : inArray(chatEndpoints.status, [
+          endpoint.provider === "imessage-photon" || endpoint.provider === "whatsapp" ? ne(chatEndpoints.status, "archived") : inArray(chatEndpoints.status, [
             "verifying",
             "active",
             "paused",
@@ -248,6 +255,7 @@ export function createChatCredentials(db: Db, options: ChatCredentialsOptions) {
   function isNativeBotIdentityUniqueViolation(error: unknown): boolean {
     return (
       isUniqueViolation(error, "chat_endpoints_photon_number_uq") ||
+      isUniqueViolation(error, "chat_endpoints_whatsapp_number_uq") ||
       isUniqueViolation(error, "chat_endpoints_live_bot_external_uq") ||
       isUniqueViolation(error, "chat_endpoints_live_discord_bot_external_uq") ||
       isUniqueViolation(
@@ -306,6 +314,7 @@ export function createChatCredentials(db: Db, options: ChatCredentialsOptions) {
     try {
       for (const [key, value] of Object.entries(credentials)) {
         if (endpoint.provider === "imessage-photon" && key !== "projectSecret") continue;
+        if (endpoint.provider === "whatsapp") continue; // nothing secret is stored per endpoint
         await credentialLease.assertOwned();
         const suffix = randomUUID();
         const secret = await secrets.create(
@@ -535,6 +544,7 @@ export function createChatCredentials(db: Db, options: ChatCredentialsOptions) {
       ? connection.refs.filter(ref => secretKeys.includes(ref.configPath.replace(/^credentials\./, "")))
       : connection.refs;
     const values = await resolveCredentialRefs(endpoint, refs, database);
+    if (endpoint.provider === "whatsapp") return { ...values, accountId: endpoint.publicId };
     if (endpoint.provider === "imessage-photon") {
       const configuration = photonChannelConfigurationSchema.parse(connection.config.photon);
       return { ...values, ...configuration, lineId: configuration.allocation === "shared" ? photonSharedScope(configuration.projectId) : configuration.lineId };

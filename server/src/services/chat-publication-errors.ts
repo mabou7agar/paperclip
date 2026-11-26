@@ -194,6 +194,16 @@ export function classifyChatPublicationError(
     .filter((candidate): candidate is string => typeof candidate === "string")
     .map((candidate) => candidate.toLowerCase());
   const reason = text(error);
+  if (names.includes("WhatsAppSidecarError")) {
+    // The sidecar deduplicates every send by its publication-derived key and
+    // joins an in-flight send with the same key, so an unanswered send is safe
+    // to repeat: the retry returns the first message id instead of a duplicate.
+    if (codes.includes("delivery_unknown") || codes.includes("unavailable") || codes.includes("invalid_response")) {
+      return { kind: "retry", retryAfterMs: Math.min(60_000, 2000 * 2 ** Math.min(attempt, 5)), providerRateLimit: status === 429, reason };
+    }
+    if (codes.includes("not_linked") || codes.includes("unauthorized")) return { kind: "endpoint_attention", reason };
+    return { kind: "failed", reason };
+  }
   if (names.includes("PhotonError")) {
     if (codes.includes("delivery_unknown")) return { kind: "delivery_unknown", reason };
     if (codes.includes("credentials") || codes.includes("line_unavailable") || codes.includes("history_gap")) {
