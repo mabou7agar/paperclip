@@ -5,6 +5,7 @@ import {
   agentWakeupRequests,
   agents,
   activityLog,
+  chatConversations,
   chatPublications,
   heartbeatRuns,
   issueComments,
@@ -24,6 +25,7 @@ import { logActivity } from "./activity-log.js";
 import type { heartbeatService } from "./heartbeat.js";
 import { nativeSha256 } from "./native-runtime/canonical.js";
 import { DELIVERY_QUEUES } from "./delivery-work-notifications.js";
+import { ordinaryChatConversation } from "./owner-card-push.js";
 import type { createDeliveryWorkCoordinator } from "./delivery-work-coordinator.js";
 
 const DELIVERY_CLAIM_STALE_MS = 30_000;
@@ -841,9 +843,14 @@ export function questionResponseDeliveryService(
               .limit(1)
               .then((rows) => rows[0] ?? null)
           : Promise.resolve(null),
+        // A card the owner-card push copied to Telegram is still an ordinary
+        // task card: its owner-card conversation (non-positive generation) must
+        // not turn the answer into an external-chat continuation, which only an
+        // answer bound to that chat turn can satisfy.
         db
           .select({ id: chatPublications.id })
           .from(chatPublications)
+          .innerJoin(chatConversations, eq(chatConversations.id, chatPublications.conversationId))
           .where(
             and(
               eq(chatPublications.companyId, interaction.companyId),
@@ -852,6 +859,7 @@ export function questionResponseDeliveryService(
                 sql<string>`${chatPublications.payload}->>'interactionId'`,
                 interaction.id,
               ),
+              ordinaryChatConversation(),
             ),
           )
           .limit(1)
@@ -959,10 +967,12 @@ export function questionResponseDeliveryService(
               interactionId: sql<string>`${chatPublications.payload}->>'interactionId'`,
             })
             .from(chatPublications)
+            .innerJoin(chatConversations, eq(chatConversations.id, chatPublications.conversationId))
             .where(
               and(
                 eq(chatPublications.companyId, interaction.companyId),
                 eq(chatPublications.issueId, interaction.issueId),
+                ordinaryChatConversation(),
                 inArray(chatPublications.state, [
                   "published",
                   "streaming",
