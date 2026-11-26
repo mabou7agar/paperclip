@@ -88,6 +88,7 @@ const providerNames: Record<ChatProvider, string> = {
   "microsoft-teams": "Microsoft Teams",
   telegram: "Telegram",
   "imessage-photon": "iMessage Photon",
+  whatsapp: "WhatsApp",
 };
 
 const providerLifecycleGuidance: Record<
@@ -126,6 +127,10 @@ const providerLifecycleGuidance: Record<
   "imessage-photon": {
     reconnect: "Reconnect verifies the same Photon project and line allocation, then recovers eligible missed messages.",
     remove: "Disconnect archives this channel and removes its saved secret. Your Photon project, number, subscription, and Messages history remain in Photon.",
+  },
+  whatsapp: {
+    reconnect: "Reconnect links the same WhatsApp number again by QR code or pairing code. A different number needs a new channel.",
+    remove: "Disconnect archives this channel and logs the number out of WhatsApp. Messages already on the phone stay in WhatsApp.",
   },
   telegram: {
     reconnect:

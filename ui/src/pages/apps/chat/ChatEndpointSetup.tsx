@@ -13,6 +13,7 @@ import { SetupWizardFooter } from "@/components/SetupWizard";
 import { ChatSetupNavigation } from "@/components/chat/ChatSetupNavigation";
 import { SlackIdentityStep } from "./SlackIdentityStep";
 import { PhotonConnectStep } from "./PhotonConnectStep";
+import { WhatsAppConnectStep } from "./WhatsAppConnectStep";
 import { EmailEndpointSetup } from "./EmailEndpointSetup";
 import {
   useEffect,
@@ -66,6 +67,7 @@ const providerNames: Record<ChatProvider, string> = {
   "microsoft-teams": "Microsoft Teams",
   telegram: "Telegram",
   "imessage-photon": "iMessage Photon",
+  whatsapp: "WhatsApp",
 };
 
 const knownProviders = new Set(Object.keys(providerNames));
@@ -318,7 +320,7 @@ function ChatSdkEndpointSetup() {
       setManagedAutoStart(!exit);
       setViewedStep(exit ? 0 : null);
       syncEndpointSnapshot(next);
-      if (next.provider === "imessage-photon" || next.provider === "slack" || next.provider === "speko") {
+      if (next.provider === "imessage-photon" || next.provider === "whatsapp" || next.provider === "slack" || next.provider === "speko") {
         const resumed = new URLSearchParams(params);
         resumed.set("resume", next.id);
         setParams(resumed, { replace: true });
@@ -938,6 +940,7 @@ function ProviderConnectStep({
   );
   if (provider === "speko") return <SpekoProviderSetup onSaveExit={() => navigate("/apps")} agentName={agentName} credentials={credentials} onChange={setCredentials} onConnect={(values) => onAction(repairing ? "reconnect" : "configure", values)} callbackUrl={endpoint.setup?.webhookUrl} pending={pending} repairing={repairing} signingSecretConfigured={endpoint.setup?.webhookSecretConfigured} />;
   if (provider === "imessage-photon") return <PhotonConnectStep endpoint={endpoint} agentName={agentName} repairing={repairing} pending={pending} onAction={onAction} />;
+  if (provider === "whatsapp") return <WhatsAppConnectStep endpoint={endpoint} agentName={agentName} repairing={repairing} onEndpointSaved={onEndpointSaved} />;
   if (provider === "discord") {
     const applicationId = credentials.applicationId?.trim() ?? "";
     const guildId = credentials.guildId?.trim() ?? "";
@@ -1820,7 +1823,7 @@ function TryStep({
     (identity) => identity.status !== "linked",
   );
   const freshConversationInstruction =
-    provider === "imessage-photon" ? "send a fresh message to your Photon number" : provider === "telegram"
+    provider === "imessage-photon" ? "send a fresh message to your Photon number" : provider === "whatsapp" ? "send a fresh message to the linked WhatsApp number" : provider === "telegram"
       ? "start a fresh conversation with /new and send the test message again"
       : provider === "github"
         ? "start a new issue or pull request conversation and mention the agent again"
@@ -1829,6 +1832,8 @@ function TryStep({
           : "send a new root mention to the agent";
   const identityGuidance = provider === "slack" ? null : provider === "imessage-photon" && principalsLoaded && (identities.length === 0 || unlinkedIdentities.length > 0)
     ? { tone: "info" as const, title: "Link your Messages identity", body: "Send one message to discover your phone number or Apple account address, then link that exact identity in Access. Send a fresh request after linking; earlier messages do not start work." }
+    : provider === "whatsapp" && principalsLoaded && (identities.length === 0 || unlinkedIdentities.length > 0)
+    ? { tone: "info" as const, title: "Link your WhatsApp number", body: "Send one message from your own WhatsApp to the linked number, then link the discovered number to your Paperclip account in Access. Send a fresh request after linking; earlier messages do not start work." }
     : principalsFailed
     ? {
         tone: "warning" as const,
@@ -1883,6 +1888,11 @@ function TryStep({
       "Link the discovered sender to a Paperclip person in Access, then send a fresh request.",
       "Wait for the agent’s actual reply. Setup completes after that reply is delivered.",
       ...(photonAllocation === "shared" ? ["This Pro-compatible channel supports DMs only. Group messages cannot start work."] : ["For a group: add the number in Messages, send a message, enable the discovered group in Settings, then send a fresh request."]),
+    ] : provider === "whatsapp" ? [
+      `From your own WhatsApp, send a fresh message to ${botUsername ?? botLabel ?? "the linked number"}.`,
+      "Link the discovered number to a Paperclip person in Access, then send a fresh request.",
+      "Wait for the agent’s actual reply. Setup completes after that reply is delivered.",
+      "Direct messages only. Group messages are ignored.",
     ] : provider === "discord"
       ? [
           "Open a text channel where the bot is installed.",
