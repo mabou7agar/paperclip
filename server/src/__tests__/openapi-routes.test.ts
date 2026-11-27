@@ -811,6 +811,8 @@ describe("openapi routes", () => {
       ["post", "/api/chat-endpoints/{endpointId}/whatsapp/link"],
       ["get", "/api/chat-endpoints/{endpointId}/whatsapp/link-status"],
       ["post", "/api/chat-endpoints/{endpointId}/whatsapp/unlink"],
+      ["get", "/api/chat-endpoints/{endpointId}/whatsapp/known-people"],
+      ["put", "/api/chat-endpoints/{endpointId}/whatsapp/known-people"],
       ["get", "/api/chat-endpoints/{endpointId}/resources"],
       ["put", "/api/chat-endpoints/{endpointId}/resources"],
       ["get", "/api/chat-endpoints/{endpointId}/principals"],

@@ -345,6 +345,7 @@ import {
   photonProjectIdSchema,
   photonLineIdSchema,
   whatsAppLinkSchema,
+  whatsAppKnownPeopleSchema,
   publishChatPublicationSchema,
   resolveChatActionSchema,
   resolveChatPublicationSchema,
@@ -2713,7 +2714,7 @@ registry.registerPath({
 });
 
 const whatsAppLinkViewSchema = z.object({
-  state: z.enum(["qr", "pairing_code", "linked", "logged_out", "connecting"]),
+  state: z.enum(["qr", "pairing_code", "linked", "logged_out", "connecting", "paused"]),
   qrPngDataUrl: z.string().optional(),
   qrIssuedAt: z.string().datetime().optional(),
   code: z.string().optional(),
@@ -2768,9 +2769,38 @@ registry.registerPath({
   tags: ["chat-channels"],
   summary: "Log the linked WhatsApp number out of this channel",
   description:
-    "Requires connection-management access. Logs the number out of WhatsApp, deletes its saved login, and moves a live channel to attention until the same number is linked again.",
+    "Requires connection-management access. Logs the number out of WhatsApp, deletes its saved login, forgets the number, and moves a live channel to attention until a number (the same or a different one) is linked again.",
   request: { params: z.object({ endpointId: z.string().uuid() }) },
   responses: { 200: r.ok(whatsAppLinkViewSchema), ...whatsAppErrorResponses },
+});
+
+const whatsAppKnownPeopleResponseSchema = z.object({
+  people: z.array(z.object({ phone: z.string(), paperclipUserId: z.string() }).strict()),
+}).strict();
+
+registry.registerPath({
+  "x-paperclip-transport": "rest",
+  "x-paperclip-connection-management": "connections:configure",
+  method: "get",
+  path: "/api/chat-endpoints/{endpointId}/whatsapp/known-people",
+  tags: ["chat-channels"],
+  summary: "List the WhatsApp numbers pre-approved for this channel",
+  description: "Requires connection-management access; people only. Each entry maps a number (E.164 digits) to a Paperclip user.",
+  request: { params: z.object({ endpointId: z.string().uuid() }) },
+  responses: { 200: r.ok(whatsAppKnownPeopleResponseSchema), ...whatsAppErrorResponses },
+});
+
+registry.registerPath({
+  "x-paperclip-transport": "rest",
+  "x-paperclip-connection-management": "connections:configure",
+  method: "put",
+  path: "/api/chat-endpoints/{endpointId}/whatsapp/known-people",
+  tags: ["chat-channels"],
+  summary: "Replace the WhatsApp numbers pre-approved for this channel",
+  description:
+    "Requires connection-management access; people only. At most 500 entries; every user must be an active member of the company. The first message from a listed number links it to its user (a normal identity link) and is handled as that user. A link an admin removed is not recreated.",
+  request: { params: z.object({ endpointId: z.string().uuid() }), body: jsonBody(whatsAppKnownPeopleSchema) },
+  responses: { 200: r.ok(whatsAppKnownPeopleResponseSchema), 400: r.badRequest, ...whatsAppErrorResponses },
 });
 
 registry.registerPath({

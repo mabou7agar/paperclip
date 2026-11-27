@@ -19,6 +19,7 @@ import {
   configureChatEndpointSchema,
   inspectPhotonProjectSchema,
   whatsAppLinkSchema,
+  whatsAppKnownPeopleSchema,
   confirmChatIdentityLinkSchema,
   createChatEndpointSchema,
   createChatIdentityLinkIntentSchema,
@@ -460,6 +461,19 @@ export function chatChannelRoutes(db: Db, options: ChatChannelRouteOptions) {
     if (!(await assertEndpointManagementAccess(req, res))) return;
     res.set("Cache-Control", "no-store");
     res.json(await service.unlinkWhatsApp(endpointId(req)));
+  });
+
+  // Pre-approved WhatsApp numbers: people only, like linking.
+  router.get("/chat-endpoints/:endpointId/whatsapp/known-people", whatsAppPeopleOnly, managementGuard("connections:configure", "GET /chat-endpoints/:endpointId/whatsapp/known-people"), async (req, res) => {
+    if (!(await assertEndpointManagementAccess(req, res))) return;
+    res.set("Cache-Control", "no-store");
+    res.json(await service.whatsAppKnownPeople(endpointId(req)));
+  });
+
+  router.put("/chat-endpoints/:endpointId/whatsapp/known-people", whatsAppPeopleOnly, managementGuard("connections:configure", "PUT /chat-endpoints/:endpointId/whatsapp/known-people"), validate(whatsAppKnownPeopleSchema), async (req, res) => {
+    if (!(await assertEndpointManagementAccess(req, res))) return;
+    res.set("Cache-Control", "no-store");
+    res.json(await service.replaceWhatsAppKnownPeople(endpointId(req), req.body, actorUserId(req) ?? null));
   });
 
   router.post(
