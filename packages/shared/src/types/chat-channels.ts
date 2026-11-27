@@ -245,10 +245,26 @@ export interface ChatEndpointSetupState {
   /** True when at least one previously observed callback still targets an old public URL. */
   callbacksNeedUpdate?: boolean;
   /**
-   * Telegram only. Pending owner question cards on ordinary tasks are pushed to
-   * the linked owner's Telegram DM unless this is explicitly false.
+   * Telegram and WhatsApp. Pending owner question cards on ordinary tasks are
+   * pushed to the linked owner's DM unless this is explicitly false.
    */
   ownerCardPush?: boolean;
+  /**
+   * WhatsApp only. What happens to messages from people who are not linked to
+   * a Paperclip user: "ignore" (no reply) or "client" (answered as a customer,
+   * restricted to customer questions). Mirrors allowUnlinkedPeople.
+   */
+  whatsAppUnknownSenders?: WhatsAppUnknownSenderPolicy;
+  /** WhatsApp only: per-customer message limit before messages are ignored. */
+  whatsAppCustomerRateLimit?: WhatsAppCustomerRateLimit;
+}
+
+export type WhatsAppUnknownSenderPolicy = "ignore" | "client";
+
+export interface WhatsAppCustomerRateLimit {
+  /** Messages one unlinked sender may send within the window. */
+  messages: number;
+  windowMinutes: number;
 }
 
 export interface ChatEndpointSetupSecret {
@@ -548,8 +564,12 @@ export interface UpdateChatEndpointInput {
   requireAtMention?: boolean;
   allowGroupChats?: boolean;
   allowUnlinkedPeople?: boolean;
-  /** Telegram only: push owner question cards to the linked owner's DM (default on). */
+  /** Telegram and WhatsApp: push owner question cards to the linked owner's DM (default on). */
   ownerCardPush?: boolean;
+  /** WhatsApp only: ignore unlinked senders, or answer them as customers. */
+  whatsAppUnknownSenders?: WhatsAppUnknownSenderPolicy;
+  /** WhatsApp only: per-customer message limit. */
+  whatsAppCustomerRateLimit?: WhatsAppCustomerRateLimit;
 }
 
 export interface ConfigureChatEndpointInput {

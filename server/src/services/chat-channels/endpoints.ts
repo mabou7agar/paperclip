@@ -1,4 +1,5 @@
 import { notifyChatCompanyAuthorityChange } from "../chat-run-milestone-notifications.js";
+import { whatsAppCustomerRateLimit, whatsAppUnknownSenderPolicy } from "./whatsapp/customers.js";
 import { supportsChatCommunicationInstructions } from "../chat-communication-guidance.js";
 import { chatConnectionTransport } from "./provider-catalog.js";
 import type { ConnectionManagementContext } from "../connection-management.js";
@@ -178,6 +179,13 @@ function providerSetupState(
           row.assignedAgentName,
         ),
         ...(endpoint.provider === "telegram" ? { ownerCardPush: endpoint.setup?.ownerCardPush !== false } : {}),
+        ...(endpoint.provider === "whatsapp"
+          ? {
+              ownerCardPush: endpoint.setup?.ownerCardPush !== false,
+              whatsAppUnknownSenders: whatsAppUnknownSenderPolicy(endpoint),
+              whatsAppCustomerRateLimit: whatsAppCustomerRateLimit(endpoint.setup),
+            }
+          : {}),
         ...(endpoint.provider === "github"
           ? {
               webhookSecretConfigured: row.credentialSecretRefs.some(
@@ -456,16 +464,29 @@ function providerSetupState(
         if (input.allowUnlinkedPeople !== undefined)
           values.allowUnlinkedPeople = input.allowUnlinkedPeople;
         if (input.ownerCardPush !== undefined) {
-          if (existing.endpoint.provider !== "telegram")
-            throw unprocessable("Owner card push only applies to Telegram connections");
+          if (existing.endpoint.provider !== "telegram" && existing.endpoint.provider !== "whatsapp")
+            throw unprocessable("Owner card push only applies to Telegram and WhatsApp connections");
           values.setup = { ...(values.setup ?? existing.endpoint.setup), ownerCardPush: input.ownerCardPush };
+        }
+        // WhatsApp's unknown-sender policy is the provider-neutral unlinked-people
+        // switch: "client" answers unlinked senders as restricted customers.
+        if (input.whatsAppUnknownSenders !== undefined || input.whatsAppCustomerRateLimit !== undefined) {
+          if (existing.endpoint.provider !== "whatsapp")
+            throw unprocessable("Unknown-sender settings only apply to WhatsApp connections");
+          if (input.whatsAppUnknownSenders !== undefined) {
+            if (input.allowUnlinkedPeople !== undefined && input.allowUnlinkedPeople !== (input.whatsAppUnknownSenders === "client"))
+              throw unprocessable("allowUnlinkedPeople and whatsAppUnknownSenders disagree");
+            values.allowUnlinkedPeople = input.whatsAppUnknownSenders === "client";
+          }
+          if (input.whatsAppCustomerRateLimit !== undefined)
+            values.setup = { ...(values.setup ?? existing.endpoint.setup), whatsAppCustomerRateLimit: input.whatsAppCustomerRateLimit };
         }
         await managementContext?.reauthorize();
       await db.transaction(async (tx) => {
           await credentialLease.assertOwned(tx);
           if ((input.allowDirectMessages === true && !existing.endpoint.allowDirectMessages)
             || (input.allowGroupChats === true && !existing.endpoint.allowGroupChats)
-            || (input.allowUnlinkedPeople === true && !existing.endpoint.allowUnlinkedPeople)) {
+            || (values.allowUnlinkedPeople === true && !existing.endpoint.allowUnlinkedPeople)) {
             await notifyChatCompanyAuthorityChange(tx, { companyId: existing.endpoint.companyId });
           }
           if (input.executionDefaults !== undefined) {

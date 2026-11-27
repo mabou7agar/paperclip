@@ -104,6 +104,11 @@ export const updateChatEndpointSchema = z
     allowGroupChats: z.boolean().optional(),
     allowUnlinkedPeople: z.boolean().optional(),
     ownerCardPush: z.boolean().optional(),
+    whatsAppUnknownSenders: z.enum(["ignore", "client"]).optional(),
+    whatsAppCustomerRateLimit: z.object({
+      messages: z.number().int().min(1).max(200),
+      windowMinutes: z.number().int().min(1).max(1440),
+    }).strict().optional(),
   })
   .strict()
   .refine((value) => Object.keys(value).length > 0, {
@@ -126,6 +131,14 @@ export const whatsAppLinkSchema = z.union([
   z.object({ mode: z.literal("qr") }).strict(),
   z.object({ mode: z.literal("code"), phone: z.string().trim().min(7).max(32).regex(/^\+?[0-9 ()-]+$/) }).strict(),
 ]);
+
+/** WhatsApp pre-approved people: number (E.164 digits, optional "+") -> Paperclip user. */
+export const whatsAppKnownPeopleSchema = z.object({
+  people: z.array(z.object({
+    phone: z.string().trim().regex(/^\+?\d{6,15}$/),
+    paperclipUserId: z.string().trim().min(1).max(128),
+  }).strict()).max(500),
+}).strict();
 
 export const configureChatEndpointSchema = z
   .object({
