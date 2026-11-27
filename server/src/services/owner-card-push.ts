@@ -1,4 +1,4 @@
-import { and, eq, gt, isNotNull, isNull, lte, ne, sql } from "drizzle-orm";
+import { and, eq, gt, inArray, isNotNull, isNull, lte, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   chatConversations,
@@ -8,10 +8,13 @@ import {
   companyMemberships,
 } from "@paperclipai/db";
 import type { ChatEndpointSetupState, IssueThreadInteraction } from "@paperclipai/shared";
+import { whatsAppThreadId } from "./whatsapp/parse.js";
 
 /**
  * Owner card push delivers pending owner question cards (ask_user_questions and
- * request_confirmation) on ordinary tasks to the owner's Telegram DM.
+ * request_confirmation) on ordinary tasks to the owner's Telegram or WhatsApp
+ * DM. WhatsApp has no buttons: the card is sent as a numbered text prompt and
+ * the owner's numbered reply resolves through the same action ledger.
  *
  * chat_publications and callback actions both need a chat_conversations row
  * bound to the interaction's task. An ordinary chat conversation changes task
@@ -35,9 +38,23 @@ type OwnerPushDb = Pick<Db, "select" | "insert" | "update">;
 type EndpointRow = typeof chatEndpoints.$inferSelect;
 type ConversationRow = typeof chatConversations.$inferSelect;
 
-/** Defaults on for Telegram; `setup.ownerCardPush = false` switches it off. */
+export const OWNER_CARD_PROVIDERS = ["telegram", "whatsapp"] as const;
+
+/** Defaults on for Telegram and WhatsApp; `setup.ownerCardPush = false` switches it off. */
 export function ownerCardPushEnabled(endpoint: { provider: string; setup: ChatEndpointSetupState | null | undefined }) {
-  return endpoint.provider === "telegram" && endpoint.setup?.ownerCardPush !== false;
+  return (OWNER_CARD_PROVIDERS as readonly string[]).includes(endpoint.provider) && endpoint.setup?.ownerCardPush !== false;
+}
+
+/**
+ * Whether a linked principal can be addressed in a private chat. A Telegram
+ * private chat id equals the user's id (group ids are negative). A WhatsApp
+ * owner must be known by phone number; a hidden-id ("lid:") sender cannot be
+ * addressed by number and is never pushed to.
+ */
+export function ownerCardPrincipalAddressable(provider: string, externalId: string): boolean {
+  if (provider === "telegram") return /^[1-9]\d*$/.test(externalId);
+  if (provider === "whatsapp") return /^\d{6,20}$/.test(externalId);
+  return false;
 }
 
 export function isOwnerCardInteraction(interaction: IssueThreadInteraction) {
@@ -142,7 +159,7 @@ export async function resolveOwnerCardRecipients(
         eq(chatIdentityLinks.status, "linked"),
         isNotNull(chatIdentityLinks.paperclipUserId),
         isNull(chatIdentityLinks.revokedAt),
-        eq(chatEndpoints.provider, "telegram"),
+        inArray(chatEndpoints.provider, [...OWNER_CARD_PROVIDERS]),
         eq(chatEndpoints.status, "active"),
         eq(chatEndpoints.allowDirectMessages, true),
         eq(chatExternalPrincipals.kind, "user"),
@@ -159,8 +176,7 @@ export async function resolveOwnerCardRecipients(
         row.userId !== null &&
         !excluded.has(row.endpoint.id) &&
         ownerCardPushEnabled(row.endpoint) &&
-        // A Telegram private chat id equals the user's id; group ids are negative.
-        /^[1-9]\d*$/.test(row.principal.externalId),
+        ownerCardPrincipalAddressable(row.endpoint.provider, row.principal.externalId),
     )
     .map((row) => ({
       endpointId: row.endpoint.id,
@@ -173,7 +189,12 @@ export async function resolveOwnerCardRecipients(
   return chooseOwnerCardRecipients(candidates, interaction);
 }
 
-export function ownerCardThreadId(externalUserId: string) {
+export function ownerCardThreadId(
+  externalUserId: string,
+  endpoint: { provider: string; publicId: string } = { provider: "telegram", publicId: "" },
+) {
+  if (endpoint.provider === "whatsapp")
+    return whatsAppThreadId({ accountId: endpoint.publicId, jid: `${externalUserId}@s.whatsapp.net` });
   return `telegram:${externalUserId}`;
 }
 
@@ -188,7 +209,7 @@ export async function getOrCreateOwnerCardConversation(
   input: { recipient: OwnerCardRecipient; issueId: string },
 ): Promise<ConversationRow> {
   const { endpoint, principal } = input.recipient;
-  const threadId = ownerCardThreadId(principal.externalId);
+  const threadId = ownerCardThreadId(principal.externalId, endpoint);
   const findExisting = () =>
     db
       .select()
@@ -239,7 +260,9 @@ export async function getOrCreateOwnerCardConversation(
       externalConversationId: threadId,
       externalThreadId: threadId,
       sessionGeneration,
-      externalLabel: principal.displayName ?? (principal.handle ? `@${principal.handle.replace(/^@/, "")}` : "Telegram direct message"),
+      externalLabel: principal.displayName ?? (endpoint.provider === "whatsapp"
+        ? principal.handle ?? "WhatsApp direct message"
+        : principal.handle ? `@${principal.handle.replace(/^@/, "")}` : "Telegram direct message"),
       providerUrl: null,
       isDirectMessage: true,
       communicationGuidance: null,

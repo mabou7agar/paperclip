@@ -1,4 +1,4 @@
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, ne } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { chatEndpoints, toolConnections } from "@paperclipai/db";
 import type { ChatEndpointStatus } from "@paperclipai/shared";
@@ -8,6 +8,7 @@ import { notifyChatConnectionHealth } from "../connection-health-notifications.j
 import { notifyChatEndpointConfiguration } from "../configuration-work-notifications.js";
 import type { EndpointRecord } from "../runtime-types.js";
 import { whatsAppHttpError } from "./credentials.js";
+import { CAPABILITIES } from "../provider-catalog.js";
 
 export type WhatsAppLinkMode = "qr" | "code";
 
@@ -107,22 +108,64 @@ export function createWhatsAppSetup(db: Db, options: WhatsAppSetupOptions) {
     let endpoint = await whatsAppEndpoint(endpointId);
     const status = await client.status(endpoint.publicId).catch(whatsAppHttpError);
     if (status.state === "linked" && CONFIGURABLE.has(endpoint.status)) {
+      await refreshCapabilities(endpointId);
       await configureLinked(endpointId, endpoint.publicId);
       endpoint = await whatsAppEndpoint(endpointId);
     } else if (status.state === "logged_out" && LIVE.includes(endpoint.status) && endpoint.botExternalId) {
       await markUnlinked(endpointId, "WhatsApp was logged out on the phone; link it again");
+      await forgetNumber(endpointId);
       endpoint = await whatsAppEndpoint(endpointId);
     }
     return view(status, endpoint.status);
+  }
+
+  /**
+   * Forget the number this channel was linked to, so the same channel can be
+   * linked to a different number afterwards. Setup otherwise refuses a new
+   * identity once one was claimed; for WhatsApp the operator unlinked (or the
+   * phone logged out), so the old number no longer belongs to this channel.
+   * Clearing bot_external_id also frees the number's unique index.
+   */
+  async function forgetNumber(endpointId: string) {
+    await db.transaction(async (tx) => {
+      const [endpoint] = await tx
+        .select()
+        .from(chatEndpoints)
+        .where(and(eq(chatEndpoints.id, endpointId), eq(chatEndpoints.provider, "whatsapp"), ne(chatEndpoints.status, "archived")))
+        .for("update");
+      if (!endpoint || endpoint.botExternalId === null) return;
+      await notifyChatEndpointConfiguration(tx, endpoint);
+      await tx
+        .update(chatEndpoints)
+        .set({
+          ...(LIVE.includes(endpoint.status) ? { status: "attention" as const } : {}),
+          providerAccountId: null,
+          providerAccountLabel: null,
+          botExternalId: null,
+          botUsername: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(chatEndpoints.id, endpointId));
+    });
+    await invalidateRuntime(endpointId).catch(() => undefined);
   }
 
   async function unlink(endpointId: string): Promise<WhatsAppLinkView> {
     const endpoint = await whatsAppEndpoint(endpointId);
     await client.unlink(endpoint.publicId).catch(whatsAppHttpError);
     await markUnlinked(endpointId, "WhatsApp was unlinked; link it again to receive messages");
+    await forgetNumber(endpointId);
     const current = await whatsAppEndpoint(endpointId);
     return { state: "logged_out", endpointStatus: current.status };
   }
 
-  return { startLink, linkStatus, unlink, markUnlinked };
+  /** Refresh the stored adapter capabilities (phase 3 added reactions). */
+  async function refreshCapabilities(endpointId: string) {
+    await db
+      .update(chatEndpoints)
+      .set({ capabilities: CAPABILITIES.whatsapp, updatedAt: new Date() })
+      .where(and(eq(chatEndpoints.id, endpointId), eq(chatEndpoints.provider, "whatsapp")));
+  }
+
+  return { startLink, linkStatus, unlink, markUnlinked, forgetNumber, refreshCapabilities };
 }

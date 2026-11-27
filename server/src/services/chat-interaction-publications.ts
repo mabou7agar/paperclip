@@ -33,6 +33,7 @@ import {
   resolveOwnerCardRecipients,
 } from "./owner-card-push.js";
 import { logger } from "../middleware/logger.js";
+import { isLowTrustQuarantined } from "./source-trust.js";
 import {
   chatQuestionFormActionRecords,
   createChatQuestionFormDraft,
@@ -151,6 +152,11 @@ function terminalNativeInteractionCopy(
 }
 
 export const publicChatInteractionTaskUrl = publicChatTaskUrl;
+
+/** WhatsApp cards go only to team conversations, never to a quarantined (customer) task. */
+export function whatsAppConversationReceivesCards(issueSourceTrust: Parameters<typeof isLowTrustQuarantined>[0]): boolean {
+  return !isLowTrustQuarantined(issueSourceTrust);
+}
 
 /**
  * Provider callbacks carry this compact, cryptographically random action id.
@@ -333,6 +339,19 @@ export async function enqueueIssueInteractionChatPublications(
       ),
     )).filter(({ endpoint }) => endpoint.assignedAgentId === interaction.createdByAgentId)
     .map((binding) => ({ ...binding, ownerPush: false })) : [];
+  // A WhatsApp customer conversation (its task carries the low-trust guest
+  // containment) never receives cards: a customer cannot answer them and must
+  // not see Paperclip task links. The agent asks customers in plain messages.
+  if (agentBindings.some(({ endpoint }) => endpoint.provider === "whatsapp")) {
+    const [issue] = await db
+      .select({ sourceTrust: issues.sourceTrust })
+      .from(issues)
+      .where(and(eq(issues.id, interaction.issueId), eq(issues.companyId, interaction.companyId)));
+    if (!whatsAppConversationReceivesCards(issue?.sourceTrust ?? null)) {
+      for (let index = agentBindings.length - 1; index >= 0; index--)
+        if (agentBindings[index].endpoint.provider === "whatsapp") agentBindings.splice(index, 1);
+    }
+  }
   const ownerBindings = await ownerCardPushBindings(
     db,
     interaction,
@@ -390,7 +409,7 @@ export async function enqueueIssueInteractionChatPublications(
         }))
       : [];
     const confirmation =
-      !requiresBoard && (endpoint.provider === "telegram" || endpoint.provider === "slack") && endpoint.capabilities.actions === true
+      !requiresBoard && (endpoint.provider === "telegram" || endpoint.provider === "slack" || endpoint.provider === "whatsapp") && endpoint.capabilities.actions === true
         ? nativeChatConfirmation(interaction) ?? checklist
         : null;
     const confirmationActionTokens = confirmation || suggestions || connectionDecline

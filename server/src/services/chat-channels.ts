@@ -70,7 +70,15 @@ import { createChatConfiguration } from "./chat-channels/configuration.js";
 import { createPhotonSetupInspection } from "./chat-channels/imessage-photon/setup.js";
 import { createWhatsAppSetup } from "./chat-channels/whatsapp/setup.js";
 import { whatsAppSenderMetadata } from "./chat-channels/whatsapp/messages.js";
-import { createWhatsAppCredentialChecks } from "./chat-channels/whatsapp/credentials.js";
+import { createWhatsAppKnownPeople, linkWhatsAppKnownPerson } from "./chat-channels/whatsapp/known-people.js";
+import {
+  WHATSAPP_CUSTOMER_AUTHORITY,
+  customerRateLimitReached,
+  whatsAppCustomerMessagesInWindow,
+  whatsAppCustomerRateLimit,
+  whatsAppCustomerSenderRows,
+} from "./chat-channels/whatsapp/customers.js";
+import { createWhatsAppCredentialChecks, whatsAppHttpError } from "./chat-channels/whatsapp/credentials.js";
 import { WhatsAppSidecarClient } from "./whatsapp/sidecar-client.js";
 import { whatsAppSidecarConfig } from "./whatsapp/config.js";
 import { createChatSdkStatePersistence } from "./chat-channels/sdk-state.js";
@@ -1058,6 +1066,16 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
               ...createPhotonRuntimeCallbacks(db, { endpointId: endpoint.id, connectionId: endpoint.connectionId, companyId: record.endpoint.companyId, assignedAgentId: record.endpoint.assignedAgentId, context, lineId: credentials.lineId, runtimeCallbackRecord, runtimeCallbackEndpoint, renewDiscordGatewayOwnershipForMessageAdmission }),
               onPhotonEvent: (event) => handlePhotonEvent(endpoint.id, event, context),
               onPhotonFailure: (error) => handlePhotonFailure(endpoint.id, error, context),
+              onWhatsAppPromptPending:
+                record.endpoint.provider === "whatsapp"
+                  ? async (interactionId) => {
+                      const [interaction] = await db
+                        .select({ status: issueThreadInteractions.status })
+                        .from(issueThreadInteractions)
+                        .where(and(eq(issueThreadInteractions.id, interactionId), eq(issueThreadInteractions.companyId, record.endpoint.companyId)));
+                      return interaction?.status === "pending";
+                    }
+                  : undefined,
               onDiscordRootMentionAdmission:
                 record.endpoint.provider === "discord"
                   ? (event) =>
@@ -1747,11 +1765,21 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
         return;
       }
 
-      const principalResolution = await ensurePrincipal(
+      let principalResolution = await ensurePrincipal(
         endpoint,
         message.author,
         message.raw,
       );
+      // WhatsApp pre-approved people: a listed number is linked to its user in
+      // this inbound pass (a normal identity link), then handled as that user.
+      if (
+        endpoint.provider === "whatsapp" &&
+        principalResolution.userId === null &&
+        !principalResolution.linkedDenied &&
+        (await linkWhatsAppKnownPerson(db, endpoint, principalResolution.principal))
+      ) {
+        principalResolution = await ensurePrincipal(endpoint, message.author, message.raw);
+      }
       const resourceAdmission = await admitMessageResource({ endpoint, thread, addressed, suppressSetupDestinationActivation, surfaceKind });
       const { enabledResourceCount, resource } = resourceAdmission;
       await db
@@ -1806,11 +1834,25 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
       const principalAllowed =
         !principalResolution.linkedDenied &&
         (principalResolution.userId !== null || guestSponsorAllowed || publicVoiceTaskAllowed);
+      // WhatsApp customers (unlinked senders on a "client" channel) get a
+      // per-sender message limit so a stranger cannot spend agent runs freely.
+      const whatsAppCustomer = endpoint.provider === "whatsapp" && principalResolution.userId === null && guestSponsorAllowed;
+      const customerRateLimited = whatsAppCustomer && endpointAllowed && destinationAllowed &&
+        customerRateLimitReached(
+          await whatsAppCustomerMessagesInWindow(db, {
+            endpointId: endpoint.id,
+            principalId: principalResolution.principal.id,
+            currentDeliveryId: activeDelivery.id,
+            limit: whatsAppCustomerRateLimit(endpoint.setup),
+          }),
+          whatsAppCustomerRateLimit(endpoint.setup),
+        );
       const activationAllowed = addressed || existingConversation !== null;
       const allowed =
         endpointAllowed &&
         destinationAllowed &&
         principalAllowed &&
+        !customerRateLimited &&
         activationAllowed;
       const isPlausibleOrphanFollowUp =
         endpoint.provider === "github" || endpoint.provider === "discord" ||
@@ -1871,7 +1913,9 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
                 ? endpoint.allowUnlinkedPeople
                   ? "Endpoint sponsor can no longer authorize external guests"
                   : "External identity must be linked to a Paperclip account"
-                : "Message did not address the agent or an active task thread";
+                : customerRateLimited
+                  ? "Customer message limit reached for this WhatsApp sender"
+                  : "Message did not address the agent or an active task thread";
         await db.transaction(async (tx) => {
           await notifyChatDeliveryWork(tx);
           return tx
@@ -2219,6 +2263,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
                 provider: taskEndpoint.provider,
                 isDirectMessage: thread.isDM,
                 communicationInstructions: taskEndpoint.communicationInstructions,
+                customer: taskEndpoint.provider === "whatsapp" && !taskUserId,
               }),
               state: "active",
               lastActivityAt: new Date(),
@@ -2330,8 +2375,11 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
                       label: "Authority",
                       value: taskUserId
                         ? "Linked Paperclip user"
-                        : "Sponsored external guest (restricted)",
+                        : endpoint.provider === "whatsapp"
+                          ? WHATSAPP_CUSTOMER_AUTHORITY
+                          : "Sponsored external guest (restricted)",
                     },
+                    ...(endpoint.provider === "whatsapp" && !taskUserId ? whatsAppCustomerSenderRows() : []),
                     ...(await chatSenderMemberRows(taskTx, taskEndpoint.companyId, taskUserId)),
                   ],
                 },
@@ -3451,8 +3499,14 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
     get nativeBotIdentityClaimBarrier() { return options.nativeBotIdentityClaimBarrier; },
     get allowLocalVoiceBoard() { return options.allowLocalVoiceBoard; },
     unlinkWhatsApp: async (endpoint) => { await whatsAppClient.unlink(endpoint.publicId); },
+    pauseWhatsApp: async (endpoint) => { await whatsAppClient.pause(endpoint.publicId); },
+    resumeWhatsApp: async (endpoint) => {
+      await whatsAppClient.resume(endpoint.publicId).catch(whatsAppHttpError);
+      await whatsAppSetup.refreshCapabilities(endpoint.id);
+    },
   });
   const whatsAppSetup = createWhatsAppSetup(db, { client: whatsAppClient, endpointRecord, invalidateRuntime });
+  const whatsAppKnownPeople = createWhatsAppKnownPeople(db, { endpointRecord });
   async function whatsAppLinkStatus(endpointId: string, actorUserId?: string | null, managementContext?: ConnectionManagementContext) {
     return whatsAppSetup.linkStatus(endpointId, (id, accountId) =>
       configure(id, { action: "configure", credentials: { accountId } }, actorUserId ?? undefined, managementContext));
@@ -3583,6 +3637,8 @@ return {
     startWhatsAppLink: whatsAppSetup.startLink,
     whatsAppLinkStatus,
     unlinkWhatsApp: whatsAppSetup.unlink,
+    whatsAppKnownPeople: whatsAppKnownPeople.list,
+    replaceWhatsAppKnownPeople: whatsAppKnownPeople.replace,
     test,
     finishSlackSetup: (endpointId: string, userId: string, managementContext?: ConnectionManagementContext) => test(endpointId, { optionalSlackTestForUser: userId }, managementContext),
     setupTestStatus,

@@ -1,11 +1,14 @@
 import { randomUUID } from "node:crypto";
 import {
   Message,
+  defaultEmojiResolver,
   parseMarkdown,
   stringifyMarkdown,
   type Adapter,
   type AdapterPostableMessage,
   type Attachment,
+  type Author,
+  type EmojiValue,
   type ChatInstance,
   type FetchOptions,
   type FileUpload,
@@ -29,6 +32,15 @@ import {
 } from "./parse.js";
 import { WhatsAppSidecarClient, WhatsAppSidecarError } from "./sidecar-client.js";
 import {
+  WHATSAPP_PROMPT_TTL_MS,
+  matchWhatsAppPromptReply,
+  whatsAppPromptMessageKey,
+  whatsAppPromptRecipientKeys,
+  type WhatsAppPromptChoice,
+  type WhatsAppPromptRecord,
+} from "./prompts.js";
+import type { WhatsAppState } from "./state.js";
+import {
   WHATSAPP_SIGNATURE_HEADER,
   WHATSAPP_TIMESTAMP_HEADER,
   verifyWhatsAppSignature,
@@ -47,6 +59,10 @@ export interface WhatsAppAdapterIdentity {
   /** Linked number, digits only. */
   phoneNumber: string;
 }
+
+/** Typing is refreshed while a run works, but never longer than this. */
+export const WHATSAPP_TYPING_REFRESH_MS = 10_000;
+export const WHATSAPP_TYPING_MAX_MS = 10 * 60_000;
 
 export interface WhatsAppPublishResult {
   id: string;
@@ -103,12 +119,21 @@ export class WhatsAppChatAdapter implements Adapter<WhatsAppThread, WhatsAppInbo
   readonly lockScope = "channel" as const;
   readonly botUserId: string;
   private chat: ChatInstance | null = null;
+  private readonly typing = new Map<string, { timer: ReturnType<typeof setTimeout>; startedAt: number }>();
+  /**
+   * Set by the endpoint runtime: whether a card's interaction is still
+   * pending. A reply to a card already answered elsewhere stays a message.
+   */
+  promptPending?: (interactionId: string) => Promise<boolean>;
 
   constructor(
     readonly userName: string,
     readonly identity: WhatsAppAdapterIdentity,
     private readonly configSource: () => WhatsAppSidecarConfig,
     readonly client: WhatsAppSidecarClient = new WhatsAppSidecarClient(configSource),
+    /** Endpoint-scoped store for owner-card prompt receipts; absent in unit tests. */
+    readonly state: WhatsAppState | null = null,
+    private readonly now: () => number = Date.now,
   ) {
     this.botUserId = identity.phoneNumber;
   }
@@ -119,6 +144,8 @@ export class WhatsAppChatAdapter implements Adapter<WhatsAppThread, WhatsAppInbo
 
   async disconnect(): Promise<void> {
     this.chat = null;
+    for (const { timer } of this.typing.values()) clearTimeout(timer);
+    this.typing.clear();
   }
 
   encodeThreadId(value: WhatsAppThread): string {
@@ -178,10 +205,14 @@ export class WhatsAppChatAdapter implements Adapter<WhatsAppThread, WhatsAppInbo
     return (signal?: AbortSignal) => this.client.media(locator.accountId, locator.messageId, signal);
   }
 
-  parseMessage(raw: WhatsAppInboundEvent): Message<WhatsAppInboundEvent> {
-    const threadId = this.encodeThreadId({ accountId: this.identity.accountId, jid: raw.fromJid });
+  private author(raw: WhatsAppInboundEvent): Author {
     const userId = whatsAppExternalPrincipalId(raw);
     const handle = raw.fromPhone ? `+${raw.fromPhone}` : userId;
+    return { userId, userName: handle, fullName: raw.pushName?.trim() || handle, isBot: false, isMe: false };
+  }
+
+  parseMessage(raw: WhatsAppInboundEvent): Message<WhatsAppInboundEvent> {
+    const threadId = this.encodeThreadId({ accountId: this.identity.accountId, jid: raw.fromJid });
     const locator = this.mediaLocator(raw);
     const attachments: Attachment[] =
       raw.media && locator
@@ -203,15 +234,145 @@ export class WhatsAppChatAdapter implements Adapter<WhatsAppThread, WhatsAppInbo
       formatted: parseMarkdown(raw.text),
       raw,
       attachments,
-      author: {
-        userId,
-        userName: handle,
-        fullName: raw.pushName?.trim() || handle,
-        isBot: false,
-        isMe: false,
-      },
+      author: this.author(raw),
       metadata: { dateSent: new Date(raw.timestamp), edited: false },
     });
+  }
+
+  /** The edited message as Paperclip knows it: the original id with the new text. */
+  parseEdit(raw: WhatsAppInboundEvent): Message<WhatsAppInboundEvent> {
+    const threadId = this.encodeThreadId({ accountId: this.identity.accountId, jid: raw.fromJid });
+    return new Message({
+      id: raw.targetId!,
+      threadId,
+      text: raw.text,
+      formatted: parseMarkdown(raw.text),
+      raw,
+      attachments: [],
+      author: this.author(raw),
+      metadata: { dateSent: new Date(raw.timestamp), edited: true, editedAt: new Date(raw.timestamp) },
+    });
+  }
+
+  // ---- Owner cards as numbered text prompts -------------------------------
+
+  /**
+   * File a published card prompt under its message ids and its recipient, so
+   * a later numbered reply (or a quote of the prompt) can be mapped back to
+   * the card's opaque action id.
+   */
+  async rememberPrompt(
+    prompt: Omit<WhatsAppPromptRecord, "version" | "expiresAt" | "threadId" | "messageId">,
+    threadId: string,
+    messageIds: string[],
+  ): Promise<void> {
+    if (!this.state || !messageIds.length) return;
+    const { jid } = this.decodeThreadId(threadId);
+    const record: WhatsAppPromptRecord = {
+      version: 1,
+      ...prompt,
+      threadId,
+      messageId: messageIds[messageIds.length - 1],
+      expiresAt: this.now() + WHATSAPP_PROMPT_TTL_MS,
+    };
+    const expiresAt = new Date(record.expiresAt);
+    for (const id of messageIds) await this.state.write(whatsAppPromptMessageKey(id), record, expiresAt);
+    const [user, server] = jid.split("@");
+    const keys = whatsAppPromptRecipientKeys(server === "lid" ? { fromLid: user } : { fromPhone: user });
+    for (const key of keys) await this.state.write(key, record, expiresAt);
+  }
+
+  private async promptFor(event: WhatsAppInboundEvent): Promise<{ record: WhatsAppPromptRecord; recipientKeys: string[] } | null> {
+    if (!this.state) return null;
+    const recipientKeys = whatsAppPromptRecipientKeys(event);
+    const usable = (record: WhatsAppPromptRecord | null) =>
+      record && record.version === 1 && record.expiresAt > this.now() ? record : null;
+    if (event.quotedId) {
+      const quoted = usable(await this.state.read<WhatsAppPromptRecord>(whatsAppPromptMessageKey(event.quotedId)));
+      if (quoted) return { record: quoted, recipientKeys };
+    }
+    for (const key of recipientKeys) {
+      const latest = usable(await this.state.read<WhatsAppPromptRecord>(key));
+      if (latest) return { record: latest, recipientKeys };
+    }
+    return null;
+  }
+
+  /**
+   * A reply that answers the latest (or quoted) card prompt becomes a normal
+   * Chat SDK action with the card's opaque action id. Paperclip's action
+   * handler then checks everything a button press is checked for: the sender
+   * must be linked to an active, non-viewer member, the card must still be
+   * pending, and the action must belong to that exact published message. A
+   * customer's "1" is therefore refused there, never executed.
+   */
+  private async dispatchPromptReply(event: WhatsAppInboundEvent, options?: WebhookOptions): Promise<boolean> {
+    if (!this.chat || event.media || !event.text.trim()) return false;
+    const found = await this.promptFor(event);
+    if (!found) return false;
+    const choice: WhatsAppPromptChoice | null = matchWhatsAppPromptReply(found.record, event.text);
+    if (!choice) return false;
+    const clear = async () => {
+      for (const key of found.recipientKeys) await this.state!.write(key, null, new Date(this.now() + 60_000));
+    };
+    if (this.promptPending && !(await this.promptPending(found.record.interactionId))) {
+      await clear();
+      return false;
+    }
+    // One reply answers one prompt: later bare numbers are ordinary messages.
+    await clear();
+    await this.chat.processAction(
+      {
+        adapter: this,
+        actionId: choice.actionId,
+        value: found.record.interactionId,
+        messageId: found.record.messageId,
+        threadId: found.record.threadId,
+        user: this.author(event),
+        raw: event,
+      },
+      options,
+    );
+    return true;
+  }
+
+  // ---- Reactions -----------------------------------------------------------
+
+  private reactionKey(event: WhatsAppInboundEvent): string {
+    return `reaction:${whatsAppExternalPrincipalId(event)}:${event.targetId}`;
+  }
+
+  /**
+   * WhatsApp reports a removed reaction as an empty emoji; the last emoji the
+   * sender put on that message (kept for a day) names what was removed.
+   */
+  private async dispatchReaction(event: WhatsAppInboundEvent, options?: WebhookOptions): Promise<void> {
+    if (!this.chat || !event.targetId) return;
+    const threadId = this.encodeThreadId({ accountId: this.identity.accountId, jid: event.fromJid });
+    let rawEmoji = event.emoji ?? "";
+    const added = rawEmoji !== "";
+    if (this.state) {
+      const key = this.reactionKey(event);
+      if (added) await this.state.write(key, { emoji: rawEmoji }, new Date(this.now() + 24 * 3600_000));
+      else {
+        rawEmoji = (await this.state.read<{ emoji?: string }>(key))?.emoji ?? "";
+        await this.state.write(key, null, new Date(this.now() + 60_000));
+      }
+    }
+    if (!rawEmoji) return; // a removal we cannot name is dropped
+    this.chat.processReaction(
+      {
+        adapter: this,
+        added,
+        emoji: defaultEmojiResolver.fromGChat(rawEmoji),
+        rawEmoji,
+        messageId: event.targetId,
+        threadId,
+        user: this.author(event),
+        raw: event,
+      },
+      options,
+    );
   }
 
   /**
@@ -245,6 +406,16 @@ export class WhatsAppChatAdapter implements Adapter<WhatsAppThread, WhatsAppInbo
       throw error;
     }
     if (!this.chat) return json(503, { error: "not_ready" });
+    if (event.type === "reaction") {
+      await this.dispatchReaction(event, options);
+      return json(200, { ok: true });
+    }
+    if (event.type === "edit") {
+      const edited = this.parseEdit(event);
+      void this.chat.processMessageUpdated({ adapter: this, threadId: edited.threadId, message: edited }, options).catch(() => undefined);
+      return json(200, { ok: true });
+    }
+    if (await this.dispatchPromptReply(event, options).catch(() => false)) return json(200, { ok: true });
     const message = this.parseMessage(event);
     void this.chat.processMessage(this, message.threadId, message, options).catch(() => undefined);
     return json(200, { ok: true });
@@ -254,12 +425,41 @@ export class WhatsAppChatAdapter implements Adapter<WhatsAppThread, WhatsAppInbo
     return markdownToWhatsApp(stringifyMarkdown(content));
   }
 
-  async startTyping(): Promise<void> {
-    /* Phase 1 publishes no presence. */
+  /**
+   * "composing" while an agent run works for this chat, refreshed every few
+   * seconds (WhatsApp clears it after ~25 s) and capped, then "paused" when
+   * the reply is published or the run ends. Presence is best effort.
+   */
+  async startTyping(threadId: string): Promise<void> {
+    const { jid } = this.decodeThreadId(threadId);
+    const current = this.typing.get(threadId);
+    if (current) clearTimeout(current.timer);
+    const startedAt = current?.startedAt ?? this.now();
+    await this.client.presence(this.identity.accountId, { jid, state: "composing" }).catch(() => undefined);
+    if (this.now() - startedAt >= WHATSAPP_TYPING_MAX_MS) {
+      this.typing.delete(threadId);
+      await this.client.presence(this.identity.accountId, { jid, state: "paused" }).catch(() => undefined);
+      return;
+    }
+    const timer = setTimeout(() => {
+      if (this.typing.get(threadId)?.timer !== timer) return;
+      void this.startTyping(threadId).catch(() => undefined);
+    }, WHATSAPP_TYPING_REFRESH_MS);
+    timer.unref?.();
+    this.typing.set(threadId, { timer, startedAt });
   }
 
-  async endTyping(): Promise<void> {
-    /* Phase 1 publishes no presence. */
+  async endTyping(threadId: string): Promise<void> {
+    const current = this.typing.get(threadId);
+    if (!current) return;
+    clearTimeout(current.timer);
+    this.typing.delete(threadId);
+    const { jid } = this.decodeThreadId(threadId);
+    await this.client.presence(this.identity.accountId, { jid, state: "paused" }).catch(() => undefined);
+  }
+
+  isTyping(threadId: string): boolean {
+    return this.typing.has(threadId);
   }
 
   private async sendParts(
@@ -297,6 +497,7 @@ export class WhatsAppChatAdapter implements Adapter<WhatsAppThread, WhatsAppInbo
       messageIds.push(sent.messageId);
     }
     if (!messageIds.length) throw new WhatsAppSidecarError("rejected", "WhatsApp publication is empty");
+    await this.endTyping(threadId);
     return messageIds;
   }
 
@@ -321,19 +522,37 @@ export class WhatsAppChatAdapter implements Adapter<WhatsAppThread, WhatsAppInbo
     return { id: messageIds[messageIds.length - 1], threadId, raw: undefined as unknown as WhatsAppInboundEvent };
   }
 
-  async editMessage(): Promise<never> {
-    throw new WhatsAppSidecarError("rejected", "WhatsApp message edits are not supported");
+  /**
+   * Edit a text message this channel sent. WhatsApp allows edits for 15
+   * minutes; the sidecar refuses older or foreign messages. Files cannot be
+   * edited. Paperclip's publication outbox keeps posting new messages
+   * (capabilities.messageEdits stays false), so this serves direct callers.
+   */
+  async editMessage(threadId: string, messageId: string, message: AdapterPostableMessage): Promise<RawMessage<WhatsAppInboundEvent>> {
+    const { jid } = this.decodeThreadId(threadId);
+    if (filesOf(message).length) throw new WhatsAppSidecarError("rejected", "WhatsApp cannot add files to an edited message");
+    const text = markdownToWhatsApp(textOf(message)).trim();
+    if (!text) throw new WhatsAppSidecarError("rejected", "An edited WhatsApp message needs text");
+    if (Array.from(text).length > 4000) throw new WhatsAppSidecarError("rejected", "An edited WhatsApp message is too long");
+    const edited = await this.client.edit(this.identity.accountId, { jid, messageId, text });
+    return { id: edited.messageId, threadId, raw: undefined as unknown as WhatsAppInboundEvent };
   }
 
   async deleteMessage(): Promise<never> {
     throw new WhatsAppSidecarError("rejected", "WhatsApp message deletion is not supported");
   }
 
-  async addReaction(): Promise<void> {
-    /* Receipt reactions are not published on WhatsApp in phase 1. */
+  /** React to a message in this chat. Reactions never represent approvals. */
+  async addReaction(threadId: string, messageId: string, emoji: EmojiValue | string): Promise<void> {
+    const { jid } = this.decodeThreadId(threadId);
+    const unicode = defaultEmojiResolver.toGChat(emoji);
+    if (!unicode) return;
+    await this.client.react(this.identity.accountId, { jid, messageId, emoji: unicode });
   }
 
-  async removeReaction(): Promise<void> {
-    /* Reactions never represent approvals. */
+  /** WhatsApp keeps one reaction per person per message: removing sends an empty reaction. */
+  async removeReaction(threadId: string, messageId: string, _emoji: EmojiValue | string): Promise<void> {
+    const { jid } = this.decodeThreadId(threadId);
+    await this.client.react(this.identity.accountId, { jid, messageId, emoji: "" });
   }
 }

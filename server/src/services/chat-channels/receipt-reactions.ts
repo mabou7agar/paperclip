@@ -93,6 +93,9 @@ export function createReceiptReactions(db: Db, options: ReceiptReactionsOptions)
     // GitHub acknowledges through one editable response comment. Continue to
     // drain legacy eyes removals, but never create new eyes for these requests.
     if (input.endpoint.provider === "github") return;
+    // WhatsApp shows typing while the agent works; an eyes reaction on every
+    // inbound message (customers included) would be noise.
+    if (input.endpoint.provider === "whatsapp") return;
     const record = await endpointRecord(input.endpoint.id);
     if (!record) return;
     // A live SDK object remains bound to the credentials that authenticated
@@ -120,7 +123,7 @@ export function createReceiptReactions(db: Db, options: ReceiptReactionsOptions)
     messageId: string;
     runtimeContext: LifecycleRuntimeFence;
   }): Promise<string | null> {
-    if (input.endpoint.provider === "github") return null;
+    if (input.endpoint.provider === "github" || input.endpoint.provider === "whatsapp") return null;
     await notifyChatActionWork(tx, "receipt_reaction");
     const [inserted] = await tx
         .insert(chatActions)

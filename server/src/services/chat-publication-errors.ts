@@ -201,7 +201,9 @@ export function classifyChatPublicationError(
     if (codes.includes("delivery_unknown") || codes.includes("unavailable") || codes.includes("invalid_response")) {
       return { kind: "retry", retryAfterMs: Math.min(60_000, 2000 * 2 ** Math.min(attempt, 5)), providerRateLimit: status === 429, reason };
     }
-    if (codes.includes("not_linked") || codes.includes("unauthorized")) return { kind: "endpoint_attention", reason };
+    // "paused" here means the sidecar holds the channel paused while Paperclip
+    // still publishes: surface that drift instead of failing silently.
+    if (codes.includes("not_linked") || codes.includes("unauthorized") || codes.includes("paused")) return { kind: "endpoint_attention", reason };
     return { kind: "failed", reason };
   }
   if (names.includes("PhotonError")) {

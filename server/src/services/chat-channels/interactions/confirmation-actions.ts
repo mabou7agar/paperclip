@@ -75,7 +75,7 @@ export function createChatConfirmationActions(db: Db, options: ChatConfirmationO
     const { record, event, runtimeContext, conversation, principal, issued, interaction, deny, safelyKnown } = input;
 
     if (
-      (event.provider !== "telegram" && event.provider !== "slack") ||
+      (event.provider !== "telegram" && event.provider !== "slack" && event.provider !== "whatsapp") ||
       !(nativeChatConfirmation(interaction) || event.provider === "slack" && (nativeChatCheckbox(interaction) || nativeChatSuggestions(interaction) || interaction.kind === "connection_intent"))
     ) {
       return deny(safelyKnown);
@@ -363,7 +363,7 @@ export function createChatConfirmationActions(db: Db, options: ChatConfirmationO
       !conversation ||
       !publication ||
       !endpoint ||
-      (endpoint.provider !== "telegram" && endpoint.provider !== "slack") ||
+      (endpoint.provider !== "telegram" && endpoint.provider !== "slack" && endpoint.provider !== "whatsapp") ||
       publication.conversationId !== conversation.id ||
       publication.payload.interactionId !== token.interactionId
     ) {

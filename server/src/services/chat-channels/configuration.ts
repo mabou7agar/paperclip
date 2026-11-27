@@ -103,6 +103,10 @@ type ChatConfigurationOptions = Pick<ReturnType<typeof createChatCredentials>, "
   stageConfigurationEffects?: (transaction: Db, endpointId: string, actorUserId: string | null | undefined) => Promise<void>;
   /** Best effort: log the linked WhatsApp number out once its endpoint is archived. */
   unlinkWhatsApp?: (endpoint: EndpointRow) => Promise<void>;
+  /** Best effort: the sidecar closes the socket but keeps the login while paused. */
+  pauseWhatsApp?: (endpoint: EndpointRow) => Promise<void>;
+  /** Reconnect the paused login before resume verifies the number again. */
+  resumeWhatsApp?: (endpoint: EndpointRow) => Promise<void>;
 };
 export function createChatConfiguration(db: Db, options: ChatConfigurationOptions) {
   const { endpointRecord, get, withCredentialMutationLease, getWebhookPublicBaseUrl, invalidateRuntime, nativeBotIdentityMatches, assertNativeBotIdentityAvailable, isNativeBotIdentityUniqueViolation, nativeBotIdentityConflict, legacyGitHubLabelsMatchVerifiedCredentials, normalizedCredentials, verifyCredentials, persistCredentials, clearCredentials, resolveCredentials, prepareProviderInventory, reconcileProviderResourceRows, reconcileDiscordCommands, runtimeFor, runtimeContextForRecord, stageTelegramMaintenance, processTelegramMaintenance, recordTelegramStopSubscription, fetchImpl, redactError, runtimeGeneration, leasedChatProvider, PROVIDER_LABELS, SUPPLIED_CREDENTIAL_KEYS, PROVIDER_CREDENTIAL_CHECK_TIMEOUT_MS, isSupportedTelegramWebhookBaseUrl } = options;
@@ -246,6 +250,9 @@ export function createChatConfiguration(db: Db, options: ChatConfigurationOption
         await credentialLease.assertOwned(tx);
       });
       await invalidateRuntime(endpoint.id);
+      // Paperclip's paused status is authoritative (inbound is filtered while
+      // paused); the sidecar pause additionally stops the socket.
+      if (endpoint.provider === "whatsapp") await options.pauseWhatsApp?.(endpoint).catch(() => undefined);
       await logActivity(db, {
         companyId: endpoint.companyId,
         ...(managementContext?.audit ?? { actorType: "user" as const, actorId: actorUserId ?? "board" }),
@@ -270,6 +277,7 @@ export function createChatConfiguration(db: Db, options: ChatConfigurationOption
           code: "chat_endpoint_credentials_missing",
         });
       });
+      if (endpoint.provider === "whatsapp") await options.resumeWhatsApp?.(endpoint);
       const identity = await verifyCredentials(endpoint.provider, credentials);
       const upgradingLegacyGitHubIdentity =
         endpoint.provider === "github" &&
