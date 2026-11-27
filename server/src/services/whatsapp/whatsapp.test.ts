@@ -554,7 +554,9 @@ describe("WhatsApp pre-approved people", () => {
     const { db, inserted } = fakeDb([[], [{ userId: "u1", role: "member" }], []]);
     const linked = await linkWhatsAppKnownPerson(db as never, endpoint([{ phone: "4915550001", paperclipUserId: "u1" }]) as never, { id: "principal", externalId: "4915550001" });
     expect(linked).toBe("u1");
-    expect(inserted).toEqual([expect.objectContaining({ endpointId: "endpoint", principalId: "principal", paperclipUserId: "u1", status: "linked" })]);
+    // Only identity-link rows: the activity log may insert its own settings row through the same double.
+    const links = inserted.filter((row) => (row as { principalId?: unknown }).principalId !== undefined);
+    expect(links).toEqual([expect.objectContaining({ endpointId: "endpoint", principalId: "principal", paperclipUserId: "u1", status: "linked" })]);
   });
 
   it("never matches a hidden-id sender, refuses non-members and respects a removed link", async () => {
