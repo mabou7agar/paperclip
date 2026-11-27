@@ -27,6 +27,8 @@ function fixture(actor: Request["actor"]) {
     startWhatsAppLink: vi.fn().mockResolvedValue(linkView),
     whatsAppLinkStatus: vi.fn().mockResolvedValue({ ...linkView, state: "linked", linkedAs: "+4915550001", endpointStatus: "verifying" }),
     unlinkWhatsApp: vi.fn().mockResolvedValue({ state: "logged_out", endpointStatus: "attention" }),
+    whatsAppKnownPeople: vi.fn().mockResolvedValue({ people: [{ phone: "4915550001", paperclipUserId: "user-1" }] }),
+    replaceWhatsAppKnownPeople: vi.fn().mockImplementation(async (_id: string, body: { people: unknown[] }) => ({ people: body.people })),
   };
   const app = express();
   app.use(express.json());
@@ -109,5 +111,47 @@ describe("WhatsApp link routes", () => {
     expect(f.service.whatsAppLinkStatus).not.toHaveBeenCalled();
     expect(f.service.startWhatsAppLink).not.toHaveBeenCalled();
     expect(f.service.unlinkWhatsApp).not.toHaveBeenCalled();
+  });
+});
+
+describe("WhatsApp pre-approved people routes", () => {
+  const url = `/api/chat-endpoints/${ENDPOINT_ID}/whatsapp/known-people`;
+
+  it("lets a connection manager read and replace the list, without caching", async () => {
+    access.hasPermission.mockResolvedValue(true);
+    const f = fixture(manager);
+    const listed = await request(f.app).get(url).expect(200);
+    expect(listed.headers["cache-control"]).toBe("no-store");
+    expect(listed.body.people).toHaveLength(1);
+    const people = [{ phone: "+4915550001", paperclipUserId: "user-1" }, { phone: "4915550002", paperclipUserId: "user-2" }];
+    await request(f.app).put(url).send({ people }).expect(200);
+    expect(f.service.replaceWhatsAppKnownPeople).toHaveBeenCalledWith(ENDPOINT_ID, { people }, "manager");
+  });
+
+  it("validates the list before reaching the service", async () => {
+    access.hasPermission.mockResolvedValue(true);
+    const f = fixture(manager);
+    await request(f.app).put(url).send({ people: [{ phone: "call me", paperclipUserId: "u" }] }).expect(400);
+    await request(f.app).put(url).send({ people: [{ phone: "4915550001" }] }).expect(400);
+    await request(f.app).put(url).send({ people: [{ phone: "4915550001", paperclipUserId: "u", role: "owner" }] }).expect(400);
+    const tooMany = Array.from({ length: 501 }, (_, index) => ({ phone: `49155${String(index).padStart(5, "0")}`, paperclipUserId: "u" }));
+    await request(f.app).put(url).send({ people: tooMany }).expect(400);
+    expect(f.service.replaceWhatsAppKnownPeople).not.toHaveBeenCalled();
+  });
+
+  it("refuses agents, outsiders and members without the permission", async () => {
+    access.hasPermission.mockResolvedValue(true);
+    const asAgent = fixture(agent);
+    await request(asAgent.app).get(url).expect(403);
+    await request(asAgent.app).put(url).send({ people: [] }).expect(403);
+    const asOutsider = fixture(outsider);
+    await request(asOutsider.app).get(url).expect(404);
+    access.hasPermission.mockResolvedValue(false);
+    const denied = fixture(manager);
+    await request(denied.app).put(url).send({ people: [] }).expect(403);
+    for (const f of [asAgent, asOutsider, denied]) {
+      expect(f.service.whatsAppKnownPeople).not.toHaveBeenCalled();
+      expect(f.service.replaceWhatsAppKnownPeople).not.toHaveBeenCalled();
+    }
   });
 });
