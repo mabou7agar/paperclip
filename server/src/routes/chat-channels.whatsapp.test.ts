@@ -41,6 +41,7 @@ function fixture(actor: Request["actor"]) {
 
 const manager: Request["actor"] = { type: "board", source: "session", userId: "manager", companyIds: ["company-a"] };
 const outsider: Request["actor"] = { type: "board", source: "session", userId: "outsider", companyIds: ["company-b"] };
+const agent = { type: "agent", agentId: "agent-a", companyId: "company-a", source: "agent_key" } as unknown as Request["actor"];
 
 beforeEach(() => {
   access.hasPermission.mockReset();
@@ -96,6 +97,17 @@ describe("WhatsApp link routes", () => {
     await request(f.app).post(`/api/chat-endpoints/${ENDPOINT_ID}/whatsapp/unlink`).send({}).expect(403);
     expect(access.hasPermission).toHaveBeenCalledWith("company-a", "user", "manager", "tools:manage_connections");
     expect(f.service.whatsAppLinkStatus).not.toHaveBeenCalled();
+    expect(f.service.unlinkWhatsApp).not.toHaveBeenCalled();
+  });
+
+  it("refuses agents: linking is for people only", async () => {
+    access.hasPermission.mockResolvedValue(true);
+    const f = fixture(agent);
+    await request(f.app).get(`/api/chat-endpoints/${ENDPOINT_ID}/whatsapp/link-status`).expect(403);
+    await request(f.app).post(`/api/chat-endpoints/${ENDPOINT_ID}/whatsapp/link`).send({ mode: "qr" }).expect(403);
+    await request(f.app).post(`/api/chat-endpoints/${ENDPOINT_ID}/whatsapp/unlink`).send({}).expect(403);
+    expect(f.service.whatsAppLinkStatus).not.toHaveBeenCalled();
+    expect(f.service.startWhatsAppLink).not.toHaveBeenCalled();
     expect(f.service.unlinkWhatsApp).not.toHaveBeenCalled();
   });
 });

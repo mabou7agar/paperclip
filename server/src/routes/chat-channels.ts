@@ -440,21 +440,23 @@ export function chatChannelRoutes(db: Db, options: ChatChannelRouteOptions) {
     res.json(await service.inspectPhoton(endpointId(req), req.body));
   });
 
-  // WhatsApp linking: same authority as the provider setup routes. The QR and
-  // pairing code are one-time linking material, so responses are never cached.
-  router.post("/chat-endpoints/:endpointId/whatsapp/link", managementGuard("connections:configure", "POST /chat-endpoints/:endpointId/whatsapp/link"), validate(whatsAppLinkSchema), async (req, res) => {
+  // WhatsApp linking: people only (owner decision, 27 Nov 2026), on top of the
+  // provider setup authority. Agents never see or drive the QR or pairing code,
+  // which are one-time linking material, so responses are never cached.
+  const whatsAppPeopleOnly = (req: ExpressRequest, _res: ExpressResponse, next: () => void) => { assertBoard(req); next(); };
+  router.post("/chat-endpoints/:endpointId/whatsapp/link", whatsAppPeopleOnly, managementGuard("connections:configure", "POST /chat-endpoints/:endpointId/whatsapp/link"), validate(whatsAppLinkSchema), async (req, res) => {
     if (!(await assertEndpointManagementAccess(req, res))) return;
     res.set("Cache-Control", "no-store");
     res.json(await service.startWhatsAppLink(endpointId(req), req.body));
   });
 
-  router.get("/chat-endpoints/:endpointId/whatsapp/link-status", managementGuard("connections:configure", "GET /chat-endpoints/:endpointId/whatsapp/link-status"), async (req, res) => {
+  router.get("/chat-endpoints/:endpointId/whatsapp/link-status", whatsAppPeopleOnly, managementGuard("connections:configure", "GET /chat-endpoints/:endpointId/whatsapp/link-status"), async (req, res) => {
     if (!(await assertEndpointManagementAccess(req, res))) return;
     res.set("Cache-Control", "no-store");
     res.json(await service.whatsAppLinkStatus(endpointId(req), actorUserId(req), connectionRequestContext(req)));
   });
 
-  router.post("/chat-endpoints/:endpointId/whatsapp/unlink", managementGuard("connections:configure", "POST /chat-endpoints/:endpointId/whatsapp/unlink"), async (req, res) => {
+  router.post("/chat-endpoints/:endpointId/whatsapp/unlink", whatsAppPeopleOnly, managementGuard("connections:configure", "POST /chat-endpoints/:endpointId/whatsapp/unlink"), async (req, res) => {
     if (!(await assertEndpointManagementAccess(req, res))) return;
     res.set("Cache-Control", "no-store");
     res.json(await service.unlinkWhatsApp(endpointId(req)));
