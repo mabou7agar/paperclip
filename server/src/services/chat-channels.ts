@@ -290,7 +290,9 @@ const SUPPORTED_GITHUB_WEBHOOK_EVENTS = new Set<string>([
 const SUPPLIED_CREDENTIAL_KEYS: Record<ChatProvider, readonly string[]> = {
   speko: ["apiKey", "signingSecret", "agentId"],
   "imessage-photon": ["projectSecret"],
-  whatsapp: [],
+  // Supplied by the link-status step once the sidecar reports the number linked;
+  // configure accepts only the channel's own account id (its public id).
+  whatsapp: ["accountId"],
   agentmail: [],
   slack: ["botToken", "signingSecret"],
   github: ["appId", "privateKey"],

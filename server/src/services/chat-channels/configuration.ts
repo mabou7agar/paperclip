@@ -151,6 +151,15 @@ export function createChatConfiguration(db: Db, options: ChatConfigurationOption
           },
         );
       }
+      // A WhatsApp channel's sidecar account is the channel's own public id; never another channel's.
+      if (record.endpoint.provider === "whatsapp" && input.credentials && "accountId" in input.credentials
+          && (input.credentials as Record<string, unknown>).accountId !== record.endpoint.publicId) {
+        throw unprocessable("A WhatsApp channel can only use its own linked account", {
+          code: "chat_endpoint_credentials_invalid",
+          provider: record.endpoint.provider,
+          action: input.action,
+        });
+      }
       // These keys establish provider authentication or inbound trust. They
       // must come from the human setup step or a verified provider handoff.
       const credentialFields = CHAT_HUMAN_CREDENTIAL_FIELDS.filter(key => suppliedCredentialKeys.includes(key));

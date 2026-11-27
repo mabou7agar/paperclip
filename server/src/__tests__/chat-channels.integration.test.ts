@@ -1383,6 +1383,39 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     }
   });
 
+  it("configures a WhatsApp channel once its number is linked, and only with its own account", async () => {
+    const fixture = await seedCompany();
+    const saved = { url: process.env.PAPERCLIP_WHATSAPP_SIDECAR_URL, secret: process.env.PAPERCLIP_WHATSAPP_SIDECAR_SECRET };
+    process.env.PAPERCLIP_WHATSAPP_SIDECAR_URL = "http://whatsapp-sidecar.test:8787";
+    process.env.PAPERCLIP_WHATSAPP_SIDECAR_SECRET = "s".repeat(40);
+    const seen: string[] = [];
+    const sidecarFetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input instanceof Request ? input.url : input));
+      seen.push(`${init?.method ?? "GET"} ${url.pathname}`);
+      if (url.hostname !== "whatsapp-sidecar.test") return fakeSlackFetch()(input as never, init as never);
+      if (url.pathname.endsWith("/status")) return new Response(JSON.stringify({ state: "linked", me: "201500000001" }), { status: 200, headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify({ ok: true }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof globalThis.fetch;
+    try {
+      const { service } = createService(new FakeChatSdkRuntime(), sidecarFetch);
+      const endpoint = await service.create(fixture.companyId, { provider: "whatsapp", assignedAgentId: fixture.assignedAgentId, name: "WhatsApp" }, "owner-user");
+      const other = await service.create(fixture.companyId, { provider: "whatsapp", assignedAgentId: fixture.assignedAgentId, name: "Other WhatsApp" }, "owner-user");
+      // Another channel's sidecar account is refused.
+      await expect(service.configure(endpoint.id, { action: "configure", credentials: { accountId: other.publicId } }, "owner-user"))
+        .rejects.toMatchObject({ status: 422 });
+      // The link-status step configures the channel with its own account once the number is linked.
+      const view = await service.whatsAppLinkStatus(endpoint.id, "owner-user");
+      expect(view.state).toBe("linked");
+      expect(seen).toContain(`GET /accounts/${endpoint.publicId}/status`);
+      const [row] = await db.select().from(chatEndpoints).where(eq(chatEndpoints.id, endpoint.id));
+      expect(row!.botExternalId).toBe("201500000001");
+      expect(["verifying", "active"]).toContain(row!.status);
+    } finally {
+      if (saved.url === undefined) delete process.env.PAPERCLIP_WHATSAPP_SIDECAR_URL; else process.env.PAPERCLIP_WHATSAPP_SIDECAR_URL = saved.url;
+      if (saved.secret === undefined) delete process.env.PAPERCLIP_WHATSAPP_SIDECAR_SECRET; else process.env.PAPERCLIP_WHATSAPP_SIDECAR_SECRET = saved.secret;
+    }
+  });
+
   it("retries a colliding company fixture prefix and creates a distinct complete fixture", async () => {
     const existing = await seedCompany();
     const [original] = await db.select().from(companies).where(eq(companies.id, existing.companyId));
