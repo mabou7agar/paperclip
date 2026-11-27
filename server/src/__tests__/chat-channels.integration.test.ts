@@ -1407,6 +1407,8 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
       const view = await service.whatsAppLinkStatus(endpoint.id, "owner-user");
       expect(view.state).toBe("linked");
       expect(seen).toContain(`GET /accounts/${endpoint.publicId}/status`);
+      // Once linked, the stored pre-approved numbers go to the sidecar (hidden-id senders resolve to them).
+      expect(seen).toContain(`POST /accounts/${endpoint.publicId}/known-phones`);
       const [row] = await db.select().from(chatEndpoints).where(eq(chatEndpoints.id, endpoint.id));
       expect(row!.botExternalId).toBe("201500000001");
       expect(["verifying", "active"]).toContain(row!.status);

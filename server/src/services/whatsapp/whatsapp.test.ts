@@ -505,6 +505,8 @@ describe("WhatsApp presence, reactions and edits", () => {
     await c.react(ACCOUNT, { jid: "4915550001@s.whatsapp.net", messageId: "IN1", emoji: "👍" });
     await expect(c.edit(ACCOUNT, { jid: "4915550001@s.whatsapp.net", messageId: "OUT1", text: "x" })).resolves.toEqual({ messageId: "OUT1" });
     expect(paths).toEqual([`POST /accounts/${ACCOUNT}/pause`, `POST /accounts/${ACCOUNT}/resume`, `POST /accounts/${ACCOUNT}/presence`, `POST /accounts/${ACCOUNT}/react`, `POST /accounts/${ACCOUNT}/edit`]);
+    await expect(c.setKnownPhones(ACCOUNT, ["201090608890"])).resolves.toEqual({ numbers: 0, hiddenIds: 0 });
+    expect(paths.at(-1)).toBe(`POST /accounts/${ACCOUNT}/known-phones`);
     expect(whatsAppIdentityFromStatus({ state: "paused", me: "4917600000000" }).botExternalId).toBe("4917600000000");
     expect(() => whatsAppIdentityFromStatus({ state: "logged_out" })).toThrow();
     expect(classifyChatPublicationError(new WhatsAppSidecarError("paused", "x"), 1).kind).toBe("endpoint_attention");
