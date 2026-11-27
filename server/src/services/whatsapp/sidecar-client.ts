@@ -172,6 +172,17 @@ export class WhatsAppSidecarClient {
     return bytes;
   }
 
+  /**
+   * Tell the sidecar which numbers are pre-approved, so it can resolve their
+   * hidden ids (WhatsApp may send a person's messages without the number).
+   */
+  async setKnownPhones(accountId: string, phones: string[]): Promise<{ numbers: number; hiddenIds: number }> {
+    const response = await this.request("POST", accountPath(accountId, "/known-phones"), { phones });
+    if (!response.ok) return this.failure(response);
+    const body = await this.json(response);
+    return { numbers: Number(body.numbers) || 0, hiddenIds: Number(body.hiddenIds) || 0 };
+  }
+
   /** Close the socket but keep the login; the sidecar keeps it paused across restarts. */
   async pause(accountId: string): Promise<WhatsAppLinkStatus> {
     const response = await this.request("POST", accountPath(accountId, "/pause"));

@@ -154,7 +154,22 @@ export async function linkWhatsAppKnownPerson(
   return linked;
 }
 
-export function createWhatsAppKnownPeople(db: Db, options: { endpointRecord: (endpointId: string) => Promise<EndpointRecord | null> }) {
+export function createWhatsAppKnownPeople(db: Db, options: {
+  endpointRecord: (endpointId: string) => Promise<EndpointRecord | null>;
+  /** Hand the numbers to the sidecar so hidden-id senders resolve to them; best effort. */
+  syncPhones?: (accountId: string, phones: string[]) => Promise<unknown>;
+}) {
+  /** Best effort: a channel that is not linked yet syncs when it links. */
+  async function sync(endpoint: { publicId: string }, people: WhatsAppKnownPerson[]) {
+    if (!options.syncPhones) return false;
+    try {
+      await options.syncPhones(endpoint.publicId, people.map((p) => p.phone));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   async function whatsAppEndpoint(endpointId: string) {
     const record = await options.endpointRecord(endpointId);
     if (!record || record.endpoint.provider !== "whatsapp") throw notFound("WhatsApp channel not found");
@@ -196,8 +211,15 @@ export function createWhatsAppKnownPeople(db: Db, options: { endpointRecord: (en
       entityId: endpoint.connectionId,
       details: { endpointId: endpoint.id, count: people.length },
     });
-    return { people };
+    const synced = await sync(endpoint, people);
+    return { people, synced };
   }
 
-  return { list, replace };
+  /** After a number links: give the sidecar the stored list. */
+  async function syncStored(endpointId: string) {
+    const endpoint = await whatsAppEndpoint(endpointId);
+    return sync(endpoint, whatsAppKnownPeople(endpoint.setup));
+  }
+
+  return { list, replace, syncStored };
 }

@@ -3508,10 +3508,16 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
     },
   });
   const whatsAppSetup = createWhatsAppSetup(db, { client: whatsAppClient, endpointRecord, invalidateRuntime });
-  const whatsAppKnownPeople = createWhatsAppKnownPeople(db, { endpointRecord });
+  const whatsAppKnownPeople = createWhatsAppKnownPeople(db, {
+    endpointRecord,
+    syncPhones: (accountId, phones) => whatsAppClient.setKnownPhones(accountId, phones),
+  });
   async function whatsAppLinkStatus(endpointId: string, actorUserId?: string | null, managementContext?: ConnectionManagementContext) {
-    return whatsAppSetup.linkStatus(endpointId, (id, accountId) =>
-      configure(id, { action: "configure", credentials: { accountId } }, actorUserId ?? undefined, managementContext));
+    return whatsAppSetup.linkStatus(endpointId, async (id, accountId) => {
+      const configured = await configure(id, { action: "configure", credentials: { accountId } }, actorUserId ?? undefined, managementContext);
+      await whatsAppKnownPeople.syncStored(id);
+      return configured;
+    });
   }
   const { slackRegistration, verifySlackRequestUrl, sendSlackTestMessage } = createSlackSetupServices(db, {
     endpointRecord, ensurePrincipal, withCredentialMutationLease, resolveCredentials,
