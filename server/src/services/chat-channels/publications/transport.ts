@@ -1,6 +1,7 @@
 import { slackPublicationCard } from "../slack/cards.js";
 import type { PublicationTransportInput } from "./types.js";
 import { createPhotonPublicationDelivery } from "../imessage-photon/publications.js";
+import { WhatsAppChatAdapter } from "../../whatsapp/adapter.js";
 import { createOutboundAttachments } from "../outbound-attachments.js";
 import { discordMarkdownAttachment } from "../discord/messages.js";
 import { telegramMarkdownAttachment } from "../telegram/messages.js";
@@ -288,6 +289,15 @@ function safeCardForPublication(
     }
     if (input.endpoint.provider === "imessage-photon") {
       return deliverPhotonPublication(input, endpointRuntime, thread, text, files);
+    }
+    if (input.endpoint.provider === "whatsapp") {
+      // No edits on WhatsApp: a replacement is published as a new message.
+      // Every part is keyed by this publication's id, so an outbox retry is
+      // answered from the sidecar's idempotency ledger instead of resending.
+      const adapter = endpointRuntime.getProviderAdapter();
+      if (!(adapter instanceof WhatsAppChatAdapter)) throw new Error("WhatsApp runtime is unavailable");
+      return await attemptProviderPublication(() =>
+        adapter.publish(thread.id, input.publication.id, { text, files }));
     }
     if (
       input.endpoint.provider === "discord" &&

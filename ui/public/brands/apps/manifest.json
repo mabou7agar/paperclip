@@ -550,6 +550,12 @@
       "localAsset": "/brands/apps/imessage-photon.png"
     },
     {
+      "slug": "whatsapp",
+      "provider": "WhatsApp",
+      "catalogVisible": true,
+      "localAsset": "/brands/apps/whatsapp.svg"
+    },
+    {
       "slug": "jam-dev",
       "provider": "Jam.dev",
       "catalogVisible": false,

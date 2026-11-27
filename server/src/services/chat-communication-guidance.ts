@@ -3,7 +3,7 @@ import type { ChatProvider } from "@paperclipai/shared";
 import { slackTaskUpdateGuidance } from "./connectors/slack/task-update-guidance.js";
 
 const PROVIDER_LABELS: Partial<Record<ChatProvider, string>> = {
-  slack: "Slack", telegram: "Telegram", discord: "Discord", "microsoft-teams": "Microsoft Teams", "imessage-photon": "iMessage",
+  slack: "Slack", telegram: "Telegram", discord: "Discord", "microsoft-teams": "Microsoft Teams", "imessage-photon": "iMessage", whatsapp: "WhatsApp",
 };
 
 // Presentation guidance only. Task execution and permissions belong to the
@@ -21,6 +21,7 @@ const providerGuidance: Partial<Record<ChatProvider, string>> = {
   discord: directChatGuidance("Discord"),
   "microsoft-teams": directChatGuidance("Microsoft Teams"),
   "imessage-photon": directChatGuidance("iMessage"),
+  whatsapp: directChatGuidance("WhatsApp"),
   slack: [
     "This task began in Slack. Write replies for the person talking with you there.",
     ...slackTaskUpdateGuidance,

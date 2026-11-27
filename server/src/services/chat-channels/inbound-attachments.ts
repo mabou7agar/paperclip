@@ -113,7 +113,7 @@ export function createInboundAttachments(db: Db, options: InboundAttachmentsOpti
       omit("download_unavailable", input.unavailableReferenceCount);
     }
     if (
-      ["github", "imessage-photon"].includes(input.endpoint.provider) &&
+      ["github", "imessage-photon", "whatsapp"].includes(input.endpoint.provider) &&
       input.attachmentLimitOmissions
     ) {
       omit("attachment_limit", input.attachmentLimitOmissions);

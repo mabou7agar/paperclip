@@ -68,6 +68,11 @@ import { createChatCredentials } from "./chat-channels/credentials.js";
 import { createChatEndpoints } from "./chat-channels/endpoints.js";
 import { createChatConfiguration } from "./chat-channels/configuration.js";
 import { createPhotonSetupInspection } from "./chat-channels/imessage-photon/setup.js";
+import { createWhatsAppSetup } from "./chat-channels/whatsapp/setup.js";
+import { whatsAppSenderMetadata } from "./chat-channels/whatsapp/messages.js";
+import { createWhatsAppCredentialChecks } from "./chat-channels/whatsapp/credentials.js";
+import { WhatsAppSidecarClient } from "./whatsapp/sidecar-client.js";
+import { whatsAppSidecarConfig } from "./whatsapp/config.js";
 import { createChatSdkStatePersistence } from "./chat-channels/sdk-state.js";
 export { createChatSdkStatePersistence } from "./chat-channels/sdk-state.js";
 import { createChatInteractionCallbacks } from "./chat-channels/interactions/callbacks.js";
@@ -256,6 +261,8 @@ const REQUIRED_CREDENTIALS: Record<
 > = {
   speko: ["apiKey", "signingSecret", "agentId"],
   "imessage-photon": ["projectSecret"],
+  // Filled from the endpoint itself; the sidecar secret is instance-level.
+  whatsapp: ["accountId"],
   agentmail: [],
   slack: ["botToken", "signingSecret"],
   discord: ["botToken", "applicationId", "guildId"],
@@ -275,6 +282,7 @@ const SUPPORTED_GITHUB_WEBHOOK_EVENTS = new Set<string>([
 const SUPPLIED_CREDENTIAL_KEYS: Record<ChatProvider, readonly string[]> = {
   speko: ["apiKey", "signingSecret", "agentId"],
   "imessage-photon": ["projectSecret"],
+  whatsapp: [],
   agentmail: [],
   slack: ["botToken", "signingSecret"],
   github: ["appId", "privateKey"],
@@ -530,6 +538,8 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
   const persistence = createChatSdkStatePersistence(db);
   const fetchImpl = options.fetch ?? globalThis.fetch;
   const { inspectPhotonCredentials, verifyPhotonCredentials } = createPhotonCredentialChecks(fetchImpl);
+  const whatsAppClient = new WhatsAppSidecarClient(() => whatsAppSidecarConfig(), fetchImpl);
+  const { verifyWhatsAppCredentials } = createWhatsAppCredentialChecks(whatsAppClient);
   const { hydrateSlackResourceLabel } = createSlackInventory(db, { endpointRecord, resolveCredentials: (...args) => resolveCredentials(...args), fetchImpl });
   const configuredPublicBaseUrl = absoluteBaseUrl(options.publicBaseUrl);
   const configuredWebhookPublicBaseUrl = parseChatWebhookPublicBaseUrl(options.webhookPublicBaseUrl);
@@ -559,7 +569,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
   const secrets = secretService(db);
   const { normalizedCredentials, verifyCredentials, nativeBotIdentityMatches, legacyGitHubLabelsMatchVerifiedCredentials, assertNativeBotIdentityAvailable, isNativeBotIdentityUniqueViolation, nativeBotIdentityConflict, persistCredentials, clearCredentials, resolveCredentialRefs, resolveCredentials, prepareProviderInventory } = createChatCredentials(db, {
     secrets, PROVIDER_LABELS, REQUIRED_CREDENTIALS, PROVIDER_CREDENTIAL_CHECK_TIMEOUT_MS,
-    fetchImpl, redactError, credentialFingerprint, verifyPhotonCredentials,
+    fetchImpl, redactError, credentialFingerprint, verifyPhotonCredentials, verifyWhatsAppCredentials,
     preservesWebhookVerification: (endpoint, setup, credentials) => endpoint.provider === "slack" && preservesProvisionedSlackVerification(
       setup, credentials.signingSecret ?? "", `${getWebhookPublicBaseUrl()}/api/chat-webhooks/${endpoint.publicId}/slack`,
     ),
@@ -2300,6 +2310,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
                   title: `${PROVIDER_LABELS[endpoint.provider]} sender`,
                   rows: [
                     ...(endpoint.provider === "imessage-photon" ? photonReplyMetadata(message.raw) : []),
+                    ...(endpoint.provider === "whatsapp" ? whatsAppSenderMetadata(message.raw) : []),
                     {
                       type: "key_value",
                       label: "Name",
@@ -3439,7 +3450,13 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
     get githubWizard() { return githubWizard; },
     get nativeBotIdentityClaimBarrier() { return options.nativeBotIdentityClaimBarrier; },
     get allowLocalVoiceBoard() { return options.allowLocalVoiceBoard; },
+    unlinkWhatsApp: async (endpoint) => { await whatsAppClient.unlink(endpoint.publicId); },
   });
+  const whatsAppSetup = createWhatsAppSetup(db, { client: whatsAppClient, endpointRecord, invalidateRuntime });
+  async function whatsAppLinkStatus(endpointId: string, actorUserId?: string | null, managementContext?: ConnectionManagementContext) {
+    return whatsAppSetup.linkStatus(endpointId, (id, accountId) =>
+      configure(id, { action: "configure", credentials: { accountId } }, actorUserId ?? undefined, managementContext));
+  }
   const { slackRegistration, verifySlackRequestUrl, sendSlackTestMessage } = createSlackSetupServices(db, {
     endpointRecord, ensurePrincipal, withCredentialMutationLease, resolveCredentials,
     resolveCredentialRefs, configureWithCredentialLease, createLinkIntent,
@@ -3563,6 +3580,9 @@ return {
     generateSetupSecret,
     configure,
     inspectPhoton,
+    startWhatsAppLink: whatsAppSetup.startLink,
+    whatsAppLinkStatus,
+    unlinkWhatsApp: whatsAppSetup.unlink,
     test,
     finishSlackSetup: (endpointId: string, userId: string, managementContext?: ConnectionManagementContext) => test(endpointId, { optionalSlackTestForUser: userId }, managementContext),
     setupTestStatus,

@@ -3228,6 +3228,13 @@
       "when": 1795174326144,
       "tag": "0462_company_review_escalation_agent",
       "breakpoints": true
+    },
+    {
+      "idx": 463,
+      "version": "7",
+      "when": 1795260726144,
+      "tag": "0463_whatsapp_chat_provider",
+      "breakpoints": true
     }
   ]
 }

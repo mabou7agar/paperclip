@@ -22,7 +22,7 @@ export type {
 } from "@paperclipai/shared";
 
 export type ChatProvider =
-  "slack" | "github" | "discord" | "microsoft-teams" | "telegram" | "agentmail" | "imessage-photon" | "speko";
+  "slack" | "github" | "discord" | "microsoft-teams" | "telegram" | "agentmail" | "imessage-photon" | "whatsapp" | "speko";
 export type ChatEndpointStatus =
   | "draft"
   | "verifying"
@@ -31,6 +31,17 @@ export type ChatEndpointStatus =
   | "attention"
   | "revoked"
   | "archived";
+
+/** WhatsApp linking state from the server; carries no sidecar address or secret. */
+export interface WhatsAppLinkView {
+  state: "qr" | "pairing_code" | "linked" | "logged_out" | "connecting";
+  qrPngDataUrl?: string;
+  qrIssuedAt?: string;
+  code?: string;
+  linkedAs?: string;
+  lastError?: string;
+  endpointStatus: ChatEndpointStatus;
+}
 
 export type ChatEndpointSetupAction =
   "configure" | "verify" | "pause" | "resume" | "reconnect" | "remove";
@@ -236,6 +247,12 @@ export const chatEndpointsApi = {
     api.post<ChatEndpoint>(`/chat-endpoints/${endpointId}/slack/resume`, {}),
   inspectPhoton: (endpointId: string, input: { projectId: string; projectSecret: string }) =>
     api.post<PhotonProjectInspection>(`/chat-endpoints/${endpointId}/photon/inspect`, input),
+  startWhatsAppLink: (endpointId: string, input: { mode: "qr" } | { mode: "code"; phone: string }) =>
+    api.post<WhatsAppLinkView>(`/chat-endpoints/${endpointId}/whatsapp/link`, input),
+  whatsAppLinkStatus: (endpointId: string) =>
+    api.get<WhatsAppLinkView>(`/chat-endpoints/${endpointId}/whatsapp/link-status`),
+  unlinkWhatsApp: (endpointId: string) =>
+    api.post<WhatsAppLinkView>(`/chat-endpoints/${endpointId}/whatsapp/unlink`, {}),
   generateSetupSecret: (endpointId: string) =>
     api.post<ChatEndpointSetupSecret>(
       `/chat-endpoints/${endpointId}/setup-secret`,

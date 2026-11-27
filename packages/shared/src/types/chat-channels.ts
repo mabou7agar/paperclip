@@ -15,6 +15,7 @@ export const CHAT_PROVIDERS = [
   "speko",
   "agentmail",
   "imessage-photon",
+  "whatsapp",
 ] as const;
 export type ChatProvider = (typeof CHAT_PROVIDERS)[number];
 

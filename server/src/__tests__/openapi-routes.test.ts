@@ -808,6 +808,9 @@ describe("openapi routes", () => {
       ["post", "/api/chat-endpoints/{endpointId}/setup-secret"],
       ["post", "/api/chat-endpoints/{endpointId}/test"],
       ["post", "/api/chat-endpoints/{endpointId}/photon/inspect"],
+      ["post", "/api/chat-endpoints/{endpointId}/whatsapp/link"],
+      ["get", "/api/chat-endpoints/{endpointId}/whatsapp/link-status"],
+      ["post", "/api/chat-endpoints/{endpointId}/whatsapp/unlink"],
       ["get", "/api/chat-endpoints/{endpointId}/resources"],
       ["put", "/api/chat-endpoints/{endpointId}/resources"],
       ["get", "/api/chat-endpoints/{endpointId}/principals"],
@@ -879,7 +882,7 @@ describe("openapi routes", () => {
         properties: {
           provider: {
             type: "string",
-            enum: ["slack", "github", "discord", "microsoft-teams", "telegram", "speko", "imessage-photon"],
+            enum: ["slack", "github", "discord", "microsoft-teams", "telegram", "speko", "imessage-photon", "whatsapp"],
           },
           assignedAgentId: { type: "string", format: "uuid" },
         },

@@ -1,6 +1,7 @@
 import type { ChatProvider } from "@paperclipai/shared";
 import type { Author } from "chat";
 import { normalizeMicrosoftTeamsExternalPrincipalId } from "../chat-teams-credentials.js";
+import { whatsAppPrincipalIdFromRaw } from "../whatsapp/parse.js";
 
 
 // Provider message identity and chronology only. Callers retain authentication,
@@ -12,6 +13,7 @@ export function stableExternalPrincipalId(
   author: Author,
   raw?: unknown,
 ): string {
+  if (provider === "whatsapp") return whatsAppPrincipalIdFromRaw(raw) ?? author.userId;
   if (provider !== "microsoft-teams" || !raw || typeof raw !== "object")
     return author.userId;
   const from = (raw as { from?: unknown }).from;
