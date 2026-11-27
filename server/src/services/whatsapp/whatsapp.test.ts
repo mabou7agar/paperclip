@@ -1,10 +1,13 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { classifyChatPublicationError } from "../chat-publication-errors.js";
 import { stableExternalPrincipalId } from "../chat-channels/message-lifecycle.js";
 import { whatsAppIdentityFromStatus } from "../chat-channels/whatsapp/credentials.js";
 import { normalizeWhatsAppLinkInput } from "../chat-channels/whatsapp/setup.js";
 import { WhatsAppChatAdapter } from "./adapter.js";
-import { parseWhatsAppSidecarConfig } from "./config.js";
+import { parseWhatsAppSidecarConfig, whatsAppSidecarConfig, whatsAppSidecarFileEnv, WhatsAppSidecarUnconfiguredError } from "./config.js";
 import {
   markdownToWhatsApp,
   parseWhatsAppInboundEvent,
@@ -78,6 +81,22 @@ describe("WhatsApp instance configuration", () => {
     expect(JSON.stringify(parsed)).not.toContain(SECRET);
     expect(() => parseWhatsAppSidecarConfig({ PAPERCLIP_WHATSAPP_SIDECAR_URL: "http://sidecar", PAPERCLIP_WHATSAPP_SIDECAR_SECRET: "short" })).toThrow();
     expect(() => parseWhatsAppSidecarConfig({ PAPERCLIP_WHATSAPP_SIDECAR_URL: "http://u:p@sidecar", PAPERCLIP_WHATSAPP_SIDECAR_SECRET: SECRET })).toThrow();
+  });
+
+  it("falls back to the instance file when the environment has no sidecar", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "wa-config-"));
+    const file = path.join(dir, "whatsapp-sidecar.json");
+    expect(whatsAppSidecarFileEnv(file)).toEqual({});
+    writeFileSync(file, JSON.stringify({ url: "http://whatsapp-sidecar:8787", secret: SECRET }));
+    const fromFile = whatsAppSidecarConfig({}, () => whatsAppSidecarFileEnv(file));
+    expect(fromFile.url).toBe("http://whatsapp-sidecar:8787");
+    expect(fromFile.secret).toBe(SECRET);
+    // The environment wins when it is complete.
+    const fromEnv = whatsAppSidecarConfig({ PAPERCLIP_WHATSAPP_SIDECAR_URL: "http://env:1", PAPERCLIP_WHATSAPP_SIDECAR_SECRET: SECRET }, () => whatsAppSidecarFileEnv(file));
+    expect(fromEnv.url).toBe("http://env:1");
+    writeFileSync(file, "not json");
+    expect(() => whatsAppSidecarFileEnv(file)).toThrow(/not valid JSON/);
+    expect(() => whatsAppSidecarConfig({}, () => ({}))).toThrow(WhatsAppSidecarUnconfiguredError);
   });
 });
 

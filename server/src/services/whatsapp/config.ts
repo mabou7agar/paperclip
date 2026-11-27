@@ -1,3 +1,7 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { resolvePaperclipInstanceRoot } from "../../home-paths.js";
+
 /**
  * Instance settings for the WhatsApp sidecar. Read at call time so an operator
  * can add the sidecar without a code change; the secret is never logged or
@@ -11,7 +15,7 @@ export interface WhatsAppSidecarConfig {
 export class WhatsAppSidecarUnconfiguredError extends Error {
   constructor() {
     super(
-      "WhatsApp is not available on this instance: set PAPERCLIP_WHATSAPP_SIDECAR_URL and PAPERCLIP_WHATSAPP_SIDECAR_SECRET",
+      "WhatsApp is not available on this instance: set PAPERCLIP_WHATSAPP_SIDECAR_URL and PAPERCLIP_WHATSAPP_SIDECAR_SECRET, or write secrets/whatsapp-sidecar.json in the instance folder",
     );
     this.name = "WhatsAppSidecarUnconfiguredError";
   }
@@ -44,10 +48,38 @@ export function parseWhatsAppSidecarConfig(
   return config;
 }
 
+/**
+ * The instance file `secrets/whatsapp-sidecar.json` ({"url", "secret"}), used
+ * when the environment does not set the sidecar. It lets an operator add the
+ * sidecar to a running instance without changing the container environment.
+ */
+export function whatsAppSidecarFileEnv(
+  file = path.join(resolvePaperclipInstanceRoot(), "secrets", "whatsapp-sidecar.json"),
+): Record<string, string | undefined> {
+  let raw: string;
+  try {
+    raw = readFileSync(file, "utf8");
+  } catch {
+    return {};
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("secrets/whatsapp-sidecar.json is not valid JSON");
+  }
+  const value = (parsed ?? {}) as { url?: unknown; secret?: unknown };
+  return {
+    PAPERCLIP_WHATSAPP_SIDECAR_URL: typeof value.url === "string" ? value.url : undefined,
+    PAPERCLIP_WHATSAPP_SIDECAR_SECRET: typeof value.secret === "string" ? value.secret : undefined,
+  };
+}
+
 export function whatsAppSidecarConfig(
   env: Record<string, string | undefined> = process.env,
+  fileEnv: () => Record<string, string | undefined> = () => whatsAppSidecarFileEnv(),
 ): WhatsAppSidecarConfig {
-  const config = parseWhatsAppSidecarConfig(env);
+  const config = parseWhatsAppSidecarConfig(env) ?? parseWhatsAppSidecarConfig(fileEnv());
   if (!config) throw new WhatsAppSidecarUnconfiguredError();
   return config;
 }
