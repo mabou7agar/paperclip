@@ -30,6 +30,14 @@ export interface WhatsAppInboundEvent {
   text: string;
   quotedId: string | null;
   media?: WhatsAppInboundMedia;
+  /**
+   * Absent for an ordinary message. "reaction": the sender reacted to
+   * targetId with emoji ("" when the reaction was removed). "edit": the
+   * sender edited targetId; text is the new text.
+   */
+  type?: "reaction" | "edit";
+  targetId?: string;
+  emoji?: string;
 }
 
 export class WhatsAppEventError extends Error {
@@ -92,6 +100,20 @@ export function parseWhatsAppInboundEvent(value: unknown, expectedAccountId: str
     fromLid = jidMatch[1];
   }
   const pushName = optionalStr(raw.pushName, "pushName", 200);
+  if (raw.type === "reaction" || raw.type === "edit") {
+    const targetId = str(raw.targetId, "targetId", 256);
+    if (!MESSAGE_ID.test(targetId)) throw new WhatsAppEventError("Invalid WhatsApp target message id");
+    const base = { version: 1 as const, accountId, messageId, timestamp, fromJid, fromPhone, fromLid, pushName, quotedId: null, targetId };
+    if (raw.type === "reaction") {
+      const emoji = typeof raw.emoji === "string" ? raw.emoji : "";
+      if (Array.from(emoji).length > 8) throw new WhatsAppEventError("Invalid WhatsApp reaction");
+      return { ...base, type: "reaction", emoji, text: "" };
+    }
+    if (typeof raw.text !== "string") throw new WhatsAppEventError("Invalid WhatsApp edit");
+    return { ...base, type: "edit", text: raw.text.slice(0, MAX_TEXT) };
+  }
+  if (raw.type !== undefined && raw.type !== null && raw.type !== "message")
+    throw new WhatsAppEventError("Unsupported WhatsApp event type");
   const text = typeof raw.text === "string" ? raw.text.slice(0, MAX_TEXT) : "";
   const quotedId = optionalStr(raw.quotedId, "quotedId", 256);
   const event: WhatsAppInboundEvent = {

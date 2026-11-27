@@ -7,7 +7,9 @@ export type WhatsAppLinkState =
   | "pairing_code"
   | "linked"
   | "logged_out"
-  | "connecting";
+  | "connecting"
+  /** The channel is paused: the login is kept, the socket is closed. */
+  | "paused";
 
 export interface WhatsAppLinkStatus {
   state: WhatsAppLinkState;
@@ -33,7 +35,9 @@ export type WhatsAppSidecarErrorCode =
   | "not_linked"
   | "rejected"
   | "delivery_unknown"
-  | "invalid_response";
+  | "invalid_response"
+  /** The sidecar holds this channel paused. */
+  | "paused";
 
 export class WhatsAppSidecarError extends Error {
   constructor(
@@ -46,7 +50,7 @@ export class WhatsAppSidecarError extends Error {
   }
 }
 
-const LINK_STATES = new Set<WhatsAppLinkState>(["qr", "pairing_code", "linked", "logged_out", "connecting"]);
+const LINK_STATES = new Set<WhatsAppLinkState>(["qr", "pairing_code", "linked", "logged_out", "connecting", "paused"]);
 const ACCOUNT_ID = /^[A-Za-z0-9_-]{8,64}$/;
 const REQUEST_TIMEOUT_MS = 20_000;
 const SEND_TIMEOUT_MS = 120_000;
@@ -125,6 +129,7 @@ export class WhatsAppSidecarClient {
     const code = typeof body?.error === "string" ? body.error : "";
     if (response.status === 401) throw new WhatsAppSidecarError("unauthorized", "The WhatsApp service refused Paperclip's signature; check PAPERCLIP_WHATSAPP_SIDECAR_SECRET", 401);
     if (code === "not_linked") throw new WhatsAppSidecarError("not_linked", "WhatsApp is not linked for this channel", response.status);
+    if (code === "paused") throw new WhatsAppSidecarError("paused", "This WhatsApp channel is paused", response.status);
     if (response.status >= 500 || response.status === 429)
       throw new WhatsAppSidecarError(send && response.status !== 429 ? "delivery_unknown" : "unavailable", "The WhatsApp service could not complete the request", response.status);
     const message = typeof body?.message === "string" && body.message.length <= 200 ? body.message : "WhatsApp rejected the request";
@@ -165,6 +170,40 @@ export class WhatsAppSidecarClient {
     const bytes = Buffer.from(await response.arrayBuffer());
     if (bytes.length > MAX_ATTACHMENT_BYTES) throw new WhatsAppSidecarError("rejected", "Attachment exceeds the configured size limit");
     return bytes;
+  }
+
+  /** Close the socket but keep the login; the sidecar keeps it paused across restarts. */
+  async pause(accountId: string): Promise<WhatsAppLinkStatus> {
+    const response = await this.request("POST", accountPath(accountId, "/pause"));
+    if (!response.ok) return this.failure(response);
+    return parseWhatsAppLinkStatus(await this.json(response));
+  }
+
+  /** Reconnect a paused login. */
+  async resume(accountId: string): Promise<WhatsAppLinkStatus> {
+    const response = await this.request("POST", accountPath(accountId, "/resume"));
+    if (!response.ok) return this.failure(response);
+    return parseWhatsAppLinkStatus(await this.json(response));
+  }
+
+  /** Typing indicator. Best effort; the sidecar drops repeats within seconds. */
+  async presence(accountId: string, input: { jid: string; state: "composing" | "paused" }): Promise<void> {
+    const response = await this.request("POST", accountPath(accountId, "/presence"), input, 10_000);
+    if (!response.ok) await this.failure(response);
+  }
+
+  /** React to a message; an empty emoji removes the reaction. */
+  async react(accountId: string, input: { jid: string; messageId: string; emoji: string }): Promise<void> {
+    const response = await this.request("POST", accountPath(accountId, "/react"), input, SEND_TIMEOUT_MS);
+    if (!response.ok) await this.failure(response);
+  }
+
+  /** Edit a message this channel sent (WhatsApp allows 15 minutes). */
+  async edit(accountId: string, input: { jid: string; messageId: string; text: string }): Promise<{ messageId: string }> {
+    const response = await this.request("POST", accountPath(accountId, "/edit"), input, SEND_TIMEOUT_MS);
+    if (!response.ok) return this.failure(response);
+    const body = await this.json(response);
+    return { messageId: typeof body.messageId === "string" && body.messageId ? body.messageId : input.messageId };
   }
 
   async unlink(accountId: string): Promise<void> {

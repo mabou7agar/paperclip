@@ -27,7 +27,10 @@ export function whatsAppHttpError(error: unknown): never {
 
 /** The identity Paperclip records once the sidecar reports a linked number. */
 export function whatsAppIdentityFromStatus(status: WhatsAppLinkStatus): VerifiedProviderIdentity {
-  if (status.state !== "linked" || !status.me)
+  // A saved login that is reconnecting or held paused still proves the
+  // number; resume verifies while the socket is coming back.
+  const holdsLogin = status.state === "linked" || status.state === "paused" || status.state === "connecting";
+  if (!holdsLogin || !status.me)
     throw unprocessable("Link WhatsApp first: scan the QR code (or enter the pairing code) on the phone", {
       code: "whatsapp_not_linked",
     });

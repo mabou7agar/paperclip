@@ -2,6 +2,7 @@ import { isPassiveSlackAction, normalizeSlackSelectionAction, slackSelectionValu
 import { PhotonChatAdapter, parsePhotonThreadId } from "./photon/adapter.js";
 import { WhatsAppChatAdapter, type WhatsAppMediaLocator } from "./whatsapp/adapter.js";
 import { whatsAppSidecarConfig } from "./whatsapp/config.js";
+import { WhatsAppState } from "./whatsapp/state.js";
 import { PhotonLineAuthentication } from "./photon/cloud.js";
 import { PhotonState } from "./photon/state.js";
 import { PhotonReceiver } from "./photon/receiver.js";
@@ -480,6 +481,8 @@ export interface DiscordGatewayCallbackEvent extends ChatSdkCallbackEvent<Discor
 export interface ChatSdkRuntimeCallbacks {
   onPhotonEvent?(event: PhotonEvent): Promise<void>;
   onPhotonAssertOwned?(activeThreadId?: string): Promise<void>;
+  /** WhatsApp: whether a card prompt's interaction is still pending. */
+  onWhatsAppPromptPending?(interactionId: string): Promise<boolean>;
   onPhotonCheckpoint?(sequence: number): Promise<void>;
   onPhotonFailure?(error: unknown): Promise<void>;
   onMessage(event: ChatSdkMessageCallbackEvent): Promise<void> | void;
@@ -2126,7 +2129,8 @@ export class ChatSdkEndpointRuntime {
           new PhotonLineAuthentication(options.providerConfig.credentials, options.providerConfig.credentials.projectSecret),
           new PhotonState({ companyId: options.companyId, endpointId: options.endpointId }, options.persistence))
       : options.providerConfig.provider === "whatsapp"
-      ? new WhatsAppChatAdapter(options.providerConfig.userName, options.providerConfig.credentials, () => whatsAppSidecarConfig())
+      ? new WhatsAppChatAdapter(options.providerConfig.userName, options.providerConfig.credentials, () => whatsAppSidecarConfig(), undefined,
+          new WhatsAppState({ companyId: options.companyId, endpointId: options.endpointId }, options.persistence))
       : createProviderAdapter(
       options.providerConfig,
       options.logger,
@@ -2318,6 +2322,10 @@ export class ChatSdkEndpointRuntime {
         assertOwned: async () => { this.assertNotRetired(); await (this.adapter as PhotonChatAdapter).authentication.token(); await options.callbacks.onPhotonAssertOwned!(); },
         commitCheckpoint: options.callbacks.onPhotonCheckpoint, admit: options.callbacks.onPhotonEvent, failure: options.callbacks.onPhotonFailure });
       this.photonReceiver.start();
+    }
+    if (this.adapter instanceof WhatsAppChatAdapter && this.runtimeOptions.callbacks.onWhatsAppPromptPending) {
+      const pending = this.runtimeOptions.callbacks.onWhatsAppPromptPending;
+      this.adapter.promptPending = async (interactionId) => { this.assertNotRetired(); return pending(interactionId); };
     }
     if (this.provider === "discord" && this.discordGatewayEnabled) {
       this.startDiscordGateway();

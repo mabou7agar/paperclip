@@ -18,9 +18,12 @@ const PROVIDER_LABELS: Record<ChatProvider, string> = {
 const CAPABILITIES: Record<ChatProvider, ChatAdapterCapabilities> = {
   speko: { threads: false, directMessages: true, nativeStreaming: false, messageEdits: false, messageDeletes: false, reactions: false, files: false, cards: false, actions: false, modals: false, slashCommands: false, ephemeralMessages: false, proactiveDirectMessages: false },
   "imessage-photon": { threads: false, directMessages: true, nativeStreaming: false, messageEdits: true, messageDeletes: false, reactions: false, files: true, cards: false, actions: true, modals: false, slashCommands: false, ephemeralMessages: false, proactiveDirectMessages: false },
-  // Phase 1: direct messages with text and files through the sidecar. No
-  // edits, deletes, reactions or typing are published.
-  whatsapp: { threads: false, directMessages: true, nativeStreaming: false, messageEdits: false, messageDeletes: false, reactions: false, files: true, cards: false, actions: true, modals: false, slashCommands: false, ephemeralMessages: false, proactiveDirectMessages: false },
+  // Direct messages with text and files through the sidecar. Cards are sent
+  // as numbered text prompts answered by reply (cards: false, actions: true,
+  // like Photon). Inbound reactions are recorded. messageEdits stays false so
+  // the publication outbox posts new messages (which notify the phone and
+  // never hit WhatsApp's 15-minute edit window); the adapter can still edit.
+  whatsapp: { threads: false, directMessages: true, nativeStreaming: false, messageEdits: false, messageDeletes: false, reactions: true, files: true, cards: false, actions: true, modals: false, slashCommands: false, ephemeralMessages: false, proactiveDirectMessages: false },
   agentmail: { threads: true, directMessages: true, nativeStreaming: false, messageEdits: false, messageDeletes: false, reactions: false, files: true, cards: false, actions: false, modals: false, slashCommands: false, ephemeralMessages: false, proactiveDirectMessages: true },
   slack: {
     threads: true,
