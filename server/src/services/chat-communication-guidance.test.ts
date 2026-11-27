@@ -42,7 +42,7 @@ describe("initial medium communication guidance", () => {
     expect(guidance).toContain("If no public task URL is available, say that the link is unavailable");
   });
 
-  const directChatProviders = ["telegram", "discord", "microsoft-teams", "imessage-photon"] as const;
+  const directChatProviders = ["telegram", "discord", "microsoft-teams", "imessage-photon", "whatsapp"] as const;
 
   it.each(directChatProviders)("guides %s replies toward the company's product and applies owner instructions", (provider) => {
     const guidance = buildChatCommunicationGuidance({ provider, isDirectMessage: true, communicationInstructions: "Answer about OSARH." });
