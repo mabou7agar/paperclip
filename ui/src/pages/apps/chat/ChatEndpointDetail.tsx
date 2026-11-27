@@ -69,6 +69,7 @@ import { useBreadcrumbs } from "@/context/BreadcrumbContext";
 import { useToast } from "@/context/ToastContext";
 import { formatDateTime } from "@/lib/utils";
 import { queryKeys } from "@/lib/queryKeys";
+import { WhatsAppSenderSettings } from "./WhatsAppSenderSettings";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import { Link, Navigate, useLocation, useNavigate, useParams } from "@/lib/router";
 import { describeError } from "@/api/errors";
@@ -129,7 +130,7 @@ const providerLifecycleGuidance: Record<
     remove: "Disconnect archives this channel and removes its saved secret. Your Photon project, number, subscription, and Messages history remain in Photon.",
   },
   whatsapp: {
-    reconnect: "Reconnect links the same WhatsApp number again by QR code or pairing code. A different number needs a new channel.",
+    reconnect: "Reconnect links the same WhatsApp number again by QR code or pairing code. To use a different number, unlink this one first, or add another channel for it.",
     remove: "Disconnect archives this channel and logs the number out of WhatsApp. Messages already on the phone stay in WhatsApp.",
   },
   telegram: {
@@ -860,11 +861,11 @@ function Access({
           </div>
         )}
       </div>
-      <SlackSetupAdvanced label="Guest access">
+      {endpoint.provider === "whatsapp" ? <WhatsAppSenderSettings endpoint={endpoint} /> : <SlackSetupAdvanced label="Guest access">
         <SettingToggle label="Allow unlinked people"
           detail="People without linked accounts can start isolated tasks. They cannot approve actions, spend, or manage access. Requests are refused when isolation is unavailable."
           checked={allowUnlinked} pending={updatePolicy.isPending} onChange={value => updatePolicy.mutate(value)} />
-      </SlackSetupAdvanced>
+      </SlackSetupAdvanced>}
       {endpoint.provider === "slack" && <SlackSetupAdvanced label="Personal Slack search"><SlackSearchAccess companyId={endpoint.companyId} endpointId={endpointId} /></SlackSetupAdvanced>}
     </section>
   );

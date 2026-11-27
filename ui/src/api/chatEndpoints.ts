@@ -34,7 +34,7 @@ export type ChatEndpointStatus =
 
 /** WhatsApp linking state from the server; carries no sidecar address or secret. */
 export interface WhatsAppLinkView {
-  state: "qr" | "pairing_code" | "linked" | "logged_out" | "connecting";
+  state: "qr" | "pairing_code" | "linked" | "logged_out" | "connecting" | "paused";
   qrPngDataUrl?: string;
   qrIssuedAt?: string;
   code?: string;
@@ -170,6 +170,11 @@ export interface ChatEndpoint {
       slashCommands: ChatCallbackSurfaceState;
     };
     callbacksNeedUpdate?: boolean;
+    /** Telegram and WhatsApp: owner cards are pushed to the linked owner's DM. */
+    ownerCardPush?: boolean;
+    /** WhatsApp: ignore unlinked senders, or answer them as customers. */
+    whatsAppUnknownSenders?: import("@paperclipai/shared").WhatsAppUnknownSenderPolicy;
+    whatsAppCustomerRateLimit?: import("@paperclipai/shared").WhatsAppCustomerRateLimit;
   };
 }
 
