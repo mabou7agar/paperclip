@@ -70,6 +70,7 @@ import { useToast } from "@/context/ToastContext";
 import { formatDateTime } from "@/lib/utils";
 import { queryKeys } from "@/lib/queryKeys";
 import { WhatsAppSenderSettings } from "./WhatsAppSenderSettings";
+import { ChatClientGroupsSettings } from "./ChatClientGroupsSettings";
 import { copyTextToClipboard } from "@/lib/clipboard";
 import { Link, Navigate, useLocation, useNavigate, useParams } from "@/lib/router";
 import { describeError } from "@/api/errors";
@@ -636,10 +637,12 @@ function Settings({
               }
             />
           )}
-          {endpoint.provider === "microsoft-teams" && (
+          {(endpoint.provider === "microsoft-teams" || endpoint.provider === "whatsapp") && (
             <SettingToggle
               label="Allow group chats"
-              detail="The bot may participate in group chats where it is installed."
+              detail={endpoint.provider === "whatsapp"
+                ? "Team members can mention this number in any group it is in. Groups with a client are answered either way."
+                : "The bot may participate in group chats where it is installed."}
               checked={endpoint.allowGroupChats ?? false}
               pending={updateEndpoint.isPending}
               onChange={(allowGroupChats) =>
@@ -866,6 +869,7 @@ function Access({
           detail="People without linked accounts can start isolated tasks. They cannot approve actions, spend, or manage access. Requests are refused when isolation is unavailable."
           checked={allowUnlinked} pending={updatePolicy.isPending} onChange={value => updatePolicy.mutate(value)} />
       </SlackSetupAdvanced>}
+      {(endpoint.provider === "whatsapp" || endpoint.provider === "telegram") && <ChatClientGroupsSettings endpoint={endpoint} />}
       {endpoint.provider === "slack" && <SlackSetupAdvanced label="Personal Slack search"><SlackSearchAccess companyId={endpoint.companyId} endpointId={endpointId} /></SlackSetupAdvanced>}
     </section>
   );

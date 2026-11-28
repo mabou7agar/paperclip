@@ -55,6 +55,7 @@ export const queryKeys = {
     principals: (endpointId: string) => ["chat-endpoints", endpointId, "principals"] as const,
     conversations: (endpointId: string) => ["chat-endpoints", endpointId, "conversations"] as const,
     activity: (endpointId: string) => ["chat-endpoints", endpointId, "activity"] as const,
+    clientGroups: (endpointId: string) => ["chat-endpoints", endpointId, "client-groups"] as const,
   },
   tools: {
     aggregatorApps: (connectionId: string, userId: string | null) => ["tools", "aggregator-apps", connectionId, userId] as const,
