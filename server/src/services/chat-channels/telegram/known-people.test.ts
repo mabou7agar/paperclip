@@ -51,8 +51,10 @@ describe("Telegram pre-approved people", () => {
     const inserted: unknown[] = [];
     const updates: unknown[] = [];
     const queue = [...selects];
-    const chain = (): unknown => {
-      const rows = queue.shift() ?? [];
+    // The setup row is answered by what is selected, not by order: the activity log may read in between.
+    const setupRows = queue.length > 3 ? queue.splice(3, 1)[0] : [];
+    const chain = (fields?: Record<string, unknown>): unknown => {
+      const rows = fields && "setup" in fields ? setupRows : queue.shift() ?? [];
       const node: Record<string, unknown> = {};
       for (const key of ["from", "where", "for", "limit", "innerJoin", "leftJoin"]) node[key] = () => node;
       node.then = (resolve: (value: unknown) => unknown) => resolve(rows);
@@ -60,7 +62,7 @@ describe("Telegram pre-approved people", () => {
     };
     const tx = {
       execute: async () => undefined,
-      select: () => chain(),
+      select: (fields?: Record<string, unknown>) => chain(fields),
       insert: () => ({ values: (value: unknown) => { inserted.push(value); return { onConflictDoUpdate: async () => undefined }; } }),
       update: () => ({ set: (value: unknown) => { updates.push(value); return { where: async () => undefined }; } }),
     };
