@@ -20,13 +20,30 @@ export interface WhatsAppInboundEvent {
   accountId: string;
   messageId: string;
   timestamp: number;
-  /** One-to-one chat JID, without a device suffix. */
+  /**
+   * The sender's personal JID, without a device suffix: the one-to-one chat,
+   * or the participant who wrote in a group.
+   */
   fromJid: string;
   /** Sender number, digits only, when WhatsApp or the LID mapping revealed it. */
   fromPhone: string | null;
   /** Sender hidden id (LID user part) when the chat is addressed by LID. */
   fromLid: string | null;
   pushName: string | null;
+  /**
+   * Username WhatsApp itself asserted for the sender (lowercase, no "@"): the
+   * participant username on a group stanza, or the hidden id WhatsApp returned
+   * for a pre-approved username. Never derived from the display name.
+   */
+  fromUsername?: string;
+  /** Present for a group message: the group, its subject and whether it addresses this number. */
+  chatType?: "group";
+  groupJid?: string;
+  groupSubject?: string;
+  /** Provider-reported: the sender is an admin of the group. Absent when unknown. */
+  senderIsGroupAdmin?: boolean;
+  /** The message mentions this number or replies to one of its messages. */
+  mentionsMe?: boolean;
   text: string;
   quotedId: string | null;
   media?: WhatsAppInboundMedia;
@@ -50,11 +67,24 @@ export class WhatsAppEventError extends Error {
 const ACCOUNT_ID = /^[A-Za-z0-9_-]{8,64}$/;
 const MESSAGE_ID = /^[\x21-\x7e]{1,256}$/;
 const PERSONAL_JID = /^(\d{3,32})@(s\.whatsapp\.net|lid)$/;
+const GROUP_JID = /^\d[\d-]{4,63}@g\.us$/;
+const USERNAME = /^(?=[a-z0-9._]*[a-z])(?!\.)(?!.*\.\.)[a-z0-9._]{3,35}(?<!\.)$/;
 const MAX_TEXT = 64 * 1024;
 const MEDIA_KINDS = new Set(["image", "audio", "video", "document"]);
 
 export function isPersonalWhatsAppJid(jid: string): boolean {
   return PERSONAL_JID.test(jid);
+}
+
+export function isWhatsAppGroupJid(jid: string): boolean {
+  return GROUP_JID.test(jid);
+}
+
+/** A WhatsApp username as Paperclip stores it (lowercase, no "@"), or null. */
+export function normalizeWhatsAppUsername(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const name = value.trim().replace(/^@/, "").toLowerCase();
+  return USERNAME.test(name) ? name : null;
 }
 
 function str(value: unknown, field: string, max: number): string {
@@ -100,10 +130,29 @@ export function parseWhatsAppInboundEvent(value: unknown, expectedAccountId: str
     fromLid = jidMatch[1];
   }
   const pushName = optionalStr(raw.pushName, "pushName", 200);
+  const extra: Partial<WhatsAppInboundEvent> = {};
+  if (raw.fromUsername !== undefined && raw.fromUsername !== null) {
+    const username = normalizeWhatsAppUsername(raw.fromUsername);
+    if (!username) throw new WhatsAppEventError("Invalid WhatsApp sender username");
+    extra.fromUsername = username;
+  }
+  if (raw.chatType !== undefined && raw.chatType !== null) {
+    if (raw.chatType !== "group") throw new WhatsAppEventError("Unsupported WhatsApp chat type");
+    const groupJid = str(raw.groupJid, "groupJid", 80);
+    if (!GROUP_JID.test(groupJid)) throw new WhatsAppEventError("Invalid WhatsApp group");
+    extra.chatType = "group";
+    extra.groupJid = groupJid;
+    const subject = optionalStr(raw.groupSubject, "groupSubject", 200);
+    if (subject && subject.trim()) extra.groupSubject = subject.replace(/[\r\n]+/g, " ").trim();
+    if (typeof raw.senderIsGroupAdmin === "boolean") extra.senderIsGroupAdmin = raw.senderIsGroupAdmin;
+    extra.mentionsMe = raw.mentionsMe === true;
+  } else if (raw.groupJid !== undefined && raw.groupJid !== null) {
+    throw new WhatsAppEventError("WhatsApp group field without a group chat");
+  }
   if (raw.type === "reaction" || raw.type === "edit") {
     const targetId = str(raw.targetId, "targetId", 256);
     if (!MESSAGE_ID.test(targetId)) throw new WhatsAppEventError("Invalid WhatsApp target message id");
-    const base = { version: 1 as const, accountId, messageId, timestamp, fromJid, fromPhone, fromLid, pushName, quotedId: null, targetId };
+    const base = { version: 1 as const, accountId, messageId, timestamp, fromJid, fromPhone, fromLid, pushName, ...extra, quotedId: null, targetId };
     if (raw.type === "reaction") {
       const emoji = typeof raw.emoji === "string" ? raw.emoji : "";
       if (Array.from(emoji).length > 8) throw new WhatsAppEventError("Invalid WhatsApp reaction");
@@ -125,6 +174,7 @@ export function parseWhatsAppInboundEvent(value: unknown, expectedAccountId: str
     fromPhone,
     fromLid,
     pushName,
+    ...extra,
     text,
     quotedId: quotedId && MESSAGE_ID.test(quotedId) ? quotedId : null,
   };
@@ -177,19 +227,35 @@ export interface WhatsAppThread {
   jid: string;
 }
 
+/**
+ * Conversation identity: `whatsapp:<publicId>:d:<base64url(jid)>` for a
+ * one-to-one chat, `whatsapp:<publicId>:g:<base64url(groupJid)>` for a group.
+ */
 export function whatsAppThreadId(value: WhatsAppThread): string {
   if (!ACCOUNT_ID.test(value.accountId)) throw new Error("Invalid WhatsApp account id");
-  if (!isPersonalWhatsAppJid(value.jid)) throw new Error("WhatsApp conversations must be one-to-one chats");
-  return `whatsapp:${value.accountId}:d:${Buffer.from(value.jid).toString("base64url")}`;
+  const kind = isPersonalWhatsAppJid(value.jid) ? "d" : isWhatsAppGroupJid(value.jid) ? "g" : null;
+  if (!kind) throw new Error("WhatsApp conversations must be one-to-one or group chats");
+  return `whatsapp:${value.accountId}:${kind}:${Buffer.from(value.jid).toString("base64url")}`;
 }
 
 export function parseWhatsAppThreadId(value: string): WhatsAppThread {
-  const match = /^whatsapp:([A-Za-z0-9_-]{8,64}):d:([A-Za-z0-9_-]{1,256})$/.exec(value);
+  const match = /^whatsapp:([A-Za-z0-9_-]{8,64}):([dg]):([A-Za-z0-9_-]{1,256})$/.exec(value);
   if (!match) throw new Error("Invalid WhatsApp conversation identity");
-  const jid = Buffer.from(match[2], "base64url").toString("utf8");
-  if (Buffer.from(jid).toString("base64url") !== match[2] || !isPersonalWhatsAppJid(jid))
+  const jid = Buffer.from(match[3], "base64url").toString("utf8");
+  const valid = match[2] === "d" ? isPersonalWhatsAppJid(jid) : isWhatsAppGroupJid(jid);
+  if (Buffer.from(jid).toString("base64url") !== match[3] || !valid)
     throw new Error("Invalid WhatsApp chat identity");
   return { accountId: match[1], jid };
+}
+
+/** The group JID of a group conversation identity, or null for a one-to-one chat or anything else. */
+export function whatsAppGroupJidOfThread(threadId: string): string | null {
+  try {
+    const { jid } = parseWhatsAppThreadId(threadId);
+    return isWhatsAppGroupJid(jid) ? jid : null;
+  } catch {
+    return null;
+  }
 }
 
 /** WhatsApp has no Markdown; keep bold/italic/code readable in its own syntax. */
