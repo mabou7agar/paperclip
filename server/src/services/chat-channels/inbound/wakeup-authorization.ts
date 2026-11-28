@@ -168,6 +168,7 @@ export function createInboundWakeAuthority(db: Db, options: WakeAuthorityOptions
       tx,
       endpoint,
       action.principalId,
+      { resource, isDirectMessage: conversation.isDirectMessage },
     );
     if (notice?.taskRetry && !githubTaskRetryDestinationMatches(delivery, conversation, resource)) throw deny("destination_binding");
     if (endpoint.provider === "github") {

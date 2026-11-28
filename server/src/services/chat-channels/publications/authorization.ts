@@ -45,7 +45,12 @@ type PublicationAuthorizationOptions = {
   fetchImpl: typeof globalThis.fetch;
   githubCurrentOmissionPreparedText: ReturnType<typeof createGitHubPublicationPolicy>["githubCurrentOmissionPreparedText"];
   hasCommittedTaskControlCompletion: ReturnType<typeof createChatPublicationTaskControl>["hasCommittedTaskControlCompletion"];
-  lockCurrentPrincipalAuthorization: (tx: DbOrTransaction, endpoint: EndpointRow, principalId: string) => Promise<{ allowed: boolean; userId?: string | null }>;
+  lockCurrentPrincipalAuthorization: (
+    tx: DbOrTransaction,
+    endpoint: EndpointRow,
+    principalId: string,
+    scope?: { resource?: typeof chatEndpointResources.$inferSelect | null; isDirectMessage?: boolean },
+  ) => Promise<{ allowed: boolean; userId?: string | null }>;
   nonDirectDestinationAllowed: (endpoint: EndpointRow, resource: typeof chatEndpointResources.$inferSelect | null | undefined) => boolean;
   resolveCredentials: (endpoint: EndpointRow, tx?: DbOrTransaction) => Promise<Record<string, string>>;
   runtimeCallbackEndpoint: (tx: DbTransaction, endpointId: string, context: LifecycleRuntimeFence, statuses: EndpointRow["status"][]) => Promise<EndpointRow | null>;
@@ -291,6 +296,7 @@ export function createChatPublicationAuthorization(db: Db, options: PublicationA
           tx,
           endpoint,
           authorizationAction.principalId,
+          { resource, isDirectMessage: conversation.isDirectMessage },
         );
         if (!authorization.allowed) return null;
         const [claimedAuthorization] = await tx

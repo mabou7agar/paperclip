@@ -186,6 +186,9 @@ function providerSetupState(
               whatsAppCustomerRateLimit: whatsAppCustomerRateLimit(endpoint.setup),
             }
           : {}),
+        ...(endpoint.provider === "whatsapp" || endpoint.provider === "telegram"
+          ? { answerClientGroups: endpoint.setup?.answerClientGroups !== false }
+          : {}),
         ...(endpoint.provider === "github"
           ? {
               webhookSecretConfigured: row.credentialSecretRefs.some(
@@ -481,12 +484,18 @@ function providerSetupState(
           if (input.whatsAppCustomerRateLimit !== undefined)
             values.setup = { ...(values.setup ?? existing.endpoint.setup), whatsAppCustomerRateLimit: input.whatsAppCustomerRateLimit };
         }
+        if (input.answerClientGroups !== undefined) {
+          if (existing.endpoint.provider !== "whatsapp" && existing.endpoint.provider !== "telegram")
+            throw unprocessable("Client groups only apply to WhatsApp and Telegram connections");
+          values.setup = { ...(values.setup ?? existing.endpoint.setup), answerClientGroups: input.answerClientGroups };
+        }
         await managementContext?.reauthorize();
       await db.transaction(async (tx) => {
           await credentialLease.assertOwned(tx);
           if ((input.allowDirectMessages === true && !existing.endpoint.allowDirectMessages)
             || (input.allowGroupChats === true && !existing.endpoint.allowGroupChats)
-            || (values.allowUnlinkedPeople === true && !existing.endpoint.allowUnlinkedPeople)) {
+            || (values.allowUnlinkedPeople === true && !existing.endpoint.allowUnlinkedPeople)
+            || (input.answerClientGroups === true && existing.endpoint.setup?.answerClientGroups === false)) {
             await notifyChatCompanyAuthorityChange(tx, { companyId: existing.endpoint.companyId });
           }
           if (input.executionDefaults !== undefined) {
