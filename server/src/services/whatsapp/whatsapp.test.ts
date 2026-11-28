@@ -133,8 +133,11 @@ describe("WhatsApp event parsing and identities", () => {
     const id = whatsAppThreadId({ accountId: ACCOUNT, jid: "4915550001@s.whatsapp.net" });
     expect(id.startsWith(`whatsapp:${ACCOUNT}:d:`)).toBe(true);
     expect(parseWhatsAppThreadId(id)).toEqual({ accountId: ACCOUNT, jid: "4915550001@s.whatsapp.net" });
-    expect(() => whatsAppThreadId({ accountId: ACCOUNT, jid: "120363@g.us" })).toThrow();
+    // Groups get their own ":g:" identity (phase 4); a group JID never passes as a one-to-one chat.
+    expect(whatsAppThreadId({ accountId: ACCOUNT, jid: "120363@g.us" }).startsWith(`whatsapp:${ACCOUNT}:g:`)).toBe(true);
+    expect(() => whatsAppThreadId({ accountId: ACCOUNT, jid: "status@broadcast" })).toThrow();
     expect(() => parseWhatsAppThreadId(`whatsapp:${ACCOUNT}:d:${Buffer.from("120363@g.us").toString("base64url")}`)).toThrow();
+    expect(() => parseWhatsAppThreadId(`whatsapp:${ACCOUNT}:g:${Buffer.from("4915550001@s.whatsapp.net").toString("base64url")}`)).toThrow();
   });
 
   it("formats Markdown for WhatsApp and splits long text", () => {
@@ -573,5 +576,207 @@ describe("WhatsApp pre-approved people", () => {
     const removed = fakeDb([[{ status: "revoked", userId: "u1" }]]);
     expect(await linkWhatsAppKnownPerson(removed.db as never, endpoint([{ phone: "4915550001", paperclipUserId: "u1" }]) as never, { id: "p", externalId: "4915550001" })).toBeNull();
     expect(removed.inserted).toEqual([]);
+  });
+});
+
+// ---- Phase 4: usernames and client groups ---------------------------------
+
+import { whatsAppSenderMetadata } from "../chat-channels/whatsapp/messages.js";
+import {
+  CLIENT_GROUP_USAGE,
+  answersClientGroups,
+  clientGroupForResource,
+  clientGroupSenderRows,
+  clientGroupTaskDescription,
+  clientGroupTaskTitle,
+  parseClientGroupCommand,
+  withClientGroupGuidance,
+} from "../chat-channels/client-groups/core.js";
+import { nonDirectDestinationAllowed, providerResourceType, canonicalProviderResourceId } from "../chat-channels/inbound/surfaces.js";
+import { whatsAppGroupJidOfThread } from "./parse.js";
+
+const GROUP = "120363025246125486@g.us";
+
+describe("WhatsApp usernames", () => {
+  it("parses a sender username WhatsApp asserted and refuses a malformed one", () => {
+    expect(parseWhatsAppInboundEvent(event({ fromUsername: "Lead.Dev" }), ACCOUNT).fromUsername).toBe("lead.dev");
+    expect(parseWhatsAppInboundEvent(event(), ACCOUNT).fromUsername).toBeUndefined();
+    expect(() => parseWhatsAppInboundEvent(event({ fromUsername: "a b" }), ACCOUNT)).toThrow(/username/);
+    // A username-only sender keeps its hidden-id principal; the username is shown, never the key.
+    const hidden = parseWhatsAppInboundEvent(event({ fromJid: "55443322@lid", fromPhone: null, fromLid: "55443322", fromUsername: "lead.dev" }), ACCOUNT);
+    expect(whatsAppExternalPrincipalId(hidden)).toBe("lid:55443322");
+    expect(whatsAppSenderMetadata(hidden)).toEqual([
+      { type: "key_value", label: "WhatsApp number", value: "Hidden by WhatsApp" },
+      { type: "key_value", label: "Username", value: "@lead.dev" },
+    ]);
+  });
+
+  const setup = (people: unknown) => ({ step: "complete", whatsAppKnownPeople: people }) as never;
+
+  it("pre-approves by username as well as number, matching number first", () => {
+    expect(normalizeWhatsAppKnownPeople([
+      { phone: "+49 155 50001", paperclipUserId: "u1" },
+      { username: "@Lead.Dev", paperclipUserId: "u2" },
+      { phone: "4915550002", username: "teacher_one", paperclipUserId: "u3" },
+      { username: "LEAD.DEV", paperclipUserId: "u4" },
+    ])).toEqual([
+      { phone: "4915550001", paperclipUserId: "u1" },
+      { phone: "4915550002", username: "teacher_one", paperclipUserId: "u3" },
+      { username: "lead.dev", paperclipUserId: "u4" },
+    ]);
+    expect(() => normalizeWhatsAppKnownPeople([{ paperclipUserId: "u1" }])).toThrow(/number or username/);
+    expect(() => normalizeWhatsAppKnownPeople([{ username: "x y", paperclipUserId: "u1" }])).toThrow(/username/);
+    const people = setup([{ phone: "4915550001", paperclipUserId: "u1" }, { username: "lead.dev", paperclipUserId: "u2" }, { username: "BAD NAME", paperclipUserId: "u9" }]);
+    expect(whatsAppKnownPersonFor(people, "4915550001", "lead.dev")).toEqual({ phone: "4915550001", paperclipUserId: "u1" });
+    expect(whatsAppKnownPersonFor(people, "lid:55443322", "Lead.Dev")).toEqual({ username: "lead.dev", paperclipUserId: "u2" });
+    expect(whatsAppKnownPersonFor(people, "lid:55443322", null)).toBeNull();
+  });
+
+  /** Selects in order: existing link, membership, conflicting link. */
+  function fakeDb(selects: unknown[][]) {
+    const inserted: unknown[] = [];
+    const queue = [...selects];
+    const chain = (): unknown => {
+      const rows = queue.shift() ?? [];
+      const node: Record<string, unknown> = {};
+      for (const key of ["from", "where", "for", "limit", "innerJoin", "leftJoin"]) node[key] = () => node;
+      node.then = (resolve: (value: unknown) => unknown) => resolve(rows);
+      return node;
+    };
+    const tx = {
+      execute: async () => undefined,
+      select: () => chain(),
+      insert: () => ({ values: (value: unknown) => { inserted.push(value); return { onConflictDoUpdate: async () => undefined }; } }),
+      update: () => ({ set: () => ({ where: async () => undefined }) }),
+    };
+    return { db: { ...tx, transaction: async (fn: (t: typeof tx) => unknown) => fn(tx) }, inserted };
+  }
+  const endpoint = (people: unknown) => ({ id: "endpoint", companyId: "company", connectionId: "connection", provider: "whatsapp", setup: { step: "complete", whatsAppKnownPeople: people } });
+
+  it("links a username-only sender only from the username WhatsApp asserted, never from the display name", async () => {
+    const list = [{ username: "lead.dev", paperclipUserId: "u2" }];
+    const asserted = fakeDb([[], [{ userId: "u2", role: "member" }], []]);
+    expect(await linkWhatsAppKnownPerson(asserted.db as never, endpoint(list) as never, { id: "p", externalId: "lid:55443322" }, { fromUsername: "lead.dev", pushName: "x" })).toBe("u2");
+    expect(asserted.inserted.filter((row) => (row as { principalId?: unknown }).principalId)).toEqual([expect.objectContaining({ principalId: "p", paperclipUserId: "u2", status: "linked" })]);
+    const displayName = fakeDb([]);
+    expect(await linkWhatsAppKnownPerson(displayName.db as never, endpoint(list) as never, { id: "p", externalId: "lid:55443322" }, { pushName: "lead.dev" })).toBeNull();
+    expect(displayName.inserted).toEqual([]);
+    const removed = fakeDb([[{ status: "revoked", userId: "u2" }]]);
+    expect(await linkWhatsAppKnownPerson(removed.db as never, endpoint(list) as never, { id: "p", externalId: "lid:55443322" }, { fromUsername: "lead.dev" })).toBeNull();
+    const viewer = fakeDb([[], [{ userId: "u2", role: "viewer" }]]);
+    expect(await linkWhatsAppKnownPerson(viewer.db as never, endpoint(list) as never, { id: "p", externalId: "lid:55443322" }, { fromUsername: "lead.dev" })).toBeNull();
+  });
+
+  it("sends usernames and the group switch to the sidecar with the numbers", async () => {
+    const fetchImpl = vi.fn(async (_url: RequestInfo | URL, init?: RequestInit) => new Response(JSON.stringify({ numbers: 1, hiddenIds: 1, usernameIds: 1, groups: true }), { status: 200 }));
+    const client = new WhatsAppSidecarClient(() => config, fetchImpl as never);
+    await expect(client.setKnownPhones(ACCOUNT, ["4915550001"], { usernames: ["lead.dev"], groups: true }))
+      .resolves.toEqual({ numbers: 1, hiddenIds: 1, usernameIds: 1, groups: true });
+    expect(JSON.parse(String(fetchImpl.mock.calls[0]![1]!.body))).toEqual({ phones: ["4915550001"], usernames: ["lead.dev"], groups: true });
+  });
+});
+
+describe("WhatsApp groups", () => {
+  const groupEvent = (overrides: Record<string, unknown> = {}) =>
+    event({ chatType: "group", groupJid: GROUP, groupSubject: "Academy X support", senderIsGroupAdmin: true, mentionsMe: false, ...overrides });
+
+  it("parses group events closed and gives groups their own conversation identity", () => {
+    const parsed = parseWhatsAppInboundEvent(groupEvent(), ACCOUNT);
+    expect(parsed).toMatchObject({ chatType: "group", groupJid: GROUP, groupSubject: "Academy X support", senderIsGroupAdmin: true, mentionsMe: false, fromPhone: "4915550001" });
+    expect(() => parseWhatsAppInboundEvent(groupEvent({ groupJid: "status@broadcast" }), ACCOUNT)).toThrow(/group/);
+    expect(() => parseWhatsAppInboundEvent(groupEvent({ chatType: "newsletter" }), ACCOUNT)).toThrow(/chat type/);
+    expect(() => parseWhatsAppInboundEvent(event({ groupJid: GROUP }), ACCOUNT)).toThrow(/without a group/);
+    const threadId = whatsAppThreadId({ accountId: ACCOUNT, jid: GROUP });
+    expect(threadId).toMatch(new RegExp(`^whatsapp:${ACCOUNT}:g:`));
+    expect(whatsAppGroupJidOfThread(threadId)).toBe(GROUP);
+    expect(whatsAppGroupJidOfThread(whatsAppThreadId({ accountId: ACCOUNT, jid: "4915550001@s.whatsapp.net" }))).toBeNull();
+  });
+
+  it("dispatches group messages to the group thread, addressed only by a mention or /client, and replies quote the asker", async () => {
+    const send = vi.fn(async (_account: string, input: { idempotencyKey: string }) => ({ messageId: `id:${input.idempotencyKey}` }));
+    const client = { send, presence: vi.fn(async () => ({ sent: true })) } as unknown as WhatsAppSidecarClient;
+    const wa = new WhatsAppChatAdapter("Agent", { accountId: ACCOUNT, phoneNumber: "4917600000000" }, () => config, client);
+    const processMessage = vi.fn(async () => undefined);
+    await wa.initialize({ processMessage } as never);
+    const path = `/api/chat-webhooks/${ACCOUNT}/whatsapp`;
+    const post = async (body: string) =>
+      wa.handleWebhook(new Request(`http://paperclip${path}`, { method: "POST", body, headers: whatsAppSignedHeaders({ secret: SECRET, method: "POST", path, body }) }));
+    expect((await post(JSON.stringify(groupEvent({ messageId: "G1", text: "do you open on Friday?" })))).status).toBe(200);
+    expect((await post(JSON.stringify(groupEvent({ messageId: "G2", text: "@4917600000000 /client Academy X | 42" })))).status).toBe(200);
+    expect((await post(JSON.stringify(groupEvent({ messageId: "G3", text: "hey bot", mentionsMe: true })))).status).toBe(200);
+    const calls = processMessage.mock.calls as unknown as Array<[unknown, string, { isMention?: boolean }]>;
+    const groupThread = whatsAppThreadId({ accountId: ACCOUNT, jid: GROUP });
+    expect(calls.map(([, threadId]) => threadId)).toEqual([groupThread, groupThread, groupThread]);
+    expect(calls.map(([, , message]) => message.isMention)).toEqual([false, true, true]);
+    expect(wa.isDM(groupThread)).toBe(false);
+    expect((await wa.fetchThread(groupThread)).channelName).toBe("Academy X support");
+    await wa.publish(groupThread, "pub-group", { text: "We open at 9." });
+    expect(send.mock.calls.at(-1)![1]).toMatchObject({ jid: GROUP, quotedId: "G3" });
+  });
+
+  it("maps a WhatsApp group to one resource admitted by the group switch or by enabling", () => {
+    expect(providerResourceType("whatsapp", "linear_group", false)).toBe("group_chat");
+    expect(canonicalProviderResourceId("whatsapp", { channelId: whatsAppThreadId({ accountId: ACCOUNT, jid: GROUP }), id: "x" })).toBe(GROUP);
+    const resource = { type: "group_chat", availability: "available", enabled: false } as never;
+    expect(nonDirectDestinationAllowed({ provider: "whatsapp", allowGroupChats: true } as never, resource)).toBe(true);
+    expect(nonDirectDestinationAllowed({ provider: "whatsapp", allowGroupChats: false } as never, resource)).toBe(false);
+    expect(nonDirectDestinationAllowed({ provider: "whatsapp", allowGroupChats: false } as never, { ...(resource as object), enabled: true } as never)).toBe(true);
+  });
+});
+
+describe("Client groups", () => {
+  it("parses /client commands and leaves ordinary text alone", () => {
+    expect(parseClientGroupCommand("/client")).toEqual({ kind: "show" });
+    expect(parseClientGroupCommand("/client@osarh_bot clear")).toEqual({ kind: "clear" });
+    expect(parseClientGroupCommand("@4917600000000 /client Academy X | 42")).toEqual({ kind: "set", academyName: "Academy X", academyId: "42" });
+    expect(parseClientGroupCommand("/client Academy X")).toEqual({ kind: "usage", reason: "missing_separator" });
+    expect(parseClientGroupCommand("/client  | 42")).toEqual({ kind: "usage", reason: "invalid_fields" });
+    expect(parseClientGroupCommand("this is Academy X, id 42")).toBeNull();
+    expect(parseClientGroupCommand("please /client me")).toBeNull();
+    expect(CLIENT_GROUP_USAGE).toContain("/client <academy name> | <academy id>");
+  });
+
+  const client = { academyName: "Academy X", academyId: "42", introducedByUserId: "u1", introducedAt: "2026-11-28T00:00:00.000Z", source: "group_command" };
+
+  it("finds a group's client only in a client-group provider's group", () => {
+    const resource = { type: "group_chat", availability: "available", metadata: { clientGroup: client } };
+    expect(clientGroupForResource({ provider: "whatsapp" }, resource, false)).toEqual(client);
+    expect(clientGroupForResource({ provider: "whatsapp" }, resource, true)).toBeNull();
+    expect(clientGroupForResource({ provider: "slack" }, resource, false)).toBeNull();
+    expect(clientGroupForResource({ provider: "telegram" }, { ...resource, type: "chat" }, false)).toEqual(client);
+    expect(clientGroupForResource({ provider: "whatsapp" }, { ...resource, availability: "removed" }, false)).toBeNull();
+    expect(clientGroupForResource({ provider: "whatsapp" }, { ...resource, metadata: { clientGroup: { academyName: "" } } }, false)).toBeNull();
+    expect(answersClientGroups({ provider: "whatsapp", setup: {} })).toBe(true);
+    expect(answersClientGroups({ provider: "telegram", setup: { answerClientGroups: false } })).toBe(false);
+  });
+
+  it("tells the agent whose group it is, scopes lookups and forbids internal information", () => {
+    const guidance = buildChatCommunicationGuidance({ provider: "whatsapp", isDirectMessage: false, customer: true, clientGroup: client })!;
+    expect(guidance).toContain("customer on WhatsApp");
+    expect(guidance).toContain("## Client group");
+    expect(guidance).toContain("Academy X (academy id 42)");
+    expect(guidance).toContain("scope every lookup to academy id 42");
+    expect(guidance).toMatch(/Never share internal information in this group/);
+    const telegram = buildChatCommunicationGuidance({ provider: "telegram", isDirectMessage: false, customer: true, clientGroup: client })!;
+    expect(telegram).toContain("customer on Telegram");
+    // A team member's conversation in the group keeps team guidance plus the client section.
+    const staff = buildChatCommunicationGuidance({ provider: "telegram", isDirectMessage: false, clientGroup: client })!;
+    expect(staff).not.toContain("customer on Telegram");
+    expect(staff).toContain("## Client group");
+    // Changing the client replaces only that section.
+    const changed = withClientGroupGuidance(guidance, { academyName: "Academy Y", academyId: "7" })!;
+    expect(changed).toContain("Academy Y (academy id 7)");
+    expect(changed).not.toContain("academy id 42");
+    expect(withClientGroupGuidance(guidance, null)).not.toContain("## Client group");
+  });
+
+  it("puts the academy on the task and the sender rows", () => {
+    expect(clientGroupTaskTitle("Login fails", client)).toBe("[Academy X] Login fails");
+    expect(clientGroupTaskTitle("Login fails", null)).toBe("Login fails");
+    expect(clientGroupTaskDescription("Started from WhatsApp: Academy X support", client)).toBe("Started from WhatsApp: Academy X support\nClient academy: Academy X\nAcademy id: 42");
+    expect(clientGroupSenderRows(client)).toEqual([
+      { type: "key_value", label: "Client academy", value: "Academy X" },
+      { type: "key_value", label: "Academy id", value: "42" },
+    ]);
   });
 });

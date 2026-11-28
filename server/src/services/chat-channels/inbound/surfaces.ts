@@ -5,6 +5,7 @@ import type { EndpointRow } from "../runtime-types.js";
 import { baseTeamsConversationId } from "../microsoft-teams/resources.js";
 import { slackResourceLabelIsFallback } from "../slack/resources.js";
 import { telegramResourceLabelIsFallback } from "../telegram/resources.js";
+import { whatsAppGroupJidOfThread } from "../../whatsapp/parse.js";
 
 import {
   canonicalTeamsThreadId,
@@ -42,6 +43,8 @@ function providerResourceType(
   // operator grants access to the chat once rather than having to rediscover
   // and enable every topic independently.
   if (provider === "telegram") return "chat";
+  // WhatsApp groups: one resource per group, linear task generations like Photon groups.
+  if (provider === "whatsapp") return "group_chat";
   return "channel";
 }
 
@@ -87,6 +90,8 @@ function canonicalProviderResourceId(
   }
   if (provider === "telegram")
     return thread.channelId.replace(/^telegram:/, "");
+  if (provider === "whatsapp")
+    return whatsAppGroupJidOfThread(thread.channelId) ?? thread.channelId;
   return thread.channelId;
 }
 
@@ -119,7 +124,7 @@ function chatSurfaceKind(
 ): ChatSurfaceKind {
   if (provider === "slack" && slackThreadRootMessageId(thread.id)) return "native_thread";
   if (thread.isDM) return "direct_message";
-  if (provider === "imessage-photon") return "linear_group";
+  if (provider === "imessage-photon" || provider === "whatsapp") return "linear_group";
   if (provider === "telegram") {
     return /^telegram:[^:]+:[^:]+$/.test(thread.id)
       ? "native_thread"
@@ -150,6 +155,12 @@ function nonDirectDestinationAllowed(
     resource.type === "group_chat"
   ) {
     return endpoint.allowGroupChats;
+  }
+  // WhatsApp groups are admitted as a class by the channel's group switch, or
+  // one by one (introducing a client enables its group). Who may speak there
+  // is still decided per sender: unlinked people only in a client group.
+  if (endpoint.provider === "whatsapp" && resource.type === "group_chat") {
+    return endpoint.allowGroupChats || resource.enabled;
   }
   return resource.enabled;
 }

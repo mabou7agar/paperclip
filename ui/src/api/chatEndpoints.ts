@@ -175,6 +175,8 @@ export interface ChatEndpoint {
     /** WhatsApp: ignore unlinked senders, or answer them as customers. */
     whatsAppUnknownSenders?: import("@paperclipai/shared").WhatsAppUnknownSenderPolicy;
     whatsAppCustomerRateLimit?: import("@paperclipai/shared").WhatsAppCustomerRateLimit;
+    /** WhatsApp and Telegram: unlinked people in client groups are answered as the client's customers. */
+    answerClientGroups?: boolean;
   };
 }
 
@@ -258,6 +260,10 @@ export const chatEndpointsApi = {
     api.get<WhatsAppLinkView>(`/chat-endpoints/${endpointId}/whatsapp/link-status`),
   unlinkWhatsApp: (endpointId: string) =>
     api.post<WhatsAppLinkView>(`/chat-endpoints/${endpointId}/whatsapp/unlink`, {}),
+  clientGroups: (endpointId: string) =>
+    api.get<{ groups: import("@paperclipai/shared").ChatClientGroup[] }>(`/chat-endpoints/${endpointId}/client-groups`),
+  setClientGroup: (endpointId: string, resourceId: string, client: { academyName: string; academyId: string } | null) =>
+    api.put<import("@paperclipai/shared").ChatClientGroup>(`/chat-endpoints/${endpointId}/client-groups/${resourceId}`, { client }),
   generateSetupSecret: (endpointId: string) =>
     api.post<ChatEndpointSetupSecret>(
       `/chat-endpoints/${endpointId}/setup-secret`,

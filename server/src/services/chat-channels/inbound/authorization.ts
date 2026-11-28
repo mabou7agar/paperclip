@@ -36,6 +36,7 @@ import type {
   Author,
   Thread,
 } from "chat";
+import { answersClientGroups, clientGroupForResource } from "../client-groups/core.js";
 import { canonicalProviderResourceId, chatSurfaceKind, providerResourceLabelFromThread, providerResourceType, nonDirectDestinationAllowed } from "./surfaces.js";
 type ResourceRow = typeof chatEndpointResources.$inferSelect;
 type InboundAuthorityOptions = {
@@ -177,6 +178,12 @@ export function createChatInboundAuthority(db: Db, options: InboundAuthorityOpti
     tx: DbOrTransaction,
     endpoint: EndpointRow,
     principalId: string,
+    /**
+     * The group the action belongs to, when the caller knows it. An unlinked
+     * person in a WhatsApp or Telegram client group is a customer of that
+     * client even when the channel otherwise ignores unlinked people.
+     */
+    scope?: { resource?: ResourceRow | null; isDirectMessage?: boolean },
   ): Promise<{
     allowed: boolean;
     linkedDenied: boolean;
@@ -245,7 +252,10 @@ export function createChatInboundAuthority(db: Db, options: InboundAuthorityOpti
         userId: allowed ? link.userId : null,
       };
     }
-    if (!endpoint.allowUnlinkedPeople) {
+    const clientGroupGuest =
+      answersClientGroups(endpoint) &&
+      clientGroupForResource(endpoint, scope?.resource ?? null, scope?.isDirectMessage ?? true) !== null;
+    if (!endpoint.allowUnlinkedPeople && !clientGroupGuest) {
       return { allowed: false, linkedDenied: false, userId: null };
     }
     if (!endpoint.sponsorUserId) {

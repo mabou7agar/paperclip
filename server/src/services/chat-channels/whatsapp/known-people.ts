@@ -1,47 +1,60 @@
-import { and, eq, inArray, ne, sql } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
-import { chatEndpoints, chatIdentityLinks, companyMemberships } from "@paperclipai/db";
+import { chatEndpoints } from "@paperclipai/db";
 import type { ChatEndpointSetupState } from "@paperclipai/shared";
 import { conflict, notFound, unprocessable } from "../../../errors.js";
 import { logActivity } from "../../activity-log.js";
 import { notifyChatCompanyAuthorityChange } from "../../chat-run-milestone-notifications.js";
+import { normalizeWhatsAppUsername } from "../../whatsapp/parse.js";
+import { KNOWN_PEOPLE_MAX, activeNonViewerMembers, linkPreapprovedPerson, type KnownPeopleDb } from "../known-people.js";
 import type { EndpointRecord, EndpointRow } from "../runtime-types.js";
 
 /**
- * Pre-approved people for a WhatsApp channel: phone number -> Paperclip user.
- * When an unlinked sender's number matches, the first message creates a
- * normal identity link to that user (shown in the channel's People list and
- * removable there) and is processed as that user. It lets a team move from
+ * Pre-approved people for a WhatsApp channel: phone number and/or WhatsApp
+ * username -> Paperclip user. When an unlinked sender matches, the first
+ * message creates a normal identity link to that user (shared rules in
+ * ../known-people.ts) and is processed as that user. It lets a team move from
  * another WhatsApp setup without each person confirming a link first.
  *
- * Only numbers match: a sender WhatsApp knows only by hidden id ("lid:...")
- * never does. A link an admin removed (revoked) is never recreated from the
- * list; remove the number from the list as well, or link the person again by
- * hand. Stored in the endpoint's setup JSON (no table, no migration).
+ * Matching order: the sender's number (which the sidecar also fills in for a
+ * hidden id it resolved from a pre-approved number), then the sender's
+ * username. A username only counts when WhatsApp itself asserted it (the
+ * sidecar's `fromUsername`, from the group stanza or WhatsApp's answer to a
+ * username lookup), never from the display name. A sender known only by
+ * hidden id and without a username never matches. Stored in the endpoint's
+ * setup JSON (no table, no migration).
  */
-export const WHATSAPP_KNOWN_PEOPLE_MAX = 500;
+export const WHATSAPP_KNOWN_PEOPLE_MAX = KNOWN_PEOPLE_MAX;
 
 export interface WhatsAppKnownPerson {
   /** E.164 digits, no "+". */
-  phone: string;
+  phone?: string;
+  /** WhatsApp username, lowercase, no "@". */
+  username?: string;
   paperclipUserId: string;
 }
 
 type SetupWithKnownPeople = ChatEndpointSetupState & { whatsAppKnownPeople?: unknown };
 
-/** Digits-only, de-duplicated (last entry for a number wins), bounded. */
-export function normalizeWhatsAppKnownPeople(input: Array<{ phone: string; paperclipUserId: string }>): WhatsAppKnownPerson[] {
+/** Digits-only numbers, lowercase usernames, de-duplicated (last entry for a number or username wins), bounded. */
+export function normalizeWhatsAppKnownPeople(input: Array<{ phone?: string; username?: string; paperclipUserId: string }>): WhatsAppKnownPerson[] {
   if (input.length > WHATSAPP_KNOWN_PEOPLE_MAX) throw unprocessable(`At most ${WHATSAPP_KNOWN_PEOPLE_MAX} people can be pre-approved`);
-  const byPhone = new Map<string, WhatsAppKnownPerson>();
+  const people: WhatsAppKnownPerson[] = [];
   for (const entry of input) {
-    const phone = String(entry.phone ?? "").replace(/\D+/g, "");
-    if (phone.length < 6 || phone.length > 15) throw unprocessable(`Invalid WhatsApp number: ${String(entry.phone).slice(0, 32)}`);
+    const rawPhone = entry.phone === undefined || entry.phone === null ? "" : String(entry.phone);
+    const phone = rawPhone.replace(/\D+/g, "");
+    if (rawPhone && (phone.length < 6 || phone.length > 15)) throw unprocessable(`Invalid WhatsApp number: ${rawPhone.slice(0, 32)}`);
+    const hasUsername = entry.username !== undefined && entry.username !== null && String(entry.username).trim() !== "";
+    const username = hasUsername ? normalizeWhatsAppUsername(entry.username) : null;
+    if (hasUsername && !username) throw unprocessable(`Invalid WhatsApp username: ${String(entry.username).slice(0, 40)}`);
+    if (!phone && !username) throw unprocessable("Each pre-approved person needs a WhatsApp number or username");
     const userId = String(entry.paperclipUserId ?? "").trim();
     if (!userId || userId.length > 128) throw unprocessable("Each pre-approved number needs a Paperclip user");
-    byPhone.delete(phone);
-    byPhone.set(phone, { phone, paperclipUserId: userId });
+    for (let index = people.length - 1; index >= 0; index--)
+      if ((phone && people[index]!.phone === phone) || (username && people[index]!.username === username)) people.splice(index, 1);
+    people.push({ ...(phone ? { phone } : {}), ...(username ? { username } : {}), paperclipUserId: userId });
   }
-  return [...byPhone.values()];
+  return people;
 }
 
 /** The stored list, ignoring malformed entries. */
@@ -50,120 +63,76 @@ export function whatsAppKnownPeople(setup: ChatEndpointSetupState | null | undef
   if (!Array.isArray(raw)) return [];
   return raw.flatMap((entry) => {
     if (!entry || typeof entry !== "object") return [];
-    const { phone, paperclipUserId } = entry as Record<string, unknown>;
-    return typeof phone === "string" && /^\d{6,15}$/.test(phone) && typeof paperclipUserId === "string" && paperclipUserId
-      ? [{ phone, paperclipUserId }]
-      : [];
+    const { phone, username, paperclipUserId } = entry as Record<string, unknown>;
+    const validPhone = typeof phone === "string" && /^\d{6,15}$/.test(phone) ? phone : null;
+    const validUsername = typeof username === "string" && normalizeWhatsAppUsername(username) === username ? username : null;
+    if ((!validPhone && !validUsername) || typeof paperclipUserId !== "string" || !paperclipUserId) return [];
+    return [{ ...(validPhone ? { phone: validPhone } : {}), ...(validUsername ? { username: validUsername } : {}), paperclipUserId }];
   });
-}
-
-/** The entry for a sender's principal id; a hidden-id ("lid:") sender never matches. */
-export function whatsAppKnownPersonFor(
-  setup: ChatEndpointSetupState | null | undefined,
-  externalId: string,
-): WhatsAppKnownPerson | null {
-  if (!/^\d{6,20}$/.test(externalId)) return null;
-  return whatsAppKnownPeople(setup).find((entry) => entry.phone === externalId) ?? null;
-}
-
-type DbLike = Pick<Db, "select" | "update" | "insert" | "execute" | "transaction">;
-
-async function activeMember(db: Pick<Db, "select">, companyId: string, userIds: string[]) {
-  if (!userIds.length) return new Set<string>();
-  const rows = await db
-    .select({ userId: companyMemberships.principalId, role: companyMemberships.membershipRole })
-    .from(companyMemberships)
-    .where(
-      and(
-        eq(companyMemberships.companyId, companyId),
-        eq(companyMemberships.principalType, "user"),
-        eq(companyMemberships.status, "active"),
-        inArray(companyMemberships.principalId, userIds),
-      ),
-    );
-  // Viewers are read-only on external chat, so a link for them would act for no one.
-  return new Set(rows.filter((row) => row.role !== "viewer").map((row) => row.userId));
 }
 
 /**
- * Inbound pass: link the sender to the pre-approved user, if the list names
- * the sender's number, the user is an active non-viewer member right now, and
- * no admin removed a link for this sender. Returns the linked user id, or null.
+ * The entry for a sender: by number first (the principal id is the number), then
+ * by the username WhatsApp asserted. A hidden-id ("lid:") sender without a
+ * username never matches.
+ */
+export function whatsAppKnownPersonFor(
+  setup: ChatEndpointSetupState | null | undefined,
+  externalId: string,
+  username?: string | null,
+): WhatsAppKnownPerson | null {
+  const people = whatsAppKnownPeople(setup);
+  if (/^\d{6,20}$/.test(externalId)) {
+    const byPhone = people.find((entry) => entry.phone === externalId);
+    if (byPhone) return byPhone;
+  }
+  const name = username ? normalizeWhatsAppUsername(username) : null;
+  return name ? people.find((entry) => entry.username === name) ?? null : null;
+}
+
+/** The username the sidecar asserted on a signed event, or null. */
+export function whatsAppUsernameFromRaw(raw: unknown): string | null {
+  if (!raw || typeof raw !== "object") return null;
+  return normalizeWhatsAppUsername((raw as { fromUsername?: unknown }).fromUsername);
+}
+
+/**
+ * Inbound pass: link the sender to the pre-approved user, if the list names the
+ * sender's number or WhatsApp-asserted username, the user is an active
+ * non-viewer member right now, and no admin removed a link for this sender.
+ * Returns the linked user id, or null.
  */
 export async function linkWhatsAppKnownPerson(
-  db: DbLike,
+  db: KnownPeopleDb,
   endpoint: EndpointRow,
   principal: { id: string; externalId: string },
+  raw?: unknown,
 ): Promise<string | null> {
   if (endpoint.provider !== "whatsapp") return null;
-  const entry = whatsAppKnownPersonFor(endpoint.setup, principal.externalId);
+  const username = whatsAppUsernameFromRaw(raw);
+  const entry = whatsAppKnownPersonFor(endpoint.setup, principal.externalId, username);
   if (!entry) return null;
-  const linked = await db.transaction(async (tx) => {
-    // Same identity key link confirmation and authorization use.
-    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`chat-identity:${endpoint.companyId}:${principal.id}`}, 0))`);
-    const [existing] = await tx
-      .select({ status: chatIdentityLinks.status, userId: chatIdentityLinks.paperclipUserId })
-      .from(chatIdentityLinks)
-      .where(and(eq(chatIdentityLinks.endpointId, endpoint.id), eq(chatIdentityLinks.principalId, principal.id)))
-      .for("update");
-    if (existing?.status === "linked") return existing.userId;
-    if (existing?.status === "revoked") return null;
-    if (!(await activeMember(tx, endpoint.companyId, [entry.paperclipUserId])).has(entry.paperclipUserId)) return null;
-    const [elsewhere] = await tx
-      .select({ id: chatIdentityLinks.id })
-      .from(chatIdentityLinks)
-      .where(
-        and(
-          eq(chatIdentityLinks.companyId, endpoint.companyId),
-          eq(chatIdentityLinks.principalId, principal.id),
-          eq(chatIdentityLinks.status, "linked"),
-          ne(chatIdentityLinks.paperclipUserId, entry.paperclipUserId),
-        ),
-      )
-      .limit(1);
-    if (elsewhere) return null;
-    const now = new Date();
-    await notifyChatCompanyAuthorityChange(tx, { companyId: endpoint.companyId });
-    await tx
-      .insert(chatIdentityLinks)
-      .values({
-        companyId: endpoint.companyId,
-        endpointId: endpoint.id,
-        principalId: principal.id,
-        paperclipUserId: entry.paperclipUserId,
-        status: "linked",
-        confirmedAt: now,
-      })
-      .onConflictDoUpdate({
-        target: [chatIdentityLinks.endpointId, chatIdentityLinks.principalId],
-        set: { paperclipUserId: entry.paperclipUserId, status: "linked", confirmationTokenHash: null, expiresAt: null, confirmedAt: now, updatedAt: now },
-      });
-    return entry.paperclipUserId;
-  });
-  if (linked === entry.paperclipUserId) {
-    await logActivity(db as Db, {
-      companyId: endpoint.companyId,
-      actorType: "system",
-      actorId: "whatsapp_known_people",
-      action: "chat_identity_link.preapproved",
-      entityType: "tool_connection",
-      entityId: endpoint.connectionId,
-      details: { endpointId: endpoint.id, principalId: principal.id, paperclipUserId: entry.paperclipUserId, source: "whatsapp_known_people" },
-    }).catch(() => undefined);
-  }
-  return linked;
+  const matchedBy = entry.phone && entry.phone === principal.externalId ? "phone" : "username";
+  return linkPreapprovedPerson(db, endpoint, principal, entry.paperclipUserId, { source: "whatsapp_known_people", matchedBy });
 }
 
 export function createWhatsAppKnownPeople(db: Db, options: {
   endpointRecord: (endpointId: string) => Promise<EndpointRecord | null>;
-  /** Hand the numbers to the sidecar so hidden-id senders resolve to them; best effort. */
-  syncPhones?: (accountId: string, phones: string[]) => Promise<unknown>;
+  /**
+   * Hand the numbers and usernames to the sidecar so hidden-id senders resolve
+   * to them, and turn on group delivery (client groups); best effort.
+   */
+  syncPhones?: (accountId: string, phones: string[], extra: { usernames: string[]; groups: boolean }) => Promise<unknown>;
 }) {
   /** Best effort: a channel that is not linked yet syncs when it links. */
   async function sync(endpoint: { publicId: string }, people: WhatsAppKnownPerson[]) {
     if (!options.syncPhones) return false;
     try {
-      await options.syncPhones(endpoint.publicId, people.map((p) => p.phone));
+      await options.syncPhones(
+        endpoint.publicId,
+        people.flatMap((p) => (p.phone ? [p.phone] : [])),
+        { usernames: people.flatMap((p) => (p.username ? [p.username] : [])), groups: true },
+      );
       return true;
     } catch {
       return false;
@@ -183,15 +152,15 @@ export function createWhatsAppKnownPeople(db: Db, options: {
   }
 
   /** Replace the list. Every user must be an active, non-viewer member of the channel's company. */
-  async function replace(endpointId: string, input: { people: Array<{ phone: string; paperclipUserId: string }> }, actorUserId: string | null) {
+  async function replace(endpointId: string, input: { people: Array<{ phone?: string; username?: string; paperclipUserId: string }> }, actorUserId: string | null) {
     const endpoint = await whatsAppEndpoint(endpointId);
     const people = normalizeWhatsAppKnownPeople(input.people);
-    const members = await activeMember(db, endpoint.companyId, [...new Set(people.map((p) => p.paperclipUserId))]);
+    const members = await activeNonViewerMembers(db, endpoint.companyId, [...new Set(people.map((p) => p.paperclipUserId))]);
     const refused = people.filter((p) => !members.has(p.paperclipUserId));
     if (refused.length)
       throw unprocessable("Every pre-approved number must belong to an active member of this company", {
         code: "whatsapp_known_people_not_members",
-        phones: refused.map((p) => `+${p.phone}`),
+        phones: refused.map((p) => (p.phone ? `+${p.phone}` : `@${p.username}`)),
       });
     await db.transaction(async (tx) => {
       const [current] = await tx.select({ setup: chatEndpoints.setup }).from(chatEndpoints).where(eq(chatEndpoints.id, endpoint.id)).for("update");

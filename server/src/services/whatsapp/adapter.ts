@@ -19,8 +19,10 @@ import {
 } from "chat";
 import { MAX_ATTACHMENT_BYTES } from "../../attachment-types.js";
 import type { WhatsAppSidecarConfig } from "./config.js";
+import { parseClientGroupCommand } from "../chat-channels/client-groups/core.js";
 import {
   WhatsAppEventError,
+  isWhatsAppGroupJid,
   markdownToWhatsApp,
   parseWhatsAppInboundEvent,
   parseWhatsAppThreadId,
@@ -63,6 +65,13 @@ export interface WhatsAppAdapterIdentity {
 /** Typing is refreshed while a run works, but never longer than this. */
 export const WHATSAPP_TYPING_REFRESH_MS = 10_000;
 export const WHATSAPP_TYPING_MAX_MS = 10 * 60_000;
+/** A reply in a group quotes the asker's latest message when it is this recent. */
+export const WHATSAPP_GROUP_QUOTE_MAX_AGE_MS = 30 * 60_000;
+
+/** The chat a WhatsApp event belongs to: the group for a group message, else the sender's one-to-one chat. */
+function chatJidOf(event: WhatsAppInboundEvent): string {
+  return event.chatType === "group" && event.groupJid ? event.groupJid : event.fromJid;
+}
 
 export interface WhatsAppPublishResult {
   id: string;
@@ -112,7 +121,7 @@ function json(status: number, body: unknown): Response {
 /**
  * WhatsApp through the Paperclip sidecar. Inbound events arrive as signed
  * webhooks on the normal chat-webhook route; outbound sends go to the sidecar,
- * which holds the linked-device socket. Direct messages only.
+ * which holds the linked-device socket. One-to-one chats and (phase 4) groups.
  */
 export class WhatsAppChatAdapter implements Adapter<WhatsAppThread, WhatsAppInboundEvent> {
   readonly name = "whatsapp";
@@ -120,6 +129,9 @@ export class WhatsAppChatAdapter implements Adapter<WhatsAppThread, WhatsAppInbo
   readonly botUserId: string;
   private chat: ChatInstance | null = null;
   private readonly typing = new Map<string, { timer: ReturnType<typeof setTimeout>; startedAt: number }>();
+  /** Group thread -> latest inbound message (quoted by the next reply) and subject. */
+  private readonly groupLatest = new Map<string, { messageId: string; at: number }>();
+  private readonly groupSubjects = new Map<string, string>();
   /**
    * Set by the endpoint runtime: whether a card's interaction is still
    * pending. A reply to a card already answered elsewhere stays a message.
@@ -165,19 +177,21 @@ export class WhatsAppChatAdapter implements Adapter<WhatsAppThread, WhatsAppInbo
   }
 
   isDM(id: string): boolean {
-    this.decodeThreadId(id);
-    return true;
+    const { jid } = this.decodeThreadId(id);
+    return !isWhatsAppGroupJid(jid);
   }
 
   async fetchThread(id: string): Promise<ThreadInfo> {
     const { jid } = this.decodeThreadId(id);
+    if (isWhatsAppGroupJid(jid))
+      return { id, channelId: id, channelName: this.groupSubjects.get(id) ?? "WhatsApp group", isDM: false, metadata: { jid } };
     const number = jid.endsWith("@s.whatsapp.net") ? `+${jid.split("@")[0]}` : "WhatsApp contact";
     return { id, channelId: id, channelName: number, isDM: true, metadata: { jid } };
   }
 
   async fetchChannelInfo(id: string) {
     const info = await this.fetchThread(id);
-    return { id, name: info.channelName, isDM: true, metadata: info.metadata };
+    return { id, name: info.channelName, isDM: info.isDM, metadata: info.metadata };
   }
 
   /** WhatsApp linked devices keep no fetchable history for Paperclip. */
@@ -207,12 +221,18 @@ export class WhatsAppChatAdapter implements Adapter<WhatsAppThread, WhatsAppInbo
 
   private author(raw: WhatsAppInboundEvent): Author {
     const userId = whatsAppExternalPrincipalId(raw);
-    const handle = raw.fromPhone ? `+${raw.fromPhone}` : userId;
+    const handle = raw.fromPhone ? `+${raw.fromPhone}` : raw.fromUsername ? `@${raw.fromUsername}` : userId;
     return { userId, userName: handle, fullName: raw.pushName?.trim() || handle, isBot: false, isMe: false };
   }
 
   parseMessage(raw: WhatsAppInboundEvent): Message<WhatsAppInboundEvent> {
-    const threadId = this.encodeThreadId({ accountId: this.identity.accountId, jid: raw.fromJid });
+    const threadId = this.encodeThreadId({ accountId: this.identity.accountId, jid: chatJidOf(raw) });
+    const group = raw.chatType === "group";
+    if (group) {
+      this.groupLatest.set(threadId, { messageId: raw.messageId, at: this.now() });
+      if (raw.groupSubject) this.groupSubjects.set(threadId, raw.groupSubject);
+      for (const map of [this.groupLatest, this.groupSubjects]) while (map.size > 1000) map.delete(map.keys().next().value!);
+    }
     const locator = this.mediaLocator(raw);
     const attachments: Attachment[] =
       raw.media && locator
@@ -236,12 +256,16 @@ export class WhatsAppChatAdapter implements Adapter<WhatsAppThread, WhatsAppInbo
       attachments,
       author: this.author(raw),
       metadata: { dateSent: new Date(raw.timestamp), edited: false },
+      // In a group the bot is addressed by a mention, a reply to its message,
+      // or a /client command; a client group's customers are admitted by
+      // Paperclip without one. One-to-one chats are always addressed.
+      ...(group ? { isMention: raw.mentionsMe === true || parseClientGroupCommand(raw.text) !== null } : {}),
     });
   }
 
   /** The edited message as Paperclip knows it: the original id with the new text. */
   parseEdit(raw: WhatsAppInboundEvent): Message<WhatsAppInboundEvent> {
-    const threadId = this.encodeThreadId({ accountId: this.identity.accountId, jid: raw.fromJid });
+    const threadId = this.encodeThreadId({ accountId: this.identity.accountId, jid: chatJidOf(raw) });
     return new Message({
       id: raw.targetId!,
       threadId,
@@ -277,6 +301,9 @@ export class WhatsAppChatAdapter implements Adapter<WhatsAppThread, WhatsAppInbo
     };
     const expiresAt = new Date(record.expiresAt);
     for (const id of messageIds) await this.state.write(whatsAppPromptMessageKey(id), record, expiresAt);
+    // In a group only a quote of the prompt answers it: a bare number from
+    // anyone in the group must not be read as the owner's answer.
+    if (isWhatsAppGroupJid(jid)) return;
     const [user, server] = jid.split("@");
     const keys = whatsAppPromptRecipientKeys(server === "lid" ? { fromLid: user } : { fromPhone: user });
     for (const key of keys) await this.state.write(key, record, expiresAt);
@@ -289,8 +316,10 @@ export class WhatsAppChatAdapter implements Adapter<WhatsAppThread, WhatsAppInbo
       record && record.version === 1 && record.expiresAt > this.now() ? record : null;
     if (event.quotedId) {
       const quoted = usable(await this.state.read<WhatsAppPromptRecord>(whatsAppPromptMessageKey(event.quotedId)));
-      if (quoted) return { record: quoted, recipientKeys };
+      if (quoted && (event.chatType !== "group" || quoted.threadId === this.encodeThreadId({ accountId: this.identity.accountId, jid: chatJidOf(event) })))
+        return { record: quoted, recipientKeys: event.chatType === "group" ? [] : recipientKeys };
     }
+    if (event.chatType === "group") return null;
     for (const key of recipientKeys) {
       const latest = usable(await this.state.read<WhatsAppPromptRecord>(key));
       if (latest) return { record: latest, recipientKeys };
@@ -348,7 +377,7 @@ export class WhatsAppChatAdapter implements Adapter<WhatsAppThread, WhatsAppInbo
    */
   private async dispatchReaction(event: WhatsAppInboundEvent, options?: WebhookOptions): Promise<void> {
     if (!this.chat || !event.targetId) return;
-    const threadId = this.encodeThreadId({ accountId: this.identity.accountId, jid: event.fromJid });
+    const threadId = this.encodeThreadId({ accountId: this.identity.accountId, jid: chatJidOf(event) });
     let rawEmoji = event.emoji ?? "";
     const added = rawEmoji !== "";
     if (this.state) {
@@ -512,13 +541,19 @@ export class WhatsAppChatAdapter implements Adapter<WhatsAppThread, WhatsAppInbo
     message: { text: string; files?: FileUpload[]; replyTo?: string },
   ): Promise<WhatsAppPublishResult> {
     if (!/^[\x21-\x7e]{1,120}$/.test(publicationId)) throw new Error("Invalid publication identity");
-    const messageIds = await this.sendParts(threadId, `pub:${publicationId}`, message.text, message.files ?? [], message.replyTo);
+    const messageIds = await this.sendParts(threadId, `pub:${publicationId}`, message.text, message.files ?? [], message.replyTo ?? this.groupQuote(threadId));
     return { id: messageIds[messageIds.length - 1], threadId, raw: { messageIds }, text: message.text };
+  }
+
+  /** In a group, a reply quotes the latest message there so the asker sees it is for them. */
+  private groupQuote(threadId: string): string | undefined {
+    const latest = this.groupLatest.get(threadId);
+    return latest && this.now() - latest.at <= WHATSAPP_GROUP_QUOTE_MAX_AGE_MS ? latest.messageId : undefined;
   }
 
   /** Ad hoc sends (setup and control notices) outside the publication outbox. */
   async postMessage(threadId: string, message: AdapterPostableMessage): Promise<RawMessage<WhatsAppInboundEvent>> {
-    const messageIds = await this.sendParts(threadId, `adhoc:${randomUUID()}`, textOf(message), filesOf(message));
+    const messageIds = await this.sendParts(threadId, `adhoc:${randomUUID()}`, textOf(message), filesOf(message), this.groupQuote(threadId));
     return { id: messageIds[messageIds.length - 1], threadId, raw: undefined as unknown as WhatsAppInboundEvent };
   }
 

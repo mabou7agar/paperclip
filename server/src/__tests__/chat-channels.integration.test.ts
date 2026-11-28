@@ -1418,6 +1418,38 @@ describeEmbeddedPostgres("chat channel control-plane integration", () => {
     }
   });
 
+  it("introduces a client for a WhatsApp group, refreshes its guidance, and pre-approves Telegram people", async () => {
+    const fixture = await seedCompany();
+    const { service } = createService(new FakeChatSdkRuntime());
+    const endpoint = await service.create(fixture.companyId, { provider: "whatsapp", assignedAgentId: fixture.assignedAgentId, name: "WhatsApp" }, "owner-user");
+    const [group] = await db.insert(chatEndpointResources).values({
+      companyId: fixture.companyId, endpointId: endpoint.id, type: "group_chat", providerResourceId: "120363025246125486@g.us",
+      label: "Academy X support", availability: "available", enabled: false,
+    }).returning();
+    // A direct-message resource is never a client group.
+    await db.insert(chatEndpointResources).values({
+      companyId: fixture.companyId, endpointId: endpoint.id, type: "direct_message", providerResourceId: "dm", label: "DM", availability: "available", enabled: true,
+    });
+    expect((await service.chatClientGroups(endpoint.id)).groups.map((g) => g.resourceId)).toEqual([group!.id]);
+
+    const set = await service.setChatClientGroup(endpoint.id, group!.id, { client: { academyName: "Academy X", academyId: "42" } }, "owner-user");
+    expect(set.client).toMatchObject({ academyName: "Academy X", academyId: "42", introducedByUserId: "owner-user", source: "paperclip" });
+    const [stored] = await db.select().from(chatEndpointResources).where(eq(chatEndpointResources.id, group!.id));
+    expect(stored!.enabled).toBe(true);
+    expect(stored!.metadata).toMatchObject({ clientGroup: { academyName: "Academy X", academyId: "42" } });
+    const activity = await db.select().from(activityLog).where(and(eq(activityLog.companyId, fixture.companyId), eq(activityLog.action, "chat_client_group.set")));
+    expect(activity).toHaveLength(1);
+
+    const cleared = await service.setChatClientGroup(endpoint.id, group!.id, { client: null }, "owner-user");
+    expect(cleared.client).toBeNull();
+    const telegram = await service.create(fixture.companyId, { provider: "telegram", assignedAgentId: fixture.assignedAgentId, name: "Telegram" }, "owner-user");
+    const replaced = await service.replaceTelegramKnownPeople(telegram.id, { people: [{ username: "@Lead_Dev", paperclipUserId: "owner-user" }] }, "owner-user");
+    expect(replaced.people).toEqual([{ username: "lead_dev", paperclipUserId: "owner-user" }]);
+    expect((await service.telegramKnownPeople(telegram.id)).people).toEqual([{ username: "lead_dev", paperclipUserId: "owner-user" }]);
+    await expect(service.replaceTelegramKnownPeople(telegram.id, { people: [{ username: "outsider", paperclipUserId: "nobody-here" }] }, "owner-user"))
+      .rejects.toMatchObject({ status: 422 });
+  });
+
   it("retries a colliding company fixture prefix and creates a distinct complete fixture", async () => {
     const existing = await seedCompany();
     const [original] = await db.select().from(companies).where(eq(companies.id, existing.companyId));

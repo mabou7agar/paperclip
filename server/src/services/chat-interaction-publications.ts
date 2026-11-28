@@ -10,6 +10,7 @@ import type { Db } from "@paperclipai/db";
 import {
   chatActions,
   chatConversations,
+  chatEndpointResources,
   chatEndpoints,
   chatPublications,
   heartbeatRuns,
@@ -34,6 +35,7 @@ import {
 } from "./owner-card-push.js";
 import { logger } from "../middleware/logger.js";
 import { isLowTrustQuarantined } from "./source-trust.js";
+import { clientGroupClient, isClientGroupProvider } from "./chat-channels/client-groups/core.js";
 import {
   chatQuestionFormActionRecords,
   createChatQuestionFormDraft,
@@ -350,6 +352,25 @@ export async function enqueueIssueInteractionChatPublications(
     if (!whatsAppConversationReceivesCards(issue?.sourceTrust ?? null)) {
       for (let index = agentBindings.length - 1; index >= 0; index--)
         if (agentBindings[index].endpoint.provider === "whatsapp") agentBindings.splice(index, 1);
+    }
+  }
+  // A client group (WhatsApp or Telegram) never receives cards: the client's
+  // people read everything there, and cards carry internal decisions and links.
+  const groupResourceIds = agentBindings
+    .filter(({ endpoint, conversation }) => isClientGroupProvider(endpoint.provider) && !conversation.isDirectMessage && conversation.resourceId)
+    .map(({ conversation }) => conversation.resourceId!);
+  if (groupResourceIds.length) {
+    const clientGroups = new Set(
+      (await db
+        .select({ id: chatEndpointResources.id, type: chatEndpointResources.type, metadata: chatEndpointResources.metadata })
+        .from(chatEndpointResources)
+        .where(inArray(chatEndpointResources.id, groupResourceIds)))
+        .filter((row) => clientGroupClient(row) !== null)
+        .map((row) => row.id),
+    );
+    for (let index = agentBindings.length - 1; index >= 0; index--) {
+      const resourceId = agentBindings[index].conversation.resourceId;
+      if (resourceId && clientGroups.has(resourceId)) agentBindings.splice(index, 1);
     }
   }
   const ownerBindings = await ownerCardPushBindings(

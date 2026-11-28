@@ -29,6 +29,10 @@ function fixture(actor: Request["actor"]) {
     unlinkWhatsApp: vi.fn().mockResolvedValue({ state: "logged_out", endpointStatus: "attention" }),
     whatsAppKnownPeople: vi.fn().mockResolvedValue({ people: [{ phone: "4915550001", paperclipUserId: "user-1" }] }),
     replaceWhatsAppKnownPeople: vi.fn().mockImplementation(async (_id: string, body: { people: unknown[] }) => ({ people: body.people })),
+    telegramKnownPeople: vi.fn().mockResolvedValue({ people: [{ username: "lead_dev", paperclipUserId: "user-1" }] }),
+    replaceTelegramKnownPeople: vi.fn().mockImplementation(async (_id: string, body: { people: unknown[] }) => ({ people: body.people })),
+    chatClientGroups: vi.fn().mockResolvedValue({ groups: [] }),
+    setChatClientGroup: vi.fn().mockImplementation(async (_id: string, resourceId: string, body: { client: unknown }) => ({ resourceId, client: body.client })),
   };
   const app = express();
   app.use(express.json());
@@ -153,5 +157,58 @@ describe("WhatsApp pre-approved people routes", () => {
       expect(f.service.whatsAppKnownPeople).not.toHaveBeenCalled();
       expect(f.service.replaceWhatsAppKnownPeople).not.toHaveBeenCalled();
     }
+  });
+});
+
+describe("WhatsApp username pre-approval and Telegram/client-group routes", () => {
+  const RESOURCE_ID = "22222222-2222-4222-8222-222222222222";
+
+  it("accepts a username in place of a number and still rejects an entry with neither", async () => {
+    access.hasPermission.mockResolvedValue(true);
+    const f = fixture(manager);
+    const url = `/api/chat-endpoints/${ENDPOINT_ID}/whatsapp/known-people`;
+    await request(f.app).put(url).send({ people: [{ username: "@Lead.Dev", paperclipUserId: "user-1" }, { phone: "4915550001", username: "teacher_one", paperclipUserId: "user-2" }] }).expect(200);
+    await request(f.app).put(url).send({ people: [{ paperclipUserId: "user-1" }] }).expect(400);
+    await request(f.app).put(url).send({ people: [{ username: "a b", paperclipUserId: "user-1" }] }).expect(400);
+    expect(f.service.replaceWhatsAppKnownPeople).toHaveBeenCalledTimes(1);
+  });
+
+  it("lets a connection manager read and replace Telegram pre-approved people, validated, people only", async () => {
+    access.hasPermission.mockResolvedValue(true);
+    const url = `/api/chat-endpoints/${ENDPOINT_ID}/telegram/known-people`;
+    const f = fixture(manager);
+    const listed = await request(f.app).get(url).expect(200);
+    expect(listed.headers["cache-control"]).toBe("no-store");
+    const people = [{ username: "@Lead_Dev", paperclipUserId: "user-1" }, { telegramUserId: "4242", paperclipUserId: "user-2" }];
+    await request(f.app).put(url).send({ people }).expect(200);
+    expect(f.service.replaceTelegramKnownPeople).toHaveBeenCalledWith(ENDPOINT_ID, { people }, "manager");
+    await request(f.app).put(url).send({ people: [{ username: "ab", paperclipUserId: "u" }] }).expect(400);
+    await request(f.app).put(url).send({ people: [{ paperclipUserId: "u" }] }).expect(400);
+    const asAgent = fixture(agent);
+    await request(asAgent.app).get(url).expect(403);
+    await request(asAgent.app).put(url).send({ people: [] }).expect(403);
+    expect(asAgent.service.telegramKnownPeople).not.toHaveBeenCalled();
+  });
+
+  it("lists groups and sets or clears a group's client, validated, people only", async () => {
+    access.hasPermission.mockResolvedValue(true);
+    const f = fixture(manager);
+    await request(f.app).get(`/api/chat-endpoints/${ENDPOINT_ID}/client-groups`).expect(200);
+    const url = `/api/chat-endpoints/${ENDPOINT_ID}/client-groups/${RESOURCE_ID}`;
+    await request(f.app).put(url).send({ client: { academyName: "Academy X", academyId: "42" } }).expect(200);
+    expect(f.service.setChatClientGroup).toHaveBeenCalledWith(ENDPOINT_ID, RESOURCE_ID, { client: { academyName: "Academy X", academyId: "42" } }, "manager");
+    await request(f.app).put(url).send({ client: null }).expect(200);
+    await request(f.app).put(url).send({ client: { academyName: "A | B", academyId: "42" } }).expect(400);
+    await request(f.app).put(url).send({ client: { academyName: "Academy X", academyId: "4 2" } }).expect(400);
+    await request(f.app).put(url).send({}).expect(400);
+    expect(f.service.setChatClientGroup).toHaveBeenCalledTimes(2);
+    const asAgent = fixture(agent);
+    await request(asAgent.app).put(url).send({ client: null }).expect(403);
+    const asOutsider = fixture(outsider);
+    await request(asOutsider.app).get(`/api/chat-endpoints/${ENDPOINT_ID}/client-groups`).expect(404);
+    access.hasPermission.mockResolvedValue(false);
+    const denied = fixture(manager);
+    await request(denied.app).put(url).send({ client: null }).expect(403);
+    for (const g of [asAgent, asOutsider, denied]) expect(g.service.setChatClientGroup).not.toHaveBeenCalled();
   });
 });

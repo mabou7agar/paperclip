@@ -71,6 +71,18 @@ import { createPhotonSetupInspection } from "./chat-channels/imessage-photon/set
 import { createWhatsAppSetup } from "./chat-channels/whatsapp/setup.js";
 import { whatsAppSenderMetadata } from "./chat-channels/whatsapp/messages.js";
 import { createWhatsAppKnownPeople, linkWhatsAppKnownPerson } from "./chat-channels/whatsapp/known-people.js";
+import { createTelegramKnownPeople, linkTelegramKnownPerson, telegramSenderMetadata } from "./chat-channels/telegram/known-people.js";
+import {
+  CLIENT_GROUP_CUSTOMER_AUTHORITY,
+  answersClientGroups,
+  clientGroupForResource,
+  clientGroupSenderRows,
+  clientGroupTaskDescription,
+  clientGroupTaskTitle,
+  isClientGroupProvider,
+  parseClientGroupCommand,
+} from "./chat-channels/client-groups/core.js";
+import { applyClientGroupCommand, createChatClientGroups, rememberWhatsAppGroupSubject } from "./chat-channels/client-groups/service.js";
 import {
   WHATSAPP_CUSTOMER_AUTHORITY,
   customerRateLimitReached,
@@ -1772,18 +1784,30 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
         message.author,
         message.raw,
       );
-      // WhatsApp pre-approved people: a listed number is linked to its user in
-      // this inbound pass (a normal identity link), then handled as that user.
+      // Pre-approved people (WhatsApp number or username, Telegram username or
+      // user id): a listed sender is linked to its user in this inbound pass (a
+      // normal identity link), then handled as that user.
       if (
-        endpoint.provider === "whatsapp" &&
+        (endpoint.provider === "whatsapp" || endpoint.provider === "telegram") &&
         principalResolution.userId === null &&
         !principalResolution.linkedDenied &&
-        (await linkWhatsAppKnownPerson(db, endpoint, principalResolution.principal))
+        (endpoint.provider === "whatsapp"
+          ? await linkWhatsAppKnownPerson(db, endpoint, principalResolution.principal, message.raw)
+          : await linkTelegramKnownPerson(db, endpoint, principalResolution.principal, message.raw))
       ) {
         principalResolution = await ensurePrincipal(endpoint, message.author, message.raw);
       }
       const resourceAdmission = await admitMessageResource({ endpoint, thread, addressed, suppressSetupDestinationActivation, surfaceKind });
-      const { enabledResourceCount, resource } = resourceAdmission;
+      const { enabledResourceCount } = resourceAdmission;
+      let { resource } = resourceAdmission;
+      if (endpoint.provider === "whatsapp" && !thread.isDM)
+        resource = await rememberWhatsAppGroupSubject(db, resource, message.raw);
+      // Client groups (WhatsApp and Telegram): the client staff introduced for
+      // this group, and a /client command if this message is one.
+      const clientGroup = clientGroupForResource(endpoint, resource, thread.isDM);
+      const clientCommand = isClientGroupProvider(endpoint.provider) && !thread.isDM
+        ? parseClientGroupCommand(message.text)
+        : null;
       await db
         .update(chatDeliveries)
         .set({
@@ -1817,13 +1841,28 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
       const bypassesControlChronology = telegramControls?.bypassesControlChronology ?? controlCommand === "status";
       const endpointAllowed =
         endpoint.status === "verifying" || endpoint.status === "active";
+      // A linked team member's /client command may introduce a client in a
+      // group Paperclip has not enabled yet; introducing it enables the group.
+      const staffClientCommand = clientCommand !== null && principalResolution.userId !== null;
       const destinationAllowed = thread.isDM
         ? endpoint.allowDirectMessages
-        : nonDirectDestinationAllowed(endpoint, resource);
+        : nonDirectDestinationAllowed(endpoint, resource) || staffClientCommand;
+      // Unlinked people in a client group are that client's customers (when
+      // the channel answers client groups), even if the channel otherwise
+      // ignores unlinked people. In a WhatsApp group without a client they are
+      // ignored. Telegram groups keep the channel's unlinked-people switch.
+      const clientGroupCustomer =
+        clientGroup !== null &&
+        answersClientGroups(endpoint) &&
+        principalResolution.userId === null &&
+        !principalResolution.linkedDenied;
+      const guestEligible = clientGroupCustomer ||
+        (endpoint.provider === "whatsapp" && !thread.isDM ? false : endpoint.allowUnlinkedPeople);
       const guestSponsorAllowed =
         principalResolution.userId === null &&
         !principalResolution.linkedDenied &&
-        endpoint.allowUnlinkedPeople
+        guestEligible &&
+        clientCommand === null
           ? await sponsorAllowsGuest(endpoint)
           : false;
       // This is a second authoritative check, not a provider-name exemption.
@@ -1836,9 +1875,10 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
       const principalAllowed =
         !principalResolution.linkedDenied &&
         (principalResolution.userId !== null || guestSponsorAllowed || publicVoiceTaskAllowed);
-      // WhatsApp customers (unlinked senders on a "client" channel) get a
-      // per-sender message limit so a stranger cannot spend agent runs freely.
-      const whatsAppCustomer = endpoint.provider === "whatsapp" && principalResolution.userId === null && guestSponsorAllowed;
+      // WhatsApp customers (unlinked senders on a "client" channel) and client
+      // group customers get a per-sender message limit so a stranger cannot
+      // spend agent runs freely.
+      const whatsAppCustomer = (endpoint.provider === "whatsapp" || clientGroupCustomer) && principalResolution.userId === null && guestSponsorAllowed;
       const customerRateLimited = whatsAppCustomer && endpointAllowed && destinationAllowed &&
         customerRateLimitReached(
           await whatsAppCustomerMessagesInWindow(db, {
@@ -1849,7 +1889,9 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
           }),
           whatsAppCustomerRateLimit(endpoint.setup),
         );
-      const activationAllowed = addressed || existingConversation !== null;
+      // A client group's customers need not mention the bot: every request in
+      // that group is handled as the client's customer request.
+      const activationAllowed = addressed || existingConversation !== null || (clientGroupCustomer && guestSponsorAllowed);
       const allowed =
         endpointAllowed &&
         destinationAllowed &&
@@ -1912,9 +1954,11 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
             : principalResolution.linkedDenied
               ? "Linked Paperclip account is not currently permitted"
               : !principalAllowed
-                ? endpoint.allowUnlinkedPeople
-                  ? "Endpoint sponsor can no longer authorize external guests"
-                  : "External identity must be linked to a Paperclip account"
+                ? clientCommand !== null
+                  ? "Only linked team members can manage a client group"
+                  : guestEligible
+                    ? "Endpoint sponsor can no longer authorize external guests"
+                    : "External identity must be linked to a Paperclip account"
                 : customerRateLimited
                   ? "Customer message limit reached for this WhatsApp sender"
                   : "Message did not address the agent or an active task thread";
@@ -1992,7 +2036,9 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
         }
       }
 
-      if (guidanceCommand) {
+      // A /client command (only a linked team member reaches here) is answered
+      // like a guidance command: one reply in the group, no task or run.
+      if (guidanceCommand || (clientCommand && principalResolution.userId)) {
         const assignedAgentName =
           guidanceCommand === "start"
             ? await db
@@ -2006,7 +2052,13 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
                 )
                 .then((rows) => rows[0]?.name ?? "this agent")
             : null;
-        const responseText = telegramGuidanceResponse(guidanceCommand, endpoint.botUsername, assignedAgentName);
+        const responseText = clientCommand && principalResolution.userId
+          ? await applyClientGroupCommand(db, endpoint, resource, clientCommand, principalResolution.userId, {
+              senderIsGroupAdmin: endpoint.provider === "whatsapp" && message.raw && typeof message.raw === "object" && typeof (message.raw as { senderIsGroupAdmin?: unknown }).senderIsGroupAdmin === "boolean"
+                ? (message.raw as { senderIsGroupAdmin: boolean }).senderIsGroupAdmin
+                : undefined,
+            })
+          : telegramGuidanceResponse(guidanceCommand!, endpoint.botUsername, assignedAgentName);
         const publicationBinding =
           existingConversation && existingIssue
             ? { conversation: existingConversation, issue: existingIssue }
@@ -2229,11 +2281,12 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
           const issue = await issuesSvc.create(
             taskEndpoint.companyId,
             {
-              title: safeTitle(
+              // A client group's task names the academy so requests can be filtered per client.
+              title: clientGroupTaskTitle(safeTitle(
                 githubInboundTaskTitle(message.text, githubAutomatic, githubIssue),
                 `${PROVIDER_LABELS[taskEndpoint.provider]} conversation`,
-              ),
-              description: `Started from ${PROVIDER_LABELS[taskEndpoint.provider]}: ${resource.label}`,
+              ), clientGroup),
+              description: clientGroupTaskDescription(`Started from ${PROVIDER_LABELS[taskEndpoint.provider]}: ${resource.label}`, clientGroup),
               status: "todo",
               priority: "medium",
               assigneeAgentId: taskEndpoint.assignedAgentId,
@@ -2265,7 +2318,8 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
                 provider: taskEndpoint.provider,
                 isDirectMessage: thread.isDM,
                 communicationInstructions: taskEndpoint.communicationInstructions,
-                customer: taskEndpoint.provider === "whatsapp" && !taskUserId,
+                customer: (taskEndpoint.provider === "whatsapp" || clientGroup !== null) && !taskUserId,
+                clientGroup,
               }),
               state: "active",
               lastActivityAt: new Date(),
@@ -2358,6 +2412,8 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
                   rows: [
                     ...(endpoint.provider === "imessage-photon" ? photonReplyMetadata(message.raw) : []),
                     ...(endpoint.provider === "whatsapp" ? whatsAppSenderMetadata(message.raw) : []),
+                    ...(endpoint.provider === "telegram" ? telegramSenderMetadata(message.raw) : []),
+                    ...(clientGroup ? clientGroupSenderRows(clientGroup) : []),
                     {
                       type: "key_value",
                       label: "Name",
@@ -2377,11 +2433,13 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
                       label: "Authority",
                       value: taskUserId
                         ? "Linked Paperclip user"
-                        : endpoint.provider === "whatsapp"
-                          ? WHATSAPP_CUSTOMER_AUTHORITY
-                          : "Sponsored external guest (restricted)",
+                        : clientGroup
+                          ? CLIENT_GROUP_CUSTOMER_AUTHORITY
+                          : endpoint.provider === "whatsapp"
+                            ? WHATSAPP_CUSTOMER_AUTHORITY
+                            : "Sponsored external guest (restricted)",
                     },
-                    ...(endpoint.provider === "whatsapp" && !taskUserId ? whatsAppCustomerSenderRows() : []),
+                    ...((endpoint.provider === "whatsapp" || clientGroup) && !taskUserId ? whatsAppCustomerSenderRows() : []),
                     ...(await chatSenderMemberRows(taskTx, taskEndpoint.companyId, taskUserId)),
                   ],
                 },
@@ -2501,6 +2559,7 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
             tx,
             currentEndpoint,
             principalResolution.principal.id,
+            { resource: currentResource, isDirectMessage: thread.isDM },
           );
         const automaticContext = githubAutomatic?.context ?? githubIssue?.context;
         const automaticAdmission = automaticContext ? await githubAutomaticAdmission(tx, currentEndpoint, automaticContext) : null;
@@ -3510,8 +3569,10 @@ export function chatChannelService(db: Db, options: ChatChannelServiceOptions) {
   const whatsAppSetup = createWhatsAppSetup(db, { client: whatsAppClient, endpointRecord, invalidateRuntime });
   const whatsAppKnownPeople = createWhatsAppKnownPeople(db, {
     endpointRecord,
-    syncPhones: (accountId, phones) => whatsAppClient.setKnownPhones(accountId, phones),
+    syncPhones: (accountId, phones, extra) => whatsAppClient.setKnownPhones(accountId, phones, extra),
   });
+  const telegramKnownPeople = createTelegramKnownPeople(db, { endpointRecord });
+  const chatClientGroups = createChatClientGroups(db, { endpointRecord });
   async function whatsAppLinkStatus(endpointId: string, actorUserId?: string | null, managementContext?: ConnectionManagementContext) {
     return whatsAppSetup.linkStatus(endpointId, async (id, accountId) => {
       const configured = await configure(id, { action: "configure", credentials: { accountId } }, actorUserId ?? undefined, managementContext);
@@ -3647,6 +3708,10 @@ return {
     unlinkWhatsApp: whatsAppSetup.unlink,
     whatsAppKnownPeople: whatsAppKnownPeople.list,
     replaceWhatsAppKnownPeople: whatsAppKnownPeople.replace,
+    telegramKnownPeople: telegramKnownPeople.list,
+    replaceTelegramKnownPeople: telegramKnownPeople.replace,
+    chatClientGroups: chatClientGroups.list,
+    setChatClientGroup: chatClientGroups.set,
     test,
     finishSlackSetup: (endpointId: string, userId: string, managementContext?: ConnectionManagementContext) => test(endpointId, { optionalSlackTestForUser: userId }, managementContext),
     setupTestStatus,

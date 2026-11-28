@@ -20,6 +20,8 @@ import {
   inspectPhotonProjectSchema,
   whatsAppLinkSchema,
   whatsAppKnownPeopleSchema,
+  telegramKnownPeopleSchema,
+  setChatClientGroupSchema,
   confirmChatIdentityLinkSchema,
   createChatEndpointSchema,
   createChatIdentityLinkIntentSchema,
@@ -474,6 +476,33 @@ export function chatChannelRoutes(db: Db, options: ChatChannelRouteOptions) {
     if (!(await assertEndpointManagementAccess(req, res))) return;
     res.set("Cache-Control", "no-store");
     res.json(await service.replaceWhatsAppKnownPeople(endpointId(req), req.body, actorUserId(req) ?? null));
+  });
+
+  // Pre-approved Telegram people (username and/or user id): people only, like WhatsApp's.
+  router.get("/chat-endpoints/:endpointId/telegram/known-people", whatsAppPeopleOnly, managementGuard("connections:configure", "GET /chat-endpoints/:endpointId/telegram/known-people"), async (req, res) => {
+    if (!(await assertEndpointManagementAccess(req, res))) return;
+    res.set("Cache-Control", "no-store");
+    res.json(await service.telegramKnownPeople(endpointId(req)));
+  });
+
+  router.put("/chat-endpoints/:endpointId/telegram/known-people", whatsAppPeopleOnly, managementGuard("connections:configure", "PUT /chat-endpoints/:endpointId/telegram/known-people"), validate(telegramKnownPeopleSchema), async (req, res) => {
+    if (!(await assertEndpointManagementAccess(req, res))) return;
+    res.set("Cache-Control", "no-store");
+    res.json(await service.replaceTelegramKnownPeople(endpointId(req), req.body, actorUserId(req) ?? null));
+  });
+
+  // Client groups (WhatsApp and Telegram): list a channel's groups and set or
+  // clear the client (academy) of one. People only.
+  router.get("/chat-endpoints/:endpointId/client-groups", whatsAppPeopleOnly, managementGuard("connections:configure", "GET /chat-endpoints/:endpointId/client-groups"), async (req, res) => {
+    if (!(await assertEndpointManagementAccess(req, res))) return;
+    res.set("Cache-Control", "no-store");
+    res.json(await service.chatClientGroups(endpointId(req)));
+  });
+
+  router.put("/chat-endpoints/:endpointId/client-groups/:resourceId", whatsAppPeopleOnly, managementGuard("connections:configure", "PUT /chat-endpoints/:endpointId/client-groups/:resourceId"), validate(setChatClientGroupSchema), async (req, res) => {
+    if (!(await assertEndpointManagementAccess(req, res))) return;
+    res.set("Cache-Control", "no-store");
+    res.json(await service.setChatClientGroup(endpointId(req), String(req.params.resourceId), req.body, actorUserId(req) ?? null));
   });
 
   router.post(

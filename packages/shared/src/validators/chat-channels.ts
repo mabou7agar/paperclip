@@ -109,6 +109,7 @@ export const updateChatEndpointSchema = z
       messages: z.number().int().min(1).max(200),
       windowMinutes: z.number().int().min(1).max(1440),
     }).strict().optional(),
+    answerClientGroups: z.boolean().optional(),
   })
   .strict()
   .refine((value) => Object.keys(value).length > 0, {
@@ -132,12 +133,55 @@ export const whatsAppLinkSchema = z.union([
   z.object({ mode: z.literal("code"), phone: z.string().trim().min(7).max(32).regex(/^\+?[0-9 ()-]+$/) }).strict(),
 ]);
 
-/** WhatsApp pre-approved people: number (E.164 digits, optional "+") -> Paperclip user. */
+/**
+ * A WhatsApp username as entered: optional "@", letters, digits, "." and "_"
+ * (3-35 characters, at least one letter, no leading, trailing or repeated ".").
+ * Stored lowercase without "@".
+ */
+export const whatsAppUsernameSchema = z.string().trim()
+  .regex(/^@?(?=[A-Za-z0-9._]*[A-Za-z])(?!\.)(?!.*\.\.)[A-Za-z0-9._]{3,35}(?<!\.)$/, "Use 3-35 letters, digits, '.' or '_'");
+
+/**
+ * WhatsApp pre-approved people: number (E.164 digits, optional "+") and/or
+ * WhatsApp username -> Paperclip user. A person whose number WhatsApp hides
+ * behind a username can be pre-approved by the username alone.
+ */
 export const whatsAppKnownPeopleSchema = z.object({
   people: z.array(z.object({
-    phone: z.string().trim().regex(/^\+?\d{6,15}$/),
+    phone: z.string().trim().regex(/^\+?\d{6,15}$/).optional(),
+    username: whatsAppUsernameSchema.optional(),
     paperclipUserId: z.string().trim().min(1).max(128),
-  }).strict()).max(500),
+  }).strict().refine((entry) => Boolean(entry.phone || entry.username), {
+    message: "Each pre-approved person needs a number or a username",
+  })).max(500),
+}).strict();
+
+/** A Telegram username as entered: optional "@", 5-32 letters, digits or "_", starting with a letter. */
+export const telegramUsernameSchema = z.string().trim()
+  .regex(/^@?[A-Za-z][A-Za-z0-9_]{4,31}$/, "Use 5-32 letters, digits or '_', starting with a letter");
+
+/**
+ * Telegram pre-approved people: username and/or numeric user id -> Paperclip
+ * user. A username can change, so the first match also records the user id.
+ */
+export const telegramKnownPeopleSchema = z.object({
+  people: z.array(z.object({
+    username: telegramUsernameSchema.optional(),
+    telegramUserId: z.string().trim().regex(/^\d{1,20}$/).optional(),
+    paperclipUserId: z.string().trim().min(1).max(128),
+  }).strict().refine((entry) => Boolean(entry.username || entry.telegramUserId), {
+    message: "Each pre-approved person needs a username or a user id",
+  })).max(500),
+}).strict();
+
+/** The client (academy) of a WhatsApp or Telegram group, or null to clear it. */
+export const chatClientGroupClientSchema = z.object({
+  academyName: z.string().trim().min(1).max(200).refine((value) => !/[\r\n|]/.test(value), "One line, without '|'"),
+  academyId: z.string().trim().min(1).max(100).regex(/^[\w.:/#-]+$/, "Use letters, digits and - _ . : / #"),
+}).strict();
+
+export const setChatClientGroupSchema = z.object({
+  client: chatClientGroupClientSchema.nullable(),
 }).strict();
 
 export const configureChatEndpointSchema = z

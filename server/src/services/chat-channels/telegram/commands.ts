@@ -38,6 +38,7 @@ export function telegramGuidanceCommand(
     command === "status"
   )
     return null;
+  if (command === "client") return null; // client-group command, handled on its own
   if (command === "start") return "start";
   if (command === "task") return "task";
   return "unknown";
@@ -75,7 +76,9 @@ export function createTelegramCommands(options: TelegramCommandsOptions) {
         // group. /task@bot <request> is therefore the provider-native root
         // activation path; direct replies and later /task commands can
         // continue the same active group/topic task.
-        text: command === "/task" && text ? text : command,
+        // /client keeps its arguments: "/client <academy name> | <academy id>"
+        // introduces the group's client (see ../client-groups).
+        text: command === "/task" && text ? text : command === "/client" && text ? `/client ${text}` : command,
         formatted: { type: "root", children: [] },
         raw: event.event.raw,
         author: event.event.user,

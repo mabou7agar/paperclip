@@ -346,6 +346,8 @@ import {
   photonLineIdSchema,
   whatsAppLinkSchema,
   whatsAppKnownPeopleSchema,
+  telegramKnownPeopleSchema,
+  setChatClientGroupSchema,
   publishChatPublicationSchema,
   resolveChatActionSchema,
   resolveChatPublicationSchema,
@@ -2775,7 +2777,7 @@ registry.registerPath({
 });
 
 const whatsAppKnownPeopleResponseSchema = z.object({
-  people: z.array(z.object({ phone: z.string(), paperclipUserId: z.string() }).strict()),
+  people: z.array(z.object({ phone: z.string().optional(), username: z.string().optional(), paperclipUserId: z.string() }).strict()),
 }).strict();
 
 registry.registerPath({
@@ -2801,6 +2803,74 @@ registry.registerPath({
     "Requires connection-management access; people only. At most 500 entries; every user must be an active member of the company. The first message from a listed number links it to its user (a normal identity link) and is handled as that user. A link an admin removed is not recreated.",
   request: { params: z.object({ endpointId: z.string().uuid() }), body: jsonBody(whatsAppKnownPeopleSchema) },
   responses: { 200: r.ok(whatsAppKnownPeopleResponseSchema), 400: r.badRequest, ...whatsAppErrorResponses },
+});
+
+const telegramKnownPeopleResponseSchema = z.object({
+  people: z.array(z.object({ username: z.string().optional(), telegramUserId: z.string().optional(), paperclipUserId: z.string() }).strict()),
+}).strict();
+
+registry.registerPath({
+  "x-paperclip-transport": "rest",
+  "x-paperclip-connection-management": "connections:configure",
+  method: "get",
+  path: "/api/chat-endpoints/{endpointId}/telegram/known-people",
+  tags: ["chat-channels"],
+  summary: "List the Telegram people pre-approved for this channel",
+  description: "Requires connection-management access; people only. Each entry maps a Telegram username and/or numeric user id to a Paperclip user.",
+  request: { params: z.object({ endpointId: z.string().uuid() }) },
+  responses: { 200: r.ok(telegramKnownPeopleResponseSchema), ...whatsAppErrorResponses },
+});
+
+registry.registerPath({
+  "x-paperclip-transport": "rest",
+  "x-paperclip-connection-management": "connections:configure",
+  method: "put",
+  path: "/api/chat-endpoints/{endpointId}/telegram/known-people",
+  tags: ["chat-channels"],
+  summary: "Replace the Telegram people pre-approved for this channel",
+  description:
+    "Requires connection-management access; people only. At most 500 entries; every user must be an active member of the company. The first message from a listed username or user id links it to its user and is handled as that user; a username match records the user id, which alone matches afterwards. A link an admin removed is not recreated.",
+  request: { params: z.object({ endpointId: z.string().uuid() }), body: jsonBody(telegramKnownPeopleSchema) },
+  responses: { 200: r.ok(telegramKnownPeopleResponseSchema), 400: r.badRequest, ...whatsAppErrorResponses },
+});
+
+const chatClientGroupSchema = z.object({
+  resourceId: z.string(),
+  providerResourceId: z.string(),
+  label: z.string(),
+  availability: z.enum(["available", "unavailable", "removed"]),
+  client: z.object({
+    academyName: z.string(),
+    academyId: z.string(),
+    introducedByUserId: z.string().nullable(),
+    introducedAt: z.string(),
+    source: z.enum(["group_command", "paperclip"]),
+  }).nullable(),
+});
+
+registry.registerPath({
+  "x-paperclip-transport": "rest",
+  "x-paperclip-connection-management": "connections:configure",
+  method: "get",
+  path: "/api/chat-endpoints/{endpointId}/client-groups",
+  tags: ["chat-channels"],
+  summary: "List a WhatsApp or Telegram channel's groups and their clients",
+  description: "Requires connection-management access; people only.",
+  request: { params: z.object({ endpointId: z.string().uuid() }) },
+  responses: { 200: r.ok(z.object({ groups: z.array(chatClientGroupSchema) })), ...whatsAppErrorResponses },
+});
+
+registry.registerPath({
+  "x-paperclip-transport": "rest",
+  "x-paperclip-connection-management": "connections:configure",
+  method: "put",
+  path: "/api/chat-endpoints/{endpointId}/client-groups/{resourceId}",
+  tags: ["chat-channels"],
+  summary: "Set or clear the client (academy) of a group",
+  description:
+    "Requires connection-management access; people only. With a client, people in the group who are not linked are answered as that client's customers (restricted, rate limited), and the group is enabled. null removes the client.",
+  request: { params: z.object({ endpointId: z.string().uuid(), resourceId: z.string().uuid() }), body: jsonBody(setChatClientGroupSchema) },
+  responses: { 200: r.ok(chatClientGroupSchema), 400: r.badRequest, ...whatsAppErrorResponses },
 });
 
 registry.registerPath({

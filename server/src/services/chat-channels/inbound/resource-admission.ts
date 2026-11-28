@@ -42,6 +42,8 @@ export function createMessageResourceAdmission(db: Db, options: { ensureResource
         // override an existing channel the operator explicitly disabled.
         endpoint.provider !== "slack" &&
         endpoint.provider !== "imessage-photon" &&
+        // WhatsApp groups are enabled by the channel's group switch or a client introduction.
+        endpoint.provider !== "whatsapp" &&
         !thread.isDM &&
         endpoint.status === "verifying" &&
         addressed &&
