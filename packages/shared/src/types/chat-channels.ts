@@ -257,6 +257,33 @@ export interface ChatEndpointSetupState {
   whatsAppUnknownSenders?: WhatsAppUnknownSenderPolicy;
   /** WhatsApp only: per-customer message limit before messages are ignored. */
   whatsAppCustomerRateLimit?: WhatsAppCustomerRateLimit;
+  /**
+   * WhatsApp and Telegram. In a group where staff introduced a client
+   * (academy), people who are not linked are answered as that client's
+   * customers, even when unknown senders are otherwise ignored. Default on;
+   * only an explicit false turns it off.
+   */
+  answerClientGroups?: boolean;
+}
+
+/** The client (academy) staff introduced for a WhatsApp or Telegram group. */
+export interface ChatClientGroupClient {
+  academyName: string;
+  academyId: string;
+  /** Paperclip user who introduced the client (in the group or in Paperclip). */
+  introducedByUserId: string | null;
+  introducedAt: string;
+  /** Where it was introduced: a /client command in the group, or Paperclip. */
+  source: "group_command" | "paperclip";
+}
+
+export interface ChatClientGroup {
+  resourceId: string;
+  /** Provider group id (WhatsApp group JID or Telegram chat id). */
+  providerResourceId: string;
+  label: string;
+  availability: ChatResourceAvailability;
+  client: ChatClientGroupClient | null;
 }
 
 export type WhatsAppUnknownSenderPolicy = "ignore" | "client";
@@ -570,6 +597,8 @@ export interface UpdateChatEndpointInput {
   whatsAppUnknownSenders?: WhatsAppUnknownSenderPolicy;
   /** WhatsApp only: per-customer message limit. */
   whatsAppCustomerRateLimit?: WhatsAppCustomerRateLimit;
+  /** WhatsApp and Telegram: answer unlinked people in client groups as that client's customers (default on). */
+  answerClientGroups?: boolean;
 }
 
 export interface ConfigureChatEndpointInput {
