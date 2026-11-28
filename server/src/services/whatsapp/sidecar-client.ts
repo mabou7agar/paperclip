@@ -173,14 +173,30 @@ export class WhatsAppSidecarClient {
   }
 
   /**
-   * Tell the sidecar which numbers are pre-approved, so it can resolve their
-   * hidden ids (WhatsApp may send a person's messages without the number).
+   * Tell the sidecar which numbers (and WhatsApp usernames) are pre-approved,
+   * so it can resolve their hidden ids (WhatsApp may send a person's messages
+   * without the number, or hide the number behind a username). `groups: true`
+   * asks the sidecar to deliver group messages too; an older sidecar ignores
+   * the extra fields and keeps delivering direct messages only.
    */
-  async setKnownPhones(accountId: string, phones: string[]): Promise<{ numbers: number; hiddenIds: number }> {
-    const response = await this.request("POST", accountPath(accountId, "/known-phones"), { phones });
+  async setKnownPhones(
+    accountId: string,
+    phones: string[],
+    extra?: { usernames?: string[]; groups?: boolean },
+  ): Promise<{ numbers: number; hiddenIds: number; usernameIds?: number; groups?: boolean }> {
+    const response = await this.request("POST", accountPath(accountId, "/known-phones"), {
+      phones,
+      ...(extra?.usernames !== undefined ? { usernames: extra.usernames } : {}),
+      ...(extra?.groups !== undefined ? { groups: extra.groups } : {}),
+    });
     if (!response.ok) return this.failure(response);
     const body = await this.json(response);
-    return { numbers: Number(body.numbers) || 0, hiddenIds: Number(body.hiddenIds) || 0 };
+    return {
+      numbers: Number(body.numbers) || 0,
+      hiddenIds: Number(body.hiddenIds) || 0,
+      ...(body.usernameIds !== undefined ? { usernameIds: Number(body.usernameIds) || 0 } : {}),
+      ...(typeof body.groups === "boolean" ? { groups: body.groups } : {}),
+    };
   }
 
   /** Close the socket but keep the login; the sidecar keeps it paused across restarts. */
